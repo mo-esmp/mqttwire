@@ -392,6 +392,65 @@ public class PublishCodecTests
     }
 
     /// <summary>
+    /// Proves a packet one byte over the largest remaining length, and a negative payload length, throw from
+    /// every sizing and writing method and write nothing.
+    /// </summary>
+    /// <param name="payloadLength">
+    /// The unusable payload length.
+    /// </param>
+    [Theory]
+    [InlineData(268_435_452)]
+    [InlineData(-1)]
+    public void Write_PayloadLengthOutOfRange_ThrowsWithoutWriting(int payloadLength)
+    {
+        // Arrange
+        byte[] topic = "t"u8.ToArray();
+        byte[] destination = new byte[16];
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() => PublishCodec.GetSize(new PublishFields { Topic = topic }, payloadLength));
+        Should.Throw<ArgumentException>(() => PublishCodec.GetHeaderSize(new PublishFields { Topic = topic }, payloadLength));
+        Should.Throw<ArgumentException>(() => PublishCodec.WriteHeader(destination, new PublishFields { Topic = topic }, payloadLength));
+        destination.ShouldAllBe(b => b == 0);
+    }
+
+    /// <summary>
+    /// Proves a QoS above 2 throws from every sizing and writing method and writes nothing.
+    /// </summary>
+    [Fact]
+    public void Write_QoSThree_ThrowsWithoutWriting()
+    {
+        // Arrange
+        byte[] topic = "t"u8.ToArray();
+        byte[] destination = new byte[16];
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() => PublishCodec.GetSize(new PublishFields { Topic = topic, QoS = (MqttQoS)3, PacketIdentifier = 1 }, 0));
+        Should.Throw<ArgumentException>(() => PublishCodec.GetHeaderSize(new PublishFields { Topic = topic, QoS = (MqttQoS)3, PacketIdentifier = 1 }, 0));
+        Should.Throw<ArgumentException>(() => PublishCodec.WriteHeader(destination, new PublishFields { Topic = topic, QoS = (MqttQoS)3, PacketIdentifier = 1 }, 0));
+        Should.Throw<ArgumentException>(() => PublishCodec.Write(destination, new PublishFields { Topic = topic, QoS = (MqttQoS)3, PacketIdentifier = 1 }, []));
+        destination.ShouldAllBe(b => b == 0);
+    }
+
+    /// <summary>
+    /// Proves the DUP flag at QoS 0 is decoded as it is set (plan decision 6).
+    /// </summary>
+    [Fact]
+    public void TryDecode_DupAtQoS0_SucceedsAndReportsDup()
+    {
+        // Arrange
+        byte[] packet = Hex.Parse("38 04 00 01 74 00");
+
+        // Act
+        MqttReasonCode result = PublishCodec.TryDecode(packet, PacketSource.Client, out PublishPacket publish);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        publish.Dup.ShouldBeTrue();
+        publish.QoS.ShouldBe(MqttQoS.AtMostOnce);
+    }
+
+    /// <summary>
     /// Proves a packet over the largest remaining length, and a negative payload length, cannot be sized.
     /// </summary>
     [Fact]

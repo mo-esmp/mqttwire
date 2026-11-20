@@ -1,5 +1,3 @@
-using System.Diagnostics.CodeAnalysis;
-
 namespace MqttWire.Codec;
 
 /// <summary>
@@ -362,18 +360,18 @@ internal static class PublishCodec
     {
         if (fields.QoS > MqttQoS.ExactlyOnce)
         {
-            ThrowInvalid("The QoS is not 0, 1 or 2.", "QoS");
+            CodecThrow.Invalid("The QoS is not 0, 1 or 2.", "QoS");
         }
 
         bool hasIdentifier = fields.QoS != MqttQoS.AtMostOnce;
         if (hasIdentifier == (fields.PacketIdentifier == 0))
         {
-            ThrowInvalid("The packet identifier must be 0 at QoS 0 and from 1 to 65,535 at QoS 1 and 2.", "PacketIdentifier");
+            CodecThrow.Invalid("The packet identifier must be 0 at QoS 0 and from 1 to 65,535 at QoS 1 and 2.", "PacketIdentifier");
         }
 
         if (payloadLength < 0)
         {
-            ThrowInvalid("The payload length is negative.", nameof(payloadLength));
+            CodecThrow.Invalid("The payload length is negative.", nameof(payloadLength));
         }
 
         // Throws when the topic is over 65,535 bytes.
@@ -385,31 +383,16 @@ internal static class PublishCodec
 
         if (!Topics.IsValidName(fields.Topic))
         {
-            ThrowInvalid("The topic is empty or holds a wildcard.", "Topic");
+            CodecThrow.Invalid("The topic is empty or holds a wildcard.", "Topic");
         }
 
         // Summed in a long: the payload alone may be as large as int.MaxValue.
         if (length + (long)payloadLength > VariableByteInteger.MaxValue)
         {
-            ThrowInvalid("The packet is longer than the largest remaining length.", nameof(payloadLength));
+            CodecThrow.Invalid("The packet is longer than the largest remaining length.", nameof(payloadLength));
         }
 
         variableHeaderLength = length;
         return length + payloadLength;
     }
-
-    /// <summary>
-    /// Throws for a caller bug; kept out of line so the success path stays small.
-    /// </summary>
-    /// <param name="message">
-    /// What is wrong.
-    /// </param>
-    /// <param name="paramName">
-    /// The argument or field at fault.
-    /// </param>
-    /// <exception cref="ArgumentException">
-    /// Always.
-    /// </exception>
-    [DoesNotReturn]
-    private static void ThrowInvalid(string message, string paramName) => throw new ArgumentException(message, paramName);
 }

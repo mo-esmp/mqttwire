@@ -429,4 +429,27 @@ public class PropertyBlockTests
 
         count.ShouldBe(2);
     }
+
+    /// <summary>
+    /// Proves Contains is true for repeatable properties, however often they repeat, and false for absent ones.
+    /// </summary>
+    [Fact]
+    public void Contains_RepeatableProperties_IsTrueForThemAndFalseForOthers()
+    {
+        // Arrange
+        byte[] bytes = Hex.Parse("0B 0B 01 0B 02 26 00 01 6B 00 01 76");
+        MqttReader reader = new(bytes);
+
+        // Act
+        MqttReasonCode result = PropertyBlock.TryRead(ref reader, PropertyContext.Publish, out PropertyBlock block);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        block.Contains(PropertyId.SubscriptionIdentifier).ShouldBeTrue();
+        block.Contains(PropertyId.UserProperty).ShouldBeTrue();
+        block.Contains(PropertyId.TopicAlias).ShouldBeFalse();
+        block.TryGetInteger(PropertyId.TopicAlias, out _).ShouldBeFalse();
+        block.TryGetBytes(PropertyId.ContentType, out _).ShouldBeFalse();
+        PropertyBlock.Empty.Contains(PropertyId.UserProperty).ShouldBeFalse();
+    }
 }

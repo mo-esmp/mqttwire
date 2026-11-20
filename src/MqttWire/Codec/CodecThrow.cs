@@ -16,4 +16,19 @@ internal static class CodecThrow
     [DoesNotReturn]
     public static void DestinationTooSmall()
         => throw new ArgumentException("The destination is smaller than the packet.", "destination");
+
+    /// <summary>
+    /// Throws because an encoder was given a value MQTT cannot carry.
+    /// </summary>
+    /// <param name="message">
+    /// What is wrong.
+    /// </param>
+    /// <param name="paramName">
+    /// The argument or field at fault.
+    /// </param>
+    /// <exception cref="ArgumentException">
+    /// Always.
+    /// </exception>
+    [DoesNotReturn]
+    public static void Invalid(string message, string paramName) => throw new ArgumentException(message, paramName);
 }

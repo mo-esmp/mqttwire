@@ -83,10 +83,21 @@ internal readonly ref struct PropertyBlock
     private readonly ReadOnlySpan<byte> _properties;
 
     /// <summary>
+    /// One bit per identifier (bit n for identifier n) set for every property the block holds, repeatable ones
+    /// included; it makes <see cref="Contains"/> a bit test.
+    /// </summary>
+    private readonly ulong _present;
+
+    /// <summary>
     /// Wraps an already validated span.
     /// </summary>
     /// <param name="properties">The validated properties, without the length prefix.</param>
-    private PropertyBlock(ReadOnlySpan<byte> properties) => _properties = properties;
+    /// <param name="present">The presence mask of the identifiers in <paramref name="properties"/>.</param>
+    private PropertyBlock(ReadOnlySpan<byte> properties, ulong present)
+    {
+        _properties = properties;
+        _present = present;
+    }
 
     /// <summary>
     /// A block with no properties; the same as <c>default</c>.
@@ -118,7 +129,7 @@ internal readonly ref struct PropertyBlock
         }
 
         MqttReader properties = new(span);
-        ulong seen = 0;
+        ulong present = 0;
         while (properties.Remaining > 0)
         {
             properties.TryReadByte(out byte id);
@@ -133,16 +144,13 @@ internal readonly ref struct PropertyBlock
                 return MqttReasonCode.MalformedPacket;
             }
 
-            if ((entry.Repeatable & context) == 0)
+            ulong bit = 1UL << id;
+            if ((entry.Repeatable & context) == 0 && (present & bit) != 0)
             {
-                ulong bit = 1UL << id;
-                if ((seen & bit) != 0)
-                {
-                    return MqttReasonCode.MalformedPacket;
-                }
-
-                seen |= bit;
+                return MqttReasonCode.MalformedPacket;
             }
+
+            present |= bit;
 
             if ((entry.Rule == NonZero && number == 0) || (entry.Rule == ZeroOrOne && number > 1))
             {
@@ -150,16 +158,17 @@ internal readonly ref struct PropertyBlock
             }
         }
 
-        block = new PropertyBlock(span);
+        block = new PropertyBlock(span, present);
         return MqttReasonCode.Success;
     }
 
     /// <summary>
-    /// Tells whether the block holds the property.
+    /// Tells whether the block holds the property, repeatable ones included. It is a bit test on the mask built
+    /// while the block was validated: it does not walk the block.
     /// </summary>
     /// <param name="id">The property to look for.</param>
     /// <returns><see langword="true"/> if the property is present.</returns>
-    public bool Contains(PropertyId id) => TryFind(id, out _, out _);
+    public bool Contains(PropertyId id) => (uint)id < TableLength && (_present & (1UL << (int)id)) != 0;
 
     /// <summary>
     /// Gets the first occurrence of a byte, two-byte, four-byte or variable byte integer property.
@@ -169,7 +178,7 @@ internal readonly ref struct PropertyBlock
     /// <returns><see langword="false"/> if the property is absent or is not an integer property.</returns>
     public bool TryGetInteger(PropertyId id, out uint value)
     {
-        if (TryFind(id, out value, out _) && s_entries[(int)id].Type is not (PropertyType.String or PropertyType.Binary or PropertyType.StringPair))
+        if (Contains(id) && TryFind(id, out value, out _) && s_entries[(int)id].Type is not (PropertyType.String or PropertyType.Binary or PropertyType.StringPair))
         {
             return true;
         }
@@ -186,7 +195,7 @@ internal readonly ref struct PropertyBlock
     /// <returns><see langword="false"/> if the property is absent or is not a string or binary property.</returns>
     public bool TryGetBytes(PropertyId id, out ReadOnlySpan<byte> value)
     {
-        if (TryFind(id, out _, out value) && s_entries[(int)id].Type is PropertyType.String or PropertyType.Binary)
+        if (Contains(id) && TryFind(id, out _, out value) && s_entries[(int)id].Type is PropertyType.String or PropertyType.Binary)
         {
             return true;
         }
