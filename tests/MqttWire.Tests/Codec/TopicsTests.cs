@@ -9,7 +9,7 @@ namespace MqttWire.Tests.Codec;
 public class TopicsTests
 {
     /// <summary>
-    /// Proves a topic name is valid when it is not empty and holds no wildcard.
+    /// Proves a topic name is valid when it is not empty and holds no wildcard and no U+0000.
     /// </summary>
     /// <param name="name">
     /// The topic name.
@@ -24,6 +24,7 @@ public class TopicsTests
     [InlineData("", false)]
     [InlineData("a/+", false)]
     [InlineData("#", false)]
+    [InlineData("a\0", false)]
     public void IsValidName_Name_IsValidWithoutWildcards(string name, bool valid)
     {
         // Arrange

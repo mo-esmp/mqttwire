@@ -393,7 +393,7 @@ public class PropertyBlockTests
         // Arrange
         MqttWireUserProperty[] userProperties = [new("k", "v"), new("ü", string.Empty)];
         int size = PropertyWriter.ByteSize + PropertyWriter.UInt16Size + PropertyWriter.UInt32Size
-            + PropertyWriter.StringSize("why") + PropertyWriter.UserPropertiesSize(userProperties);
+            + PropertyWriter.StringSize("why") + (int)PropertyWriter.UserPropertiesSize(userProperties);
         byte[] buffer = new byte[1 + size];
         MqttWriter writer = new(buffer);
         writer.WriteVariableByteInteger(size);

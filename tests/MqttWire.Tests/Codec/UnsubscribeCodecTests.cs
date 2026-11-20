@@ -250,6 +250,44 @@ public class UnsubscribeCodecTests
     }
 
     /// <summary>
+    /// Proves a filter the decoder answers with a malformed packet, ill-formed UTF-8 or one holding U+0000, throws
+    /// from the size and the writer and writes nothing.
+    /// </summary>
+    /// <param name="hex">
+    /// The filter's bytes.
+    /// </param>
+    [Theory]
+    [InlineData("C3")]
+    [InlineData("61 00")]
+    public void Write_FilterNotMqttUtf8_ThrowsWithoutWriting(string hex)
+    {
+        // Arrange
+        byte[] filter = Hex.Parse(hex);
+        byte[] destination = new byte[16];
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() => UnsubscribeCodec.GetSize(filter));
+        Should.Throw<ArgumentException>(() => UnsubscribeCodec.Write(destination, 1, filter));
+        destination.ShouldAllBe(b => b == 0);
+    }
+
+    /// <summary>
+    /// Proves the filter enumerator stops, rather than spinning, on a filter whose length runs past its bytes.
+    /// </summary>
+    [Fact]
+    public void MoveNext_FilterRunsPastTheEnd_ReturnsFalse()
+    {
+        // Arrange
+        TopicFilterEnumerator filters = new(Hex.Parse("00 05 61"));
+
+        // Act
+        bool moved = filters.MoveNext();
+
+        // Assert
+        moved.ShouldBeFalse();
+    }
+
+    /// <summary>
     /// Proves the UNSUBACK encoder refuses an identifier of 0, an empty list, a reason string it cannot carry and a
     /// destination that is too small, before writing anything.
     /// </summary>

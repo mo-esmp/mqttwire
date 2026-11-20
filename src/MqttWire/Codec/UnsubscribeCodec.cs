@@ -1,8 +1,8 @@
 namespace MqttWire.Codec;
 
 /// <summary>
-/// Walks the topic filters of a validated UNSUBSCRIBE in wire order. It has no error path: the packet was validated
-/// whole when it was decoded.
+/// Walks the topic filters of a validated UNSUBSCRIBE in wire order. The packet was validated whole when it was
+/// decoded; over bytes that were not, the walk stops at the first filter that cannot be read.
 /// </summary>
 internal ref struct TopicFilterEnumerator
 {
@@ -36,16 +36,16 @@ internal ref struct TopicFilterEnumerator
     /// Moves to the next filter.
     /// </summary>
     /// <returns>
-    /// <see langword="false"/> when there are no more filters.
+    /// <see langword="false"/> when there are no more filters, or when the next one runs past the end (only possible
+    /// over bytes the decoder did not validate).
     /// </returns>
     public bool MoveNext()
     {
-        if (_reader.Remaining == 0)
+        if (!_reader.TryReadBinary(out ReadOnlySpan<byte> filter))
         {
             return false;
         }
 
-        _reader.TryReadBinary(out ReadOnlySpan<byte> filter);
         Current = filter;
         return true;
     }
@@ -202,7 +202,7 @@ internal static class UnsubscribeCodec
     /// The size in bytes.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// The filter is over 65,535 bytes.
+    /// The filter is over 65,535 bytes, is not well-formed UTF-8 or contains U+0000.
     /// </exception>
     public static int GetSize(ReadOnlySpan<byte> topicFilter)
     {
@@ -211,9 +211,9 @@ internal static class UnsubscribeCodec
     }
 
     /// <summary>
-    /// Writes an UNSUBSCRIBE packet with one filter and no properties. The caller validates the filter (see
-    /// <see cref="Topics.IsValidFilter"/>): the encoder checks neither that it is a valid topic filter nor that its
-    /// bytes are well-formed UTF-8, since the decoder does not either.
+    /// Writes an UNSUBSCRIBE packet with one filter and no properties. The encoder refuses a filter its decoder
+    /// refuses: one that is not well-formed UTF-8 or holds U+0000. Like the decoder, it does not check that the
+    /// filter is a valid topic filter (see <see cref="Topics.IsValidFilter"/>), so an empty filter is written.
     /// </summary>
     /// <param name="destination">
     /// Where to write; it must hold at least <see cref="GetSize"/> bytes.
@@ -228,8 +228,8 @@ internal static class UnsubscribeCodec
     /// The number of bytes written, equal to <see cref="GetSize"/>.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// The packet identifier is 0, the filter is over 65,535 bytes, or the destination is too small. Everything is
-    /// checked before the first byte is written, so nothing is written.
+    /// The packet identifier is 0, the filter is over 65,535 bytes, is not well-formed UTF-8 or contains U+0000, or
+    /// the destination is too small. Everything is checked before the first byte is written, so nothing is written.
     /// </exception>
     public static int Write(Span<byte> destination, ushort packetIdentifier, ReadOnlySpan<byte> topicFilter)
     {
@@ -254,7 +254,8 @@ internal static class UnsubscribeCodec
     }
 
     /// <summary>
-    /// Measures the remaining length of an UNSUBSCRIBE with one filter, which also checks the filter's length.
+    /// Measures the remaining length of an UNSUBSCRIBE with one filter, which also checks the filter as the
+    /// decoder does.
     /// </summary>
     /// <param name="topicFilter">
     /// The topic filter as UTF-8.
@@ -263,8 +264,8 @@ internal static class UnsubscribeCodec
     /// The remaining length.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// The filter is over 65,535 bytes.
+    /// The filter is over 65,535 bytes, is not well-formed UTF-8 or contains U+0000.
     /// </exception>
     private static int GetRemainingLength(ReadOnlySpan<byte> topicFilter)
-        => IdentifierSize + NoPropertiesSize + FieldSize.Utf8String(topicFilter);
+        => IdentifierSize + NoPropertiesSize + FieldSize.CheckedUtf8String(topicFilter, nameof(topicFilter));
 }

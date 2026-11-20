@@ -329,4 +329,28 @@ public class ConnAckCodecTests
         Should.Throw<ArgumentException>(() => ConnAckCodec.Write(destination, new ConnAckFields { ReasonString = "r\0" }));
         destination.ShouldAllBe(b => b == 0);
     }
+
+    /// <summary>
+    /// Proves user properties too large for the largest remaining length throw from the size and the writer and
+    /// write nothing, both just past the limit and past the range of an <see cref="int"/>.
+    /// </summary>
+    /// <param name="count">
+    /// The number of user properties, each a 65,535-byte name and value.
+    /// </param>
+    [Theory]
+    [InlineData(2_100)]
+    [InlineData(16_400)]
+    public void Write_UserPropertiesPastTheLargestRemainingLength_ThrowsWithoutWriting(int count)
+    {
+        // Arrange
+        string text = new('a', 65_535);
+        MqttWireUserProperty[] userProperties = new MqttWireUserProperty[count];
+        Array.Fill(userProperties, new MqttWireUserProperty(text, text));
+        byte[] destination = new byte[64];
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() => ConnAckCodec.GetSize(new ConnAckFields { UserProperties = userProperties }));
+        Should.Throw<ArgumentException>(() => ConnAckCodec.Write(destination, new ConnAckFields { UserProperties = userProperties }));
+        destination.ShouldAllBe(b => b == 0);
+    }
 }

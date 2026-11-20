@@ -22,6 +22,11 @@ internal static class Topics
     private const byte Separator = (byte)'/';
 
     /// <summary>
+    /// U+0000, which no MQTT string may hold.
+    /// </summary>
+    private const byte Null = 0;
+
+    /// <summary>
     /// The start of a shared subscription filter.
     /// </summary>
     private static ReadOnlySpan<byte> SharePrefix => "$share/"u8;
@@ -33,10 +38,11 @@ internal static class Topics
     /// The topic name; its UTF-8 well-formedness is not checked here.
     /// </param>
     /// <returns>
-    /// <see langword="false"/> when the name is empty or contains <c>+</c> or <c>#</c>.
+    /// <see langword="false"/> when the name is empty or contains <c>+</c>, <c>#</c> or U+0000, all looked for in one
+    /// scan.
     /// </returns>
     public static bool IsValidName(ReadOnlySpan<byte> utf8)
-        => !utf8.IsEmpty && !utf8.ContainsAny(SingleLevel, MultiLevel);
+        => !utf8.IsEmpty && !utf8.ContainsAny(SingleLevel, MultiLevel, Null);
 
     /// <summary>
     /// Tells whether bytes are a valid topic filter, the filter of a SUBSCRIBE or UNSUBSCRIBE.

@@ -376,6 +376,28 @@ public class SubscribeCodecTests
     }
 
     /// <summary>
+    /// Proves a filter the decoder answers with a malformed packet, ill-formed UTF-8 or one holding U+0000, throws
+    /// from the size and the writer and writes nothing.
+    /// </summary>
+    /// <param name="hex">
+    /// The filter's bytes.
+    /// </param>
+    [Theory]
+    [InlineData("C3")]
+    [InlineData("61 00")]
+    public void Write_FilterNotMqttUtf8_ThrowsWithoutWriting(string hex)
+    {
+        // Arrange
+        byte[] filter = Hex.Parse(hex);
+        byte[] destination = new byte[16];
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() => SubscribeCodec.GetSize(filter));
+        Should.Throw<ArgumentException>(() => SubscribeCodec.Write(destination, 1, filter, MqttQoS.AtMostOnce));
+        destination.ShouldAllBe(b => b == 0);
+    }
+
+    /// <summary>
     /// Proves the SUBSCRIBE encoder carries an empty filter, as its decoder accepts one.
     /// </summary>
     [Fact]

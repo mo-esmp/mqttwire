@@ -392,6 +392,25 @@ public class PublishCodecTests
     }
 
     /// <summary>
+    /// Proves a topic holding U+0000, which the decoder answers with a malformed packet, throws from every sizing
+    /// and writing method and writes nothing.
+    /// </summary>
+    [Fact]
+    public void Write_TopicWithNullCharacter_ThrowsWithoutWriting()
+    {
+        // Arrange
+        byte[] topic = Hex.Parse("61 00");
+        byte[] destination = new byte[16];
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() => PublishCodec.GetSize(new PublishFields { Topic = topic }, 0));
+        Should.Throw<ArgumentException>(() => PublishCodec.GetHeaderSize(new PublishFields { Topic = topic }, 0));
+        Should.Throw<ArgumentException>(() => PublishCodec.WriteHeader(destination, new PublishFields { Topic = topic }, 0));
+        Should.Throw<ArgumentException>(() => PublishCodec.Write(destination, new PublishFields { Topic = topic }, []));
+        destination.ShouldAllBe(b => b == 0);
+    }
+
+    /// <summary>
     /// Proves a packet one byte over the largest remaining length, and a negative payload length, throw from
     /// every sizing and writing method and write nothing.
     /// </summary>

@@ -33,11 +33,11 @@ internal static class PropertyWriter
     /// Gets the combined size of user properties: per property the identifier, the name field and the value field.
     /// </summary>
     /// <param name="properties">The user properties.</param>
-    /// <returns>The size in bytes; 0 for none.</returns>
+    /// <returns>The size in bytes; 0 for none. Summed in a <see cref="long"/>, since many properties can pass <see cref="int.MaxValue"/>.</returns>
     /// <exception cref="ArgumentException">A name or value cannot be carried.</exception>
-    public static int UserPropertiesSize(ReadOnlySpan<MqttWireUserProperty> properties)
+    public static long UserPropertiesSize(ReadOnlySpan<MqttWireUserProperty> properties)
     {
-        int size = 0;
+        long size = 0;
         foreach (ref readonly MqttWireUserProperty property in properties)
         {
             size += 1 + FieldSize.Utf8String(property.Name) + FieldSize.Utf8String(property.Value);

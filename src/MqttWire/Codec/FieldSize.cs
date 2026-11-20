@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Unicode;
 
 namespace MqttWire.Codec;
 
@@ -69,6 +70,37 @@ internal static class FieldSize
     /// There are more than 65,535 bytes.
     /// </exception>
     public static int Utf8String(ReadOnlySpan<byte> utf8) => Binary(utf8.Length);
+
+    /// <summary>
+    /// Gets the encoded size of UTF-8 bytes after checking them as the decoder does: at most 65,535 bytes,
+    /// well-formed UTF-8 and free of U+0000. For the cold paths; the bytes are scanned twice.
+    /// </summary>
+    /// <param name="utf8">
+    /// The bytes to check and measure.
+    /// </param>
+    /// <param name="paramName">
+    /// The caller's argument that holds the bytes, named by the exception.
+    /// </param>
+    /// <returns>
+    /// The number of bytes the field takes.
+    /// </returns>
+    /// <exception cref="ArgumentException">
+    /// There are more than 65,535 bytes, they are not well-formed UTF-8, or they contain U+0000.
+    /// </exception>
+    public static int CheckedUtf8String(ReadOnlySpan<byte> utf8, string paramName)
+    {
+        if (utf8.Length > MaxDataLength)
+        {
+            CodecThrow.Invalid("The string is longer than 65,535 bytes.", paramName);
+        }
+
+        if (!Utf8.IsValid(utf8) || utf8.Contains((byte)0))
+        {
+            CodecThrow.Invalid("The string is not well-formed UTF-8 or contains U+0000, which MQTT does not allow.", paramName);
+        }
+
+        return LengthPrefix + utf8.Length;
+    }
 
     /// <summary>
     /// Gets the encoded size of binary data: the length prefix plus the data.

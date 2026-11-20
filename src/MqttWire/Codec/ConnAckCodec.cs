@@ -153,7 +153,8 @@ internal static class ConnAckCodec
     /// The size in bytes.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// A string cannot be carried: too long, or containing U+0000 or an unpaired surrogate.
+    /// A string cannot be carried: too long, or containing U+0000 or an unpaired surrogate; or the remaining length
+    /// would pass <see cref="VariableByteInteger.MaxValue"/>.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <see cref="ConnAckFields.ReceiveMaximum"/> is 0 or <see cref="ConnAckFields.MaximumQoS"/> is above 1.
@@ -179,8 +180,8 @@ internal static class ConnAckCodec
     /// The number of bytes written, equal to <see cref="GetSize"/>.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// A string cannot be carried, or the destination is too small. Everything is checked before the first byte is
-    /// written, so nothing is written.
+    /// A string cannot be carried, the remaining length would pass <see cref="VariableByteInteger.MaxValue"/>, or the
+    /// destination is too small. Everything is checked before the first byte is written, so nothing is written.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <see cref="ConnAckFields.ReceiveMaximum"/> is 0 or <see cref="ConnAckFields.MaximumQoS"/> is above 1. Nothing
@@ -250,7 +251,7 @@ internal static class ConnAckCodec
     /// The number of bytes after the fixed header.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// A string cannot be carried.
+    /// A string cannot be carried, or the remaining length would pass <see cref="VariableByteInteger.MaxValue"/>.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// The Receive Maximum is 0 or the Maximum QoS is above 1.
@@ -267,7 +268,8 @@ internal static class ConnAckCodec
             ArgumentOutOfRangeException.ThrowIfGreaterThan(maximumQoS, HighestMaximumQoS, "MaximumQoS");
         }
 
-        int length = PropertyWriter.UserPropertiesSize(fields.UserProperties);
+        // Summed in a long: many large user properties can pass int.MaxValue.
+        long length = PropertyWriter.UserPropertiesSize(fields.UserProperties);
         if (fields.SessionExpiryInterval is not null)
         {
             length += PropertyWriter.UInt32Size;
@@ -298,7 +300,14 @@ internal static class ConnAckCodec
             length += PropertyWriter.StringSize(fields.ReasonString);
         }
 
-        propertiesLength = length;
-        return FlagsAndReasonSize + VariableByteInteger.GetLength(length) + length;
+        // The properties alone past the largest value also make the remaining length pass it.
+        if (length > VariableByteInteger.MaxValue
+            || FlagsAndReasonSize + VariableByteInteger.GetLength((int)length) + length > VariableByteInteger.MaxValue)
+        {
+            CodecThrow.Invalid("The packet is longer than the largest remaining length.", "UserProperties");
+        }
+
+        propertiesLength = (int)length;
+        return FlagsAndReasonSize + VariableByteInteger.GetLength(propertiesLength) + propertiesLength;
     }
 }

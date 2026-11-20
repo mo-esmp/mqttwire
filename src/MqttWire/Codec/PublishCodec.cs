@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Text.Unicode;
+
 namespace MqttWire.Codec;
 
 /// <summary>
@@ -55,7 +58,8 @@ internal readonly ref struct PublishFields
 {
     /// <summary>
     /// The topic name as UTF-8, encoded once by the caller. The encoder checks that it is not empty, holds no
-    /// wildcard and fits 65,535 bytes; it does not check that the bytes are well-formed UTF-8 or free of U+0000.
+    /// wildcard and no U+0000 and fits 65,535 bytes. It does not check that the bytes are well-formed UTF-8: that is
+    /// the duty of whoever makes the topic bytes, met once per topic rather than once per packet written.
     /// </summary>
     public ReadOnlySpan<byte> Topic { get; init; }
 
@@ -202,7 +206,8 @@ internal static class PublishCodec
 
     /// <summary>
     /// Gets the size of everything before the payload: the fixed header, the topic, the packet identifier at QoS 1
-    /// and 2, and the property length.
+    /// and 2, and the property length. The topic must be well-formed UTF-8, which is not checked (see
+    /// <see cref="PublishFields.Topic"/>).
     /// </summary>
     /// <param name="fields">
     /// The fields to encode.
@@ -223,7 +228,8 @@ internal static class PublishCodec
     }
 
     /// <summary>
-    /// Gets the size of the whole PUBLISH packet: <see cref="GetHeaderSize"/> plus the payload.
+    /// Gets the size of the whole PUBLISH packet: <see cref="GetHeaderSize"/> plus the payload. The topic must be
+    /// well-formed UTF-8, which is not checked (see <see cref="PublishFields.Topic"/>).
     /// </summary>
     /// <param name="fields">
     /// The fields to encode.
@@ -246,6 +252,7 @@ internal static class PublishCodec
     /// <summary>
     /// Writes everything before the payload, for a server that writes a large payload from the host memory
     /// itself. The remaining length counts <paramref name="payloadLength"/> bytes that this call does not write.
+    /// The topic must be well-formed UTF-8, which is not checked (see <see cref="PublishFields.Topic"/>).
     /// </summary>
     /// <param name="destination">
     /// Where to write; it must hold at least <see cref="GetHeaderSize"/> bytes.
@@ -262,8 +269,8 @@ internal static class PublishCodec
     /// <exception cref="ArgumentException">
     /// A caller bug, checked before the first byte is written so nothing is written: the destination is too small,
     /// the QoS is not 0, 1 or 2, the identifier is not 0 at QoS 0 and from 1 to 65,535 at QoS 1 and 2, the topic is
-    /// empty, holds <c>+</c> or <c>#</c> or is over 65,535 bytes, the payload length is negative, or the remaining
-    /// length would pass <see cref="VariableByteInteger.MaxValue"/>.
+    /// empty, holds <c>+</c>, <c>#</c> or U+0000 or is over 65,535 bytes, the payload length is negative, or the
+    /// remaining length would pass <see cref="VariableByteInteger.MaxValue"/>.
     /// </exception>
     public static int WriteHeader(Span<byte> destination, in PublishFields fields, int payloadLength)
     {
@@ -277,7 +284,8 @@ internal static class PublishCodec
     }
 
     /// <summary>
-    /// Writes a whole PUBLISH packet: the header and a copy of the payload. No properties are written.
+    /// Writes a whole PUBLISH packet: the header and a copy of the payload. No properties are written. The topic
+    /// must be well-formed UTF-8, which is not checked (see <see cref="PublishFields.Topic"/>).
     /// </summary>
     /// <param name="destination">
     /// Where to write; it must hold at least <see cref="GetSize"/> bytes.
@@ -381,10 +389,13 @@ internal static class PublishCodec
             length += IdentifierSize;
         }
 
+        // One scan for the wildcards and U+0000; well-formed UTF-8 is the caller's duty, asserted in debug builds.
         if (!Topics.IsValidName(fields.Topic))
         {
-            CodecThrow.Invalid("The topic is empty or holds a wildcard.", "Topic");
+            CodecThrow.Invalid("The topic is empty or holds a wildcard or U+0000.", "Topic");
         }
+
+        Debug.Assert(Utf8.IsValid(fields.Topic), "The topic is not well-formed UTF-8.");
 
         // Summed in a long: the payload alone may be as large as int.MaxValue.
         if (length + (long)payloadLength > VariableByteInteger.MaxValue)
