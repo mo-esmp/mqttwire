@@ -26,7 +26,8 @@ internal readonly ref struct PublishFields
     public bool Retain { get; init; }
 
     /// <summary>
-    /// The DUP flag, written as given.
+    /// The DUP flag, written as given at QoS 1 and 2. It must be clear at QoS 0 (MQTT-3.3.1-2): the encoder
+    /// refuses it there, though the decoder accepts it on input.
     /// </summary>
     public bool Dup { get; init; }
 

@@ -30,7 +30,7 @@ The design leaves these open or is silent on them. Each is the plan's ruling; th
 3. **A wrong protocol name or level is `UnsupportedProtocolVersion`**, and nothing after the level is parsed (an MQTT 3.1.1 CONNECT has no properties).
 4. **A non-minimal variable byte integer is malformed** (MQTT 1.5.5 requires the minimum number of bytes).
 5. **A packet identifier of 0 is a protocol error** wherever an identifier is required.
-6. **DUP = 1 on a QoS 0 PUBLISH is accepted and passed on.** The standard says a sender must not set it, but names no error; refusing it gains nothing.
+6. **DUP = 1 on a QoS 0 PUBLISH is accepted and passed on.** The standard says a sender must not set it, but names no error; refusing it gains nothing. That is for input only: MqttWire as the sender must clear it (MQTT-3.3.1-2), so the encoder refuses `Dup` at QoS 0 as a caller bug.
 7. **A CONNACK, SUBACK or UNSUBACK without a property length is malformed.** MQTT 5 always has one there; the short forms exist only for PUBACK, PUBREC, PUBREL, PUBCOMP and DISCONNECT, and those are accepted.
 8. **Reason code values are not checked against the packet type.** A decoder hands on the byte; what an unexpected value means is decided by the caller.
 9. **Strings:** valid UTF-8 and no U+0000, else malformed. The other code points MQTT says "should not" be used are accepted.

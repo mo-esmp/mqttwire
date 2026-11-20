@@ -434,6 +434,58 @@ public sealed class PublishCodecTests
     }
 
     /// <summary>
+    /// Proves DUP at QoS 0, which a sender must clear (MQTT-3.3.1-2), throws from every sizing and writing method,
+    /// with and without retain, and writes nothing.
+    /// </summary>
+    /// <param name="retain">
+    /// Whether the retain flag is set as well.
+    /// </param>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Write_DupAtQoS0_ThrowsWithoutWriting(bool retain)
+    {
+        // Arrange
+        byte[] topic = "t"u8.ToArray();
+        byte[] destination = new byte[16];
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() => PublishCodec.GetSize(new PublishFields { Topic = topic, Dup = true, Retain = retain }, 0))
+            .ParamName.ShouldBe("Dup");
+        Should.Throw<ArgumentException>(() => PublishCodec.GetHeaderSize(new PublishFields { Topic = topic, Dup = true, Retain = retain }, 0));
+        Should.Throw<ArgumentException>(() => PublishCodec.WriteHeader(destination, new PublishFields { Topic = topic, Dup = true, Retain = retain }, 0));
+        Should.Throw<ArgumentException>(() => PublishCodec.Write(destination, new PublishFields { Topic = topic, Dup = true, Retain = retain }, []));
+        destination.ShouldAllBe(b => b == 0);
+    }
+
+    /// <summary>
+    /// Proves DUP is still written at QoS 1 and 2, where a sender may set it.
+    /// </summary>
+    /// <param name="qos">
+    /// The QoS of the packet.
+    /// </param>
+    /// <param name="firstByte">
+    /// The expected first byte: PUBLISH with DUP and the QoS.
+    /// </param>
+    [Theory]
+    [InlineData(MqttQoS.AtLeastOnce, 0x3A)]
+    [InlineData(MqttQoS.ExactlyOnce, 0x3C)]
+    public void Write_DupAtQoS1And2_WritesTheFlag(MqttQoS qos, byte firstByte)
+    {
+        // Arrange
+        byte[] topic = "t"u8.ToArray();
+        PublishFields fields = new() { Topic = topic, QoS = qos, Dup = true, PacketIdentifier = 1 };
+        byte[] destination = new byte[PublishCodec.GetSize(fields, 0)];
+
+        // Act
+        int written = PublishCodec.Write(destination, fields, []);
+
+        // Assert
+        written.ShouldBe(destination.Length);
+        destination[0].ShouldBe(firstByte);
+    }
+
+    /// <summary>
     /// Proves a QoS above 2 throws from every sizing and writing method and writes nothing.
     /// </summary>
     [Fact]

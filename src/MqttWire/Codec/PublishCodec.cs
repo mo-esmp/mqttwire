@@ -238,9 +238,9 @@ internal static class PublishCodec
     /// </returns>
     /// <exception cref="ArgumentException">
     /// A caller bug, checked before the first byte is written so nothing is written: the destination is too small,
-    /// the QoS is not 0, 1 or 2, the identifier is not 0 at QoS 0 and from 1 to 65,535 at QoS 1 and 2, the topic is
-    /// empty, holds <c>+</c>, <c>#</c> or U+0000 or is over 65,535 bytes, the payload length is negative, or the
-    /// remaining length would pass <see cref="VariableByteInteger.MaxValue"/>.
+    /// the QoS is not 0, 1 or 2, the identifier is not 0 at QoS 0 and from 1 to 65,535 at QoS 1 and 2, DUP is set at
+    /// QoS 0, the topic is empty, holds <c>+</c>, <c>#</c> or U+0000 or is over 65,535 bytes, the payload length is
+    /// negative, or the remaining length would pass <see cref="VariableByteInteger.MaxValue"/>.
     /// </exception>
     public static int WriteHeader(Span<byte> destination, in PublishFields fields, int payloadLength)
     {
@@ -345,6 +345,12 @@ internal static class PublishCodec
         if (hasIdentifier == (fields.PacketIdentifier == 0))
         {
             CodecThrow.Invalid("The packet identifier must be 0 at QoS 0 and from 1 to 65,535 at QoS 1 and 2.", "PacketIdentifier");
+        }
+
+        // A sender must clear DUP at QoS 0 (MQTT-3.3.1-2); the decoder accepts it on input, the encoder does not send it.
+        if (fields.Dup && !hasIdentifier)
+        {
+            CodecThrow.Invalid("DUP cannot be set at QoS 0.", "Dup");
         }
 
         if (payloadLength < 0)
