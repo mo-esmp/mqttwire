@@ -31,7 +31,7 @@ Follow `.editorconfig`; these supplement it:
 * Private static fields take `s_`. Expression-bodied members for one-liners; braces on every control statement; guard clauses and early return; a blank line after each property when a class has more than one.
 * Async: methods end in `Async`; `ValueTask` on hot paths; `ConfigureAwait(false)` in library code; `CancellationToken` is the last parameter; never `async void`, `.Result` or `.Wait()`.
 * Nullable reference types are on. No `!` without a comment saying why it is safe.
-* Public APIs must have XML documentation. Avoid one-line XML doc comments; use the multi-line form:
+* All code is documented: every type and every member has XML documentation, whatever its accessibility (public, internal, private) and whichever project it is in (`src`, `tests`, `bench`). A test's summary says in one sentence what it proves. Say what the signature cannot: what a `false` or an error result means, what throws and why, whether a failed call changes state. Avoid one-line XML doc comments; use the multi-line form:
 
   ```csharp
   /// <summary>
