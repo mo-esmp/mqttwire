@@ -29,7 +29,7 @@ public class CodecBenchmarks
     private const ushort PublishPacketIdentifier = 7;
 
     /// <summary>
-    /// A 26-byte CONNECT with a Receive Maximum property of 0x0000_0263 and a client id, user name and password.
+    /// A 26-byte CONNECT with a Receive Maximum property of 1,024 and a client id, user name and password.
     /// </summary>
     private static readonly byte[] s_connect =
     [

@@ -272,9 +272,9 @@ internal readonly struct PacketHeader
         return 1 + length;
     }
 
-    // MQTT 2.1.3: the flags of every type except PUBLISH are fixed; PUBLISH may not use QoS 3.
     /// <summary>
-    /// Checks the flags allowed for a packet type.
+    /// Checks the flags allowed for a packet type (MQTT 5, 2.1.3): the flags of every type except PUBLISH are fixed,
+    /// and PUBLISH may not use QoS 3.
     /// </summary>
     /// <param name="type">
     /// The type nibble.
