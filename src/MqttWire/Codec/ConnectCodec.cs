@@ -77,8 +77,10 @@ internal static class ConnectCodec
     /// <returns>
     /// <see cref="MqttReasonCode.Success"/>; <see cref="MqttReasonCode.UnsupportedProtocolVersion"/> for another
     /// protocol name or level; <see cref="MqttReasonCode.ProtocolError"/> for Authentication Data without an
-    /// Authentication Method or a forbidden property value; <see cref="MqttReasonCode.MalformedPacket"/> for any
-    /// other fault in the body, including bytes left over after the last field.
+    /// Authentication Method or a forbidden property value; <see cref="MqttReasonCode.TopicNameInvalid"/> for a Will
+    /// topic that is empty or holds a wildcard, in a packet with no other fault;
+    /// <see cref="MqttReasonCode.MalformedPacket"/> for any other fault in the body, including bytes left over after
+    /// the last field.
     /// </returns>
     /// <exception cref="ArgumentException">
     /// The buffer is not exactly one framed CONNECT packet (a caller bug, see <see cref="PacketHeader.ReadExact(ReadOnlySpan{byte}, PacketType)"/>).
@@ -160,7 +162,8 @@ internal static class ConnectCodec
     /// <returns>
     /// <see cref="MqttReasonCode.Success"/>; the error of <see cref="TryReadWill"/> for a faulty Will;
     /// <see cref="MqttReasonCode.MalformedPacket"/> for a field that cannot be read or bytes left over after the
-    /// last field.
+    /// last field; <see cref="MqttReasonCode.TopicNameInvalid"/> for a Will topic that is empty or holds a wildcard,
+    /// in a payload with no other fault.
     /// </returns>
     private static MqttReasonCode TryReadPayload(
         scoped ref MqttReader reader,
@@ -176,9 +179,10 @@ internal static class ConnectCodec
             return MqttReasonCode.MalformedPacket;
         }
 
+        bool isWillTopicValid = true;
         if ((flags & WillFlag) != 0)
         {
-            MqttReasonCode result = TryReadWill(ref reader);
+            MqttReasonCode result = TryReadWill(ref reader, out isWillTopicValid);
             if (result != MqttReasonCode.Success)
             {
                 return result;
@@ -200,7 +204,8 @@ internal static class ConnectCodec
             return MqttReasonCode.MalformedPacket;
         }
 
-        return MqttReasonCode.Success;
+        // Reported last, as PUBLISH does for its topic: a packet that is also malformed is malformed first.
+        return isWillTopicValid ? MqttReasonCode.Success : MqttReasonCode.TopicNameInvalid;
     }
 
     /// <summary>
@@ -211,23 +216,31 @@ internal static class ConnectCodec
     /// The reader, positioned at the Will properties; it moves past the Will payload. After a failure its position
     /// is unspecified.
     /// </param>
+    /// <param name="isTopicValid">
+    /// <see langword="false"/> when the Will topic was read but is not a topic name (MQTT 5, 4.7): it is empty or
+    /// holds a wildcard. The caller reports it after the rest of the payload; <see langword="true"/> otherwise,
+    /// also when the result is an error.
+    /// </param>
     /// <returns>
-    /// <see cref="MqttReasonCode.Success"/>; the error of <see cref="PropertyBlock.TryRead"/> for a faulty property
-    /// block; <see cref="MqttReasonCode.MalformedPacket"/> for a Will topic or payload that cannot be read.
+    /// <see cref="MqttReasonCode.Success"/>, also for a topic that is not a topic name; the error of
+    /// <see cref="PropertyBlock.TryRead"/> for a faulty property block; <see cref="MqttReasonCode.MalformedPacket"/>
+    /// for a Will topic or payload that cannot be read.
     /// </returns>
-    private static MqttReasonCode TryReadWill(scoped ref MqttReader reader)
+    private static MqttReasonCode TryReadWill(scoped ref MqttReader reader, out bool isTopicValid)
     {
+        isTopicValid = true;
         MqttReasonCode result = PropertyBlock.TryRead(ref reader, PropertyContext.Will, out _);
         if (result != MqttReasonCode.Success)
         {
             return result;
         }
 
-        if (!reader.TryReadUtf8String(out _) || !reader.TryReadBinary(out _))
+        if (!reader.TryReadUtf8String(out ReadOnlySpan<byte> topic) || !reader.TryReadBinary(out _))
         {
             return MqttReasonCode.MalformedPacket;
         }
 
+        isTopicValid = Topics.IsValidName(topic);
         return MqttReasonCode.Success;
     }
 

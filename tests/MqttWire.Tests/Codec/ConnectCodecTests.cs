@@ -215,6 +215,56 @@ public sealed class ConnectCodecTests
     }
 
     /// <summary>
+    /// Proves a Will topic that is not a topic name, empty or holding a wildcard, is refused as an invalid topic
+    /// name and leaves the output at its default.
+    /// </summary>
+    /// <param name="hex">
+    /// The packet with the invalid Will topic and no other fault.
+    /// </param>
+    [Theory]
+    [InlineData("10 14 00 04 4D 51 54 54 05 06 00 00 00 00 01 63 00 00 00 00 01 78")] // empty
+    [InlineData("10 15 00 04 4D 51 54 54 05 06 00 00 00 00 01 63 00 00 01 2B 00 01 78")] // "+"
+    [InlineData("10 15 00 04 4D 51 54 54 05 06 00 00 00 00 01 63 00 00 01 23 00 01 78")] // "#"
+    [InlineData("10 17 00 04 4D 51 54 54 05 06 00 00 00 00 01 63 00 00 03 61 2F 23 00 01 78")] // "a/#"
+    [InlineData("10 19 00 04 4D 51 54 54 05 06 00 00 00 00 01 63 00 00 05 61 2F 2B 2F 62 00 01 78")] // "a/+/b"
+    public void TryDecode_WillTopicEmptyOrWithWildcard_IsTopicNameInvalid(string hex)
+    {
+        // Arrange
+        byte[] packet = Hex.Parse(hex);
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out ConnectPacket connect);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.TopicNameInvalid);
+        connect.ClientId.IsEmpty.ShouldBeTrue();
+        connect.HasWill.ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// Proves a packet that is malformed after an invalid Will topic is reported as malformed, not as an invalid
+    /// topic name.
+    /// </summary>
+    /// <param name="hex">
+    /// The packet with the Will topic "+" and a later fault.
+    /// </param>
+    [Theory]
+    [InlineData("10 16 00 04 4D 51 54 54 05 06 00 00 00 00 01 63 00 00 01 2B 00 01 78 00")] // a left-over byte
+    [InlineData("10 15 00 04 4D 51 54 54 05 06 00 00 00 00 01 63 00 00 01 2B 00 02 78")] // Will payload cut
+    [InlineData("10 15 00 04 4D 51 54 54 05 86 00 00 00 00 01 63 00 00 01 2B 00 01 78")] // user name flagged but missing
+    public void TryDecode_InvalidWillTopicInAMalformedPacket_IsMalformed(string hex)
+    {
+        // Arrange
+        byte[] packet = Hex.Parse(hex);
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out _);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.MalformedPacket);
+    }
+
+    /// <summary>
     /// Proves another protocol name or version is reported as unsupported, before the connect flags are checked
     /// (plan decision 3).
     /// </summary>
