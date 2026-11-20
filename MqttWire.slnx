@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/bench/">
+    <Project Path="bench/MqttWire.Microbench/MqttWire.Microbench.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/MqttWire/MqttWire.csproj" />
   </Folder>
