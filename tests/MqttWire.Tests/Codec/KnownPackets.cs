@@ -25,4 +25,19 @@ internal static class KnownPackets
     /// CONNACK with success, a receive maximum of 256 and subscription identifiers not available.
     /// </summary>
     public static readonly byte[] ConnAck = Hex.Parse("20 08 00 00 05 21 01 00 29 00");
+
+    /// <summary>
+    /// PUBLISH at QoS 0 with topic "t" and an empty payload.
+    /// </summary>
+    public static readonly byte[] PublishQoS0 = Hex.Parse("30 04 00 01 74 00");
+
+    /// <summary>
+    /// PUBLISH at QoS 1 with topic "a/b", packet identifier 10 and payload "hi".
+    /// </summary>
+    public static readonly byte[] PublishQoS1 = Hex.Parse("32 0A 00 03 61 2F 62 00 0A 00 68 69");
+
+    /// <summary>
+    /// PUBLISH with DUP, QoS 2 and retain, topic "t", packet identifier 1 and payload "x".
+    /// </summary>
+    public static readonly byte[] PublishQoS2 = Hex.Parse("3D 07 00 01 74 00 01 00 78");
 }

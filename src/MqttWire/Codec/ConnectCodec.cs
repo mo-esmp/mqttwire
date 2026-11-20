@@ -1,5 +1,3 @@
-using System.Diagnostics.CodeAnalysis;
-
 namespace MqttWire.Codec;
 
 /// <summary>
@@ -306,7 +304,7 @@ internal static class ConnectCodec
         int size = PacketHeader.GetLength(remainingLength) + remainingLength;
         if (destination.Length < size)
         {
-            ThrowDestinationTooSmall();
+            CodecThrow.DestinationTooSmall();
         }
 
         int headerLength = PacketHeader.Write(destination, PacketType.Connect, 0, remainingLength);
@@ -400,14 +398,4 @@ internal static class ConnectCodec
 
         return (flags & WillFlag) != 0 || (flags & (WillQosMask | WillRetainFlag)) == 0;
     }
-
-    /// <summary>
-    /// Throws for <see cref="Write"/>; kept out of line so the success path stays small.
-    /// </summary>
-    /// <exception cref="ArgumentException">
-    /// Always.
-    /// </exception>
-    [DoesNotReturn]
-    private static void ThrowDestinationTooSmall()
-        => throw new ArgumentException("The destination is smaller than the packet.", "destination");
 }
