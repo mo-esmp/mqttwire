@@ -1,4 +1,5 @@
 ﻿using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
 
 namespace MqttWire.Codec;
 
@@ -140,6 +141,48 @@ internal readonly struct PacketHeader
             ? OperationStatus.Done
             : OperationStatus.NeedMoreData;
     }
+
+    /// <summary>
+    /// Reads the fixed header of a buffer that must hold exactly one whole packet of the expected type. Packet
+    /// codecs call this first: anything else is a bug in the caller, which framed the packet.
+    /// </summary>
+    /// <param name="packet">
+    /// The bytes of one framed packet: the fixed header and the remaining length bytes after it, nothing more.
+    /// </param>
+    /// <param name="expected">
+    /// The packet type the codec handles.
+    /// </param>
+    /// <returns>
+    /// The header; the body is <c>packet[header.HeaderLength..]</c>.
+    /// </returns>
+    /// <exception cref="ArgumentException">
+    /// The header is invalid or cut off, the type is not <paramref name="expected"/>, or the buffer is shorter or
+    /// longer than <see cref="TotalLength"/>.
+    /// </exception>
+    public static PacketHeader ReadExact(ReadOnlySpan<byte> packet, PacketType expected)
+    {
+        if (TryReadPacket(packet, out PacketHeader header) != OperationStatus.Done
+            || header.Type != expected
+            || packet.Length != header.TotalLength)
+        {
+            ThrowNotExactPacket(expected);
+        }
+
+        return header;
+    }
+
+    /// <summary>
+    /// Throws for <see cref="ReadExact"/>; kept out of line so the success path stays small enough to inline.
+    /// </summary>
+    /// <param name="expected">
+    /// The packet type that was expected.
+    /// </param>
+    /// <exception cref="ArgumentException">
+    /// Always.
+    /// </exception>
+    [DoesNotReturn]
+    private static void ThrowNotExactPacket(PacketType expected)
+        => throw new ArgumentException($"The buffer is not exactly one framed {expected} packet.", "packet");
 
     /// <summary>
     /// Gets the size of the fixed header for a remaining length.

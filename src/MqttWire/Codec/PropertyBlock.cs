@@ -109,7 +109,7 @@ internal readonly ref struct PropertyBlock
     /// past its end, an unknown property, one not allowed in the context, invalid UTF-8 or a repeated once-only property;
     /// <see cref="MqttReasonCode.ProtocolError"/> for a value the standard forbids. The first fault in byte order decides.
     /// </returns>
-    public static MqttReasonCode TryRead(ref MqttReader reader, PropertyContext context, out PropertyBlock block)
+    public static MqttReasonCode TryRead(scoped ref MqttReader reader, PropertyContext context, out PropertyBlock block)
     {
         block = default;
         if (!reader.TryReadVariableByteInteger(out int length) || !reader.TryReadBytes(length, out ReadOnlySpan<byte> span))

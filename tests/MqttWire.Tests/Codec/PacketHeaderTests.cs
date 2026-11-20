@@ -166,4 +166,44 @@ public class PacketHeaderTests
         // Act & Assert
         Should.Throw<ArgumentOutOfRangeException>(() => PacketHeader.Write(destination, PacketType.Publish, 0, VariableByteInteger.MaxValue + 1));
     }
+
+    /// <summary>
+    /// Proves exactly one packet of the expected type gives its header.
+    /// </summary>
+    [Fact]
+    public void ReadExact_OnePacketOfTheExpectedType_ReturnsItsHeader()
+    {
+        // Arrange
+        byte[] packet = Hex.Parse("20 03 00 00 00");
+
+        // Act
+        PacketHeader header = PacketHeader.ReadExact(packet, PacketType.ConnAck);
+
+        // Assert
+        header.Type.ShouldBe(PacketType.ConnAck);
+        header.HeaderLength.ShouldBe(2);
+        header.TotalLength.ShouldBe(5);
+    }
+
+    /// <summary>
+    /// Proves a packet of another type, a cut-off one, one with trailing bytes, an invalid header and an empty buffer throw.
+    /// </summary>
+    /// <param name="hex">
+    /// The bytes that are not exactly one CONNACK.
+    /// </param>
+    [Theory]
+    [InlineData("10 03 00 00 00")] // another type
+    [InlineData("20 03 00 00")] // body cut short
+    [InlineData("20 03 00 00 00 00")] // trailing byte
+    [InlineData("20 80")] // remaining length cut short
+    [InlineData("21 03 00 00 00")] // invalid flags
+    [InlineData("")] // nothing
+    public void ReadExact_NotExactlyOnePacketOfTheType_Throws(string hex)
+    {
+        // Arrange
+        byte[] packet = Hex.Parse(hex);
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() => PacketHeader.ReadExact(packet, PacketType.ConnAck));
+    }
 }

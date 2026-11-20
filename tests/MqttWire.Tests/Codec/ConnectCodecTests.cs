@@ -1,0 +1,356 @@
+using System.Text;
+using MQTTnet.Packets;
+using MqttWire.Codec;
+
+namespace MqttWire.Tests.Codec;
+
+/// <summary>
+/// Tests decoding and encoding the CONNECT packet, including a cross-check against MQTTnet.
+/// </summary>
+public class ConnectCodecTests
+{
+    /// <summary>
+    /// Proves the known CONNECT decodes to its fields and properties.
+    /// </summary>
+    [Fact]
+    public void TryDecode_KnownConnect_ReturnsItsFields()
+    {
+        // Arrange
+        byte[] packet = KnownPackets.Connect;
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out ConnectPacket connect);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        Encoding.UTF8.GetString(connect.ClientId).ShouldBe("c1");
+        connect.HasUserName.ShouldBeTrue();
+        Encoding.UTF8.GetString(connect.UserName).ShouldBe("u");
+        connect.HasPassword.ShouldBeTrue();
+        connect.Password.ToArray().ShouldBe(new byte[] { 0x70 });
+        connect.KeepAliveSeconds.ShouldBe((ushort)15);
+        connect.CleanStart.ShouldBeTrue();
+        connect.HasWill.ShouldBeFalse();
+        connect.Properties.TryGetInteger(PropertyId.ReceiveMaximum, out uint receiveMaximum).ShouldBeTrue();
+        receiveMaximum.ShouldBe(1024u);
+    }
+
+    /// <summary>
+    /// Proves the encoder writes the known CONNECT bytes and sizes them correctly.
+    /// </summary>
+    [Fact]
+    public void Write_KnownFields_WritesTheKnownConnect()
+    {
+        // Arrange
+        ConnectFields fields = new() { ClientId = "c1", UserName = "u", Password = [0x70], KeepAliveSeconds = 15, ReceiveMaximum = 1024 };
+        byte[] destination = new byte[64];
+
+        // Act
+        int size = ConnectCodec.GetSize(fields);
+        int written = ConnectCodec.Write(destination, fields);
+
+        // Assert
+        size.ShouldBe(26);
+        written.ShouldBe(26);
+        destination.AsSpan(0, written).ToArray().ShouldBe(KnownPackets.Connect);
+    }
+
+    /// <summary>
+    /// Proves a CONNECT with neither user name nor password reports neither.
+    /// </summary>
+    [Fact]
+    public void TryDecode_ConnectWithoutUserNameOrPassword_ReportsNeither()
+    {
+        // Arrange
+        byte[] packet = KnownPackets.ConnectMinimal;
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out ConnectPacket connect);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        connect.HasUserName.ShouldBeFalse();
+        connect.HasPassword.ShouldBeFalse();
+        connect.UserName.IsEmpty.ShouldBeTrue();
+        connect.Password.IsEmpty.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// Proves the encoder leaves out the user name and the password, and their flags, when they are null.
+    /// </summary>
+    [Fact]
+    public void Write_NoUserNameOrPassword_WritesNeitherFlagNorField()
+    {
+        // Arrange
+        ConnectFields fields = new() { ClientId = "c", KeepAliveSeconds = 0, ReceiveMaximum = 1024 };
+        byte[] destination = new byte[64];
+
+        // Act
+        int written = ConnectCodec.Write(destination, fields);
+        MqttReasonCode result = ConnectCodec.TryDecode(destination.AsSpan(0, written), out ConnectPacket connect);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        written.ShouldBe(ConnectCodec.GetSize(fields));
+        destination[9].ShouldBe((byte)0x02);
+        connect.HasUserName.ShouldBeFalse();
+        connect.HasPassword.ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// Proves a password without a user name is accepted, as MQTT 5 allows it.
+    /// </summary>
+    [Fact]
+    public void TryDecode_PasswordWithoutUserName_Succeeds()
+    {
+        // Arrange
+        byte[] packet = Hex.Parse("10 11 00 04 4D 51 54 54 05 42 00 00 00 00 01 63 00 01 70");
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out ConnectPacket connect);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        connect.HasUserName.ShouldBeFalse();
+        connect.HasPassword.ShouldBeTrue();
+        connect.Password.ToArray().ShouldBe(new byte[] { 0x70 });
+    }
+
+    /// <summary>
+    /// Proves an empty client id decodes; refusing it is the server's decision.
+    /// </summary>
+    [Fact]
+    public void TryDecode_EmptyClientId_Succeeds()
+    {
+        // Arrange
+        byte[] packet = Hex.Parse("10 0D 00 04 4D 51 54 54 05 02 00 00 00 00 00");
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out ConnectPacket connect);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        connect.ClientId.IsEmpty.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// Proves a Will is read and reported.
+    /// </summary>
+    [Fact]
+    public void TryDecode_ConnectWithWill_ReportsTheWill()
+    {
+        // Arrange
+        byte[] packet = KnownPackets.ConnectWithWill;
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out ConnectPacket connect);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        connect.HasWill.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// Proves an Authentication Method is reported in the properties, not refused by the codec.
+    /// </summary>
+    [Fact]
+    public void TryDecode_AuthenticationMethod_IsReportedNotRefused()
+    {
+        // Arrange
+        byte[] packet = Hex.Parse("10 12 00 04 4D 51 54 54 05 02 00 00 04 15 00 01 61 00 01 63");
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out ConnectPacket connect);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        connect.Properties.Contains(PropertyId.AuthenticationMethod).ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// Proves a broken packet body is malformed and leaves the output at its default.
+    /// </summary>
+    /// <param name="hex">
+    /// The broken packet.
+    /// </param>
+    [Theory]
+    [InlineData("10 0E 00 04 4D 51 54 54 05 03 00 00 00 00 01 63")] // reserved flag
+    [InlineData("10 0E 00 04 4D 51 54 54 05 0A 00 00 00 00 01 63")] // Will QoS without Will
+    [InlineData("10 0E 00 04 4D 51 54 54 05 22 00 00 00 00 01 63")] // Will retain without Will
+    [InlineData("10 15 00 04 4D 51 54 54 05 1E 00 00 00 00 01 63 00 00 01 77 00 01 78")] // Will QoS 3
+    [InlineData("10 0E 00 04 4D 51 54 54 05 42 00 00 00 00 01 63")] // password flagged but missing
+    [InlineData("10 0E 00 04 4D 51 54 54 05 82 00 00 00 00 01 63")] // user name flagged but missing
+    [InlineData("10 0F 00 04 4D 51 54 54 05 02 00 00 00 00 01 63 00")] // a left-over byte
+    [InlineData("10 03 00 04 4D")] // protocol name cut
+    public void TryDecode_BrokenConnect_IsMalformed(string hex)
+    {
+        // Arrange
+        byte[] packet = Hex.Parse(hex);
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out ConnectPacket connect);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.MalformedPacket);
+        connect.ClientId.IsEmpty.ShouldBeTrue();
+        connect.HasUserName.ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// Proves another protocol name or version is reported as unsupported.
+    /// </summary>
+    /// <param name="hex">
+    /// The packet with another protocol name or level.
+    /// </param>
+    [Theory]
+    [InlineData("10 0F 00 06 4D 51 49 73 64 70 03 02 00 3C 00 01 63")] // "MQIsdp", level 3
+    [InlineData("10 0E 00 04 4D 51 54 54 04 02 00 00 00 00 01 63")] // "MQTT", level 4
+    public void TryDecode_OtherProtocolOrVersion_IsUnsupported(string hex)
+    {
+        // Arrange
+        byte[] packet = Hex.Parse(hex);
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out _);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.UnsupportedProtocolVersion);
+    }
+
+    /// <summary>
+    /// Proves Authentication Data without an Authentication Method is a protocol error.
+    /// </summary>
+    [Fact]
+    public void TryDecode_AuthenticationDataWithoutMethod_IsProtocolError()
+    {
+        // Arrange
+        byte[] packet = Hex.Parse("10 11 00 04 4D 51 54 54 05 02 00 00 03 16 00 00 00 01 63");
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out _);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.ProtocolError);
+    }
+
+    /// <summary>
+    /// Proves a packet of another type, an incomplete one and one with trailing bytes are caller bugs.
+    /// </summary>
+    /// <param name="hex">
+    /// The bytes that are not exactly one CONNECT.
+    /// </param>
+    [Theory]
+    [InlineData("20 03 00 00 00")] // CONNACK
+    [InlineData("10 0E 00 04 4D 51 54 54 05 02 00 00 00 00 01")] // cut short
+    [InlineData("10 0E 00 04 4D 51 54 54 05 02 00 00 00 00 01 63 00")] // trailing byte
+    [InlineData("")] // nothing
+    public void TryDecode_NotExactlyOneConnect_Throws(string hex)
+    {
+        // Arrange
+        byte[] packet = Hex.Parse(hex);
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() => ConnectCodec.TryDecode(packet, out _));
+    }
+
+    /// <summary>
+    /// Proves a destination smaller than the packet throws and nothing is written.
+    /// </summary>
+    [Fact]
+    public void Write_DestinationTooSmall_ThrowsWithoutWriting()
+    {
+        // Arrange
+        byte[] destination = new byte[25];
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() => ConnectCodec.Write(
+            destination,
+            new ConnectFields { ClientId = "c1", UserName = "u", Password = [0x70], KeepAliveSeconds = 15, ReceiveMaximum = 1024 }));
+        destination.ShouldAllBe(b => b == 0);
+    }
+
+    /// <summary>
+    /// Proves a string that MQTT cannot carry throws before the first byte is written.
+    /// </summary>
+    [Fact]
+    public void Write_UserNameWithNul_ThrowsWithoutWriting()
+    {
+        // Arrange
+        byte[] destination = new byte[64];
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() => ConnectCodec.Write(
+            destination,
+            new ConnectFields { ClientId = "c1", UserName = "u\0", KeepAliveSeconds = 15, ReceiveMaximum = 1024 }));
+        destination.ShouldAllBe(b => b == 0);
+    }
+
+    /// <summary>
+    /// Proves a CONNECT that MQTTnet encodes decodes here to the same values.
+    /// </summary>
+    [Fact]
+    public void TryDecode_ConnectMqttNetEncodes_DecodesToTheSameValues()
+    {
+        // Arrange
+        MqttConnectPacket source = new()
+        {
+            ClientId = "c1",
+            Username = "u",
+            Password = [0x70],
+            KeepAlivePeriod = 15,
+            CleanSession = true,
+            ReceiveMaximum = 1024,
+            MaximumPacketSize = 65536,
+            RequestProblemInformation = false,
+            UserProperties = [new MqttUserProperty("k", "v"u8.ToArray())],
+        };
+        byte[] packet = MqttNetFormatter.Encode(source);
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out ConnectPacket connect);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        Encoding.UTF8.GetString(connect.ClientId).ShouldBe("c1");
+        Encoding.UTF8.GetString(connect.UserName).ShouldBe("u");
+        connect.Password.ToArray().ShouldBe(new byte[] { 0x70 });
+        connect.KeepAliveSeconds.ShouldBe((ushort)15);
+        connect.CleanStart.ShouldBeTrue();
+        connect.Properties.TryGetInteger(PropertyId.MaximumPacketSize, out uint maximumPacketSize).ShouldBeTrue();
+        maximumPacketSize.ShouldBe(65536u);
+        connect.Properties.TryGetInteger(PropertyId.RequestProblemInformation, out uint requestProblemInformation).ShouldBeTrue();
+        requestProblemInformation.ShouldBe(0u);
+        int userProperties = 0;
+        foreach (Utf8Pair pair in connect.Properties.UserProperties)
+        {
+            Encoding.UTF8.GetString(pair.Name).ShouldBe("k");
+            Encoding.UTF8.GetString(pair.Value).ShouldBe("v");
+            userProperties++;
+        }
+
+        userProperties.ShouldBe(1);
+    }
+
+    /// <summary>
+    /// Proves a CONNECT this codec encodes decodes in MQTTnet to the same values.
+    /// </summary>
+    [Fact]
+    public void Write_KnownFields_MqttNetDecodesTheSameValues()
+    {
+        // Arrange
+        ConnectFields fields = new() { ClientId = "c1", UserName = "u", Password = [0x70], KeepAliveSeconds = 15, ReceiveMaximum = 1024 };
+        byte[] destination = new byte[ConnectCodec.GetSize(fields)];
+        ConnectCodec.Write(destination, fields);
+
+        // Act
+        MqttConnectPacket decoded = (MqttConnectPacket)MqttNetFormatter.Decode(destination);
+
+        // Assert
+        decoded.ClientId.ShouldBe("c1");
+        decoded.Username.ShouldBe("u");
+        decoded.Password.ShouldBe(new byte[] { 0x70 });
+        decoded.KeepAlivePeriod.ShouldBe((ushort)15);
+        decoded.CleanSession.ShouldBeTrue();
+        decoded.ReceiveMaximum.ShouldBe((ushort)1024);
+    }
+}
