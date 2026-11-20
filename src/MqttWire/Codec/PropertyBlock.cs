@@ -196,13 +196,13 @@ internal readonly ref struct PropertyBlock
     }
 
     /// <summary>
-    /// Reads one value of the given type.
+    /// Reads and validates one value of the given type; used only while a block is being validated.
     /// </summary>
-    /// <param name="reader">The reader, positioned at the value; it does not move on failure.</param>
+    /// <param name="reader">The reader, positioned at the value; a failed read of a string pair may already have consumed its name.</param>
     /// <param name="type">The wire type of the value.</param>
     /// <param name="number">The value of an integer type, otherwise 0.</param>
     /// <param name="bytes">The data of a string or binary type, the value of a pair; otherwise empty.</param>
-    /// <returns><see langword="false"/> if the value is cut short or invalid; a validated block never fails.</returns>
+    /// <returns><see langword="false"/> if the value is cut short or invalid UTF-8.</returns>
     internal static bool TryReadValue(scoped ref MqttReader reader, PropertyType type, out uint number, out ReadOnlySpan<byte> bytes)
     {
         number = 0;
@@ -233,6 +233,46 @@ internal readonly ref struct PropertyBlock
     }
 
     /// <summary>
+    /// Reads one value of an already validated block without validating it again; it never fails and
+    /// allocates nothing. The reader must be positioned at a value of the given type inside a validated block.
+    /// </summary>
+    /// <param name="reader">The reader, positioned at the value; it moves past it.</param>
+    /// <param name="type">The wire type of the value.</param>
+    /// <param name="number">The value of an integer type, otherwise 0.</param>
+    /// <param name="bytes">The data of a string or binary type, the value of a pair; otherwise empty.</param>
+    internal static void ReadValidated(scoped ref MqttReader reader, PropertyType type, out uint number, out ReadOnlySpan<byte> bytes)
+    {
+        number = 0;
+        bytes = default;
+        switch (type)
+        {
+            case PropertyType.Byte:
+                reader.TryReadByte(out byte single);
+                number = single;
+                break;
+            case PropertyType.UInt16:
+                reader.TryReadUInt16(out ushort twoBytes);
+                number = twoBytes;
+                break;
+            case PropertyType.UInt32:
+                reader.TryReadUInt32(out number);
+                break;
+            case PropertyType.VariableByteInteger:
+                reader.TryReadVariableByteInteger(out int variable);
+                number = (uint)variable;
+                break;
+            case PropertyType.String:
+            case PropertyType.Binary:
+                reader.TryReadBinary(out bytes);
+                break;
+            default:
+                reader.TryReadBinary(out _);
+                reader.TryReadBinary(out bytes);
+                break;
+        }
+    }
+
+    /// <summary>
     /// Gets the wire type of a property that has already been validated.
     /// </summary>
     /// <param name="id">The identifier byte of a property in a validated block.</param>
@@ -259,7 +299,7 @@ internal readonly ref struct PropertyBlock
         while (reader.Remaining > 0)
         {
             reader.TryReadByte(out byte current);
-            TryReadValue(ref reader, s_entries[current].Type, out number, out bytes);
+            ReadValidated(ref reader, s_entries[current].Type, out number, out bytes);
             if (current == (byte)id)
             {
                 return true;
@@ -402,13 +442,13 @@ internal ref struct UserPropertyEnumerator
             _reader.TryReadByte(out byte id);
             if (id == (byte)PropertyId.UserProperty)
             {
-                _reader.TryReadUtf8String(out ReadOnlySpan<byte> name);
-                _reader.TryReadUtf8String(out ReadOnlySpan<byte> value);
+                _reader.TryReadBinary(out ReadOnlySpan<byte> name);
+                _reader.TryReadBinary(out ReadOnlySpan<byte> value);
                 Current = new Utf8Pair(name, value);
                 return true;
             }
 
-            PropertyBlock.TryReadValue(ref _reader, PropertyBlock.TypeOf(id), out _, out _);
+            PropertyBlock.ReadValidated(ref _reader, PropertyBlock.TypeOf(id), out _, out _);
         }
 
         return false;

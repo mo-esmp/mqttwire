@@ -3,14 +3,8 @@ namespace MqttWire.Codec;
 /// <summary>
 /// The MQTT 5 property identifiers (section 2.2.2.2); the value is the identifier byte on the wire.
 /// </summary>
-/// <summary>
-/// The MQTT 5 property identifiers (section 2.2.2.2); the value is the identifier byte on the wire.
-/// </summary>
 internal enum PropertyId : byte
 {
-    /// <summary>
-    /// Payload format indicator (byte, 0 binary or 1 UTF-8).
-    /// </summary>
     /// <summary>
     /// Payload format indicator (byte, 0 binary or 1 UTF-8).
     /// </summary>
@@ -19,14 +13,8 @@ internal enum PropertyId : byte
     /// <summary>
     /// Message expiry interval in seconds (four-byte integer).
     /// </summary>
-    /// <summary>
-    /// Message expiry interval in seconds (four-byte integer).
-    /// </summary>
     MessageExpiryInterval = 0x02,
 
-    /// <summary>
-    /// Content type (UTF-8 string).
-    /// </summary>
     /// <summary>
     /// Content type (UTF-8 string).
     /// </summary>
@@ -35,14 +23,8 @@ internal enum PropertyId : byte
     /// <summary>
     /// Response topic (UTF-8 string).
     /// </summary>
-    /// <summary>
-    /// Response topic (UTF-8 string).
-    /// </summary>
     ResponseTopic = 0x08,
 
-    /// <summary>
-    /// Correlation data (binary).
-    /// </summary>
     /// <summary>
     /// Correlation data (binary).
     /// </summary>
@@ -51,14 +33,8 @@ internal enum PropertyId : byte
     /// <summary>
     /// Subscription identifier (variable byte integer, never 0).
     /// </summary>
-    /// <summary>
-    /// Subscription identifier (variable byte integer, never 0).
-    /// </summary>
     SubscriptionIdentifier = 0x0B,
 
-    /// <summary>
-    /// Session expiry interval in seconds (four-byte integer).
-    /// </summary>
     /// <summary>
     /// Session expiry interval in seconds (four-byte integer).
     /// </summary>
@@ -67,14 +43,8 @@ internal enum PropertyId : byte
     /// <summary>
     /// Client identifier assigned by the server (UTF-8 string).
     /// </summary>
-    /// <summary>
-    /// Client identifier assigned by the server (UTF-8 string).
-    /// </summary>
     AssignedClientIdentifier = 0x12,
 
-    /// <summary>
-    /// Keep alive the server requires, in seconds (two-byte integer).
-    /// </summary>
     /// <summary>
     /// Keep alive the server requires, in seconds (two-byte integer).
     /// </summary>
@@ -83,14 +53,8 @@ internal enum PropertyId : byte
     /// <summary>
     /// Extended authentication method (UTF-8 string).
     /// </summary>
-    /// <summary>
-    /// Extended authentication method (UTF-8 string).
-    /// </summary>
     AuthenticationMethod = 0x15,
 
-    /// <summary>
-    /// Extended authentication data (binary).
-    /// </summary>
     /// <summary>
     /// Extended authentication data (binary).
     /// </summary>
@@ -99,14 +63,8 @@ internal enum PropertyId : byte
     /// <summary>
     /// Whether the server may send reason strings and user properties on failures (byte, 0 or 1).
     /// </summary>
-    /// <summary>
-    /// Whether the server may send reason strings and user properties on failures (byte, 0 or 1).
-    /// </summary>
     RequestProblemInformation = 0x17,
 
-    /// <summary>
-    /// Delay before the will message is published, in seconds (four-byte integer).
-    /// </summary>
     /// <summary>
     /// Delay before the will message is published, in seconds (four-byte integer).
     /// </summary>
@@ -115,14 +73,8 @@ internal enum PropertyId : byte
     /// <summary>
     /// Whether the server should return response information (byte, 0 or 1).
     /// </summary>
-    /// <summary>
-    /// Whether the server should return response information (byte, 0 or 1).
-    /// </summary>
     RequestResponseInformation = 0x19,
 
-    /// <summary>
-    /// Response information for building a response topic (UTF-8 string).
-    /// </summary>
     /// <summary>
     /// Response information for building a response topic (UTF-8 string).
     /// </summary>
@@ -131,14 +83,8 @@ internal enum PropertyId : byte
     /// <summary>
     /// Another server the client should use (UTF-8 string).
     /// </summary>
-    /// <summary>
-    /// Another server the client should use (UTF-8 string).
-    /// </summary>
     ServerReference = 0x1C,
 
-    /// <summary>
-    /// Human-readable reason for the response (UTF-8 string).
-    /// </summary>
     /// <summary>
     /// Human-readable reason for the response (UTF-8 string).
     /// </summary>
@@ -147,14 +93,8 @@ internal enum PropertyId : byte
     /// <summary>
     /// Number of unacknowledged QoS 1 and 2 publishes allowed (two-byte integer, never 0).
     /// </summary>
-    /// <summary>
-    /// Number of unacknowledged QoS 1 and 2 publishes allowed (two-byte integer, never 0).
-    /// </summary>
     ReceiveMaximum = 0x21,
 
-    /// <summary>
-    /// Highest topic alias the sender accepts (two-byte integer).
-    /// </summary>
     /// <summary>
     /// Highest topic alias the sender accepts (two-byte integer).
     /// </summary>
@@ -163,14 +103,8 @@ internal enum PropertyId : byte
     /// <summary>
     /// Topic alias of a publish (two-byte integer, never 0).
     /// </summary>
-    /// <summary>
-    /// Topic alias of a publish (two-byte integer, never 0).
-    /// </summary>
     TopicAlias = 0x23,
 
-    /// <summary>
-    /// Highest QoS the server supports (byte, 0 or 1).
-    /// </summary>
     /// <summary>
     /// Highest QoS the server supports (byte, 0 or 1).
     /// </summary>
@@ -179,14 +113,8 @@ internal enum PropertyId : byte
     /// <summary>
     /// Whether the server supports retained messages (byte, 0 or 1).
     /// </summary>
-    /// <summary>
-    /// Whether the server supports retained messages (byte, 0 or 1).
-    /// </summary>
     RetainAvailable = 0x25,
 
-    /// <summary>
-    /// User property (UTF-8 string pair); may repeat in every packet that has properties.
-    /// </summary>
     /// <summary>
     /// User property (UTF-8 string pair); may repeat in every packet that has properties.
     /// </summary>
@@ -195,14 +123,8 @@ internal enum PropertyId : byte
     /// <summary>
     /// Largest packet the sender accepts, in bytes (four-byte integer, never 0).
     /// </summary>
-    /// <summary>
-    /// Largest packet the sender accepts, in bytes (four-byte integer, never 0).
-    /// </summary>
     MaximumPacketSize = 0x27,
 
-    /// <summary>
-    /// Whether the server supports wildcard subscriptions (byte, 0 or 1).
-    /// </summary>
     /// <summary>
     /// Whether the server supports wildcard subscriptions (byte, 0 or 1).
     /// </summary>
@@ -211,14 +133,8 @@ internal enum PropertyId : byte
     /// <summary>
     /// Whether the server supports subscription identifiers (byte, 0 or 1).
     /// </summary>
-    /// <summary>
-    /// Whether the server supports subscription identifiers (byte, 0 or 1).
-    /// </summary>
     SubscriptionIdentifierAvailable = 0x29,
 
-    /// <summary>
-    /// Whether the server supports shared subscriptions (byte, 0 or 1).
-    /// </summary>
     /// <summary>
     /// Whether the server supports shared subscriptions (byte, 0 or 1).
     /// </summary>
