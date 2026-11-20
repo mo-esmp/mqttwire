@@ -4,6 +4,8 @@ namespace MqttWire.Codec;
 
 internal static class FieldSize
 {
+    public static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
     public const int MaxDataLength = ushort.MaxValue;
 
     public const int LengthPrefix = sizeof(ushort);
@@ -23,7 +25,7 @@ internal static class FieldSize
             throw new ArgumentException("The string contains U+0000, which MQTT does not allow.", nameof(value));
         }
 
-        return Binary(Encoding.UTF8.GetByteCount(value));
+        return Binary(StrictUtf8.GetByteCount(value));
     }
 
     public static int Utf8String(ReadOnlySpan<byte> utf8) => Binary(utf8.Length);

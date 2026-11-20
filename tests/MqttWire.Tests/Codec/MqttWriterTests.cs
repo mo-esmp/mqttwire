@@ -53,6 +53,31 @@ public class MqttWriterTests
     }
 
     [Fact]
+    public void Utf8String_StringWithUnpairedSurrogate_ThrowsArgumentException()
+    {
+        // Arrange
+        string value = "a\uD800";
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() => FieldSize.Utf8String(value));
+    }
+
+    [Fact]
+    public void WriteUtf8String_StringWithUnpairedSurrogate_ThrowsAndWritesNothing()
+    {
+        // Arrange
+        byte[] destination = new byte[16];
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() =>
+        {
+            MqttWriter writer = new(destination);
+            writer.WriteUtf8String("a\uD800");
+        });
+        destination.ShouldAllBe(b => b == 0);
+    }
+
+    [Fact]
     public void WriteUtf8String_StringOf65535Bytes_WritesItAndReaderReadsIt()
     {
         // Arrange

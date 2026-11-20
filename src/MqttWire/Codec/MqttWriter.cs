@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Text;
 
 namespace MqttWire.Codec;
 
@@ -28,7 +27,7 @@ internal ref struct MqttWriter
         int size = FieldSize.Utf8String(value);
         Span<byte> field = Reserve(size);
         BinaryPrimitives.WriteUInt16BigEndian(field, (ushort)(size - FieldSize.LengthPrefix));
-        Encoding.UTF8.GetBytes(value, field[FieldSize.LengthPrefix..]);
+        FieldSize.StrictUtf8.GetBytes(value, field[FieldSize.LengthPrefix..]);
     }
 
     public void WriteUtf8String(ReadOnlySpan<byte> utf8)
