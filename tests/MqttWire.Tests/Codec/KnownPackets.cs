@@ -90,4 +90,30 @@ internal static class KnownPackets
     /// DISCONNECT with the session taken over and the reason string "x".
     /// </summary>
     public static readonly byte[] DisconnectWithReason = Hex.Parse("E0 06 8E 04 1F 00 01 78");
+
+    /// <summary>
+    /// SUBSCRIBE with packet identifier 1 and the one filter "a/+" at QoS 1, no other option.
+    /// </summary>
+    public static readonly byte[] Subscribe = Hex.Parse("82 09 00 01 00 00 03 61 2F 2B 01");
+
+    /// <summary>
+    /// SUBSCRIBE with packet identifier 1 and two filters: "a/+" at QoS 1, then "x" with options 0x2D (QoS 1, No
+    /// Local, Retain As Published, Retain Handling 2).
+    /// </summary>
+    public static readonly byte[] SubscribeTwo = Hex.Parse("82 0D 00 01 00 00 03 61 2F 2B 01 00 01 78 2D");
+
+    /// <summary>
+    /// SUBACK for packet identifier 1 granting QoS 1.
+    /// </summary>
+    public static readonly byte[] SubAck = Hex.Parse("90 04 00 01 00 01");
+
+    /// <summary>
+    /// UNSUBSCRIBE with packet identifier 2 and the one filter "a/+".
+    /// </summary>
+    public static readonly byte[] Unsubscribe = Hex.Parse("A2 08 00 02 00 00 03 61 2F 2B");
+
+    /// <summary>
+    /// UNSUBACK for packet identifier 2 with success.
+    /// </summary>
+    public static readonly byte[] UnsubAck = Hex.Parse("B0 04 00 02 00 00");
 }
