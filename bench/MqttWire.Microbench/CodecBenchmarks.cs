@@ -1,4 +1,5 @@
 ﻿using System.Buffers;
+using System.Text;
 using BenchmarkDotNet.Attributes;
 using MqttWire.Codec;
 
@@ -6,7 +7,8 @@ namespace MqttWire.Microbench;
 
 /// <summary>
 /// Measures the speed of the codec's hot paths: decoding and encoding PUBLISH, decoding CONNECT and SUBSCRIBE, and
-/// framing packets out of a stream. The inputs are built in <see cref="Setup"/>, so only the codec call is timed.
+/// framing packets out of a stream; and of encoding a CONNACK that carries user properties. The inputs are built in
+/// <see cref="Setup"/>, so only the codec call is timed.
 /// The Allocated column is reported for information; that the codec allocates nothing is asserted by the test
 /// project, not here. The class is not sealed because BenchmarkDotNet generates a class that derives from it.
 /// </summary>
@@ -27,6 +29,26 @@ public class CodecBenchmarks
     /// The packet identifier of the benchmark PUBLISH.
     /// </summary>
     private const ushort PublishPacketIdentifier = 7;
+
+    /// <summary>
+    /// The size of the long topic, in bytes.
+    /// </summary>
+    private const int LongTopicSize = 256;
+
+    /// <summary>
+    /// The number of bytes in each level of the long topic, the separator included.
+    /// </summary>
+    private const int LongTopicLevelSize = 8;
+
+    /// <summary>
+    /// The number of user properties in the benchmark CONNACK.
+    /// </summary>
+    private const int UserPropertyCount = 8;
+
+    /// <summary>
+    /// How often the value of a user property repeats its 9 characters, which are 15 bytes in UTF-8.
+    /// </summary>
+    private const int UserPropertyValueRepeats = 20;
 
     /// <summary>
     /// A 26-byte CONNECT with a Receive Maximum property of 1,024 and a client id, user name and password.
@@ -71,6 +93,26 @@ public class CodecBenchmarks
     private byte[] _stream = [];
 
     /// <summary>
+    /// A topic of <see cref="LongTopicSize"/> bytes, in UTF-8.
+    /// </summary>
+    private byte[] _longTopic = [];
+
+    /// <summary>
+    /// The buffer the benchmarks with the long topic write into.
+    /// </summary>
+    private byte[] _longDestination = [];
+
+    /// <summary>
+    /// The user properties of the benchmark CONNACK: long names and values with characters of two and three bytes.
+    /// </summary>
+    private MqttWireUserProperty[] _userProperties = [];
+
+    /// <summary>
+    /// The buffer that <see cref="EncodeConnAckUserProperties"/> writes into.
+    /// </summary>
+    private byte[] _connAckDestination = [];
+
+    /// <summary>
     /// Builds every input once, before any benchmark runs.
     /// </summary>
     [GlobalSetup]
@@ -80,10 +122,27 @@ public class CodecBenchmarks
         _payload = new byte[PayloadSize];
         new Random(1).NextBytes(_payload);
 
-        PublishFields fields = CreateFields();
+        PublishFields fields = CreateFields(_topic);
         _publish = new byte[PublishCodec.GetSize(fields, _payload.Length)];
         PublishCodec.Write(_publish, fields, _payload);
         _destination = new byte[_publish.Length];
+
+        _longTopic = new byte[LongTopicSize];
+        for (int index = 0; index < _longTopic.Length; index++)
+        {
+            _longTopic[index] = index % LongTopicLevelSize == LongTopicLevelSize - 1 ? (byte)'/' : (byte)'a';
+        }
+
+        _longDestination = new byte[PublishCodec.GetSize(CreateFields(_longTopic), _payload.Length)];
+
+        string value = new StringBuilder().Insert(0, "größe-温度-", UserPropertyValueRepeats).ToString();
+        _userProperties = new MqttWireUserProperty[UserPropertyCount];
+        for (int index = 0; index < _userProperties.Length; index++)
+        {
+            _userProperties[index] = new MqttWireUserProperty($"schlüssel-{index}-温度", value);
+        }
+
+        _connAckDestination = new byte[ConnAckCodec.GetSize(CreateConnAckFields())];
 
         // PINGREQ (2 bytes) and PUBACK (4 bytes) alternate.
         List<byte> stream = [];
@@ -126,10 +185,67 @@ public class CodecBenchmarks
     [Benchmark]
     public int EncodePublishQoS1()
     {
-        PublishFields fields = CreateFields();
+        PublishFields fields = CreateFields(_topic);
 
         return PublishCodec.Write(_destination, fields, _payload);
     }
+
+    /// <summary>
+    /// Sizes the same QoS 1 PUBLISH and then writes it into that much of a preallocated buffer, as a caller that
+    /// sizes its buffer for each packet does. The fields are checked and the topic scanned twice, once by each
+    /// call; the difference from <see cref="EncodePublishQoS1"/> is the cost of the second pass.
+    /// </summary>
+    /// <returns>
+    /// The number of bytes written.
+    /// </returns>
+    [Benchmark]
+    public int SizeAndEncodePublishQoS1()
+    {
+        PublishFields fields = CreateFields(_topic);
+        int size = PublishCodec.GetSize(fields, _payload.Length);
+
+        return PublishCodec.Write(_destination.AsSpan(0, size), fields, _payload);
+    }
+
+    /// <summary>
+    /// Encodes a QoS 1 PUBLISH with a topic of <see cref="LongTopicSize"/> bytes into a preallocated buffer.
+    /// </summary>
+    /// <returns>
+    /// The number of bytes written.
+    /// </returns>
+    [Benchmark]
+    public int EncodePublishLongTopic()
+    {
+        PublishFields fields = CreateFields(_longTopic);
+
+        return PublishCodec.Write(_longDestination, fields, _payload);
+    }
+
+    /// <summary>
+    /// Sizes the PUBLISH with the long topic and then writes it into that much of a preallocated buffer; the
+    /// difference from <see cref="EncodePublishLongTopic"/> is the cost of checking and scanning a long topic twice.
+    /// </summary>
+    /// <returns>
+    /// The number of bytes written.
+    /// </returns>
+    [Benchmark]
+    public int SizeAndEncodePublishLongTopic()
+    {
+        PublishFields fields = CreateFields(_longTopic);
+        int size = PublishCodec.GetSize(fields, _payload.Length);
+
+        return PublishCodec.Write(_longDestination.AsSpan(0, size), fields, _payload);
+    }
+
+    /// <summary>
+    /// Encodes a CONNACK with <see cref="UserPropertyCount"/> user properties, whose names and values are long and
+    /// hold characters of two and three bytes, into a preallocated buffer.
+    /// </summary>
+    /// <returns>
+    /// The number of bytes written.
+    /// </returns>
+    [Benchmark]
+    public int EncodeConnAckUserProperties() => ConnAckCodec.Write(_connAckDestination, CreateConnAckFields());
 
     /// <summary>
     /// Decodes the 26-byte CONNECT and reads its Receive Maximum.
@@ -188,15 +304,31 @@ public class CodecBenchmarks
     }
 
     /// <summary>
-    /// Builds the fields of the benchmark PUBLISH from the topic prepared in setup.
+    /// Builds the fields of a benchmark PUBLISH for a topic prepared in setup.
     /// </summary>
+    /// <param name="topic">
+    /// The topic, in UTF-8.
+    /// </param>
     /// <returns>
     /// The QoS 1 fields; a ref struct, so it is built inside each benchmark.
     /// </returns>
-    private PublishFields CreateFields() => new()
+    private static PublishFields CreateFields(byte[] topic) => new()
     {
-        Topic = _topic,
+        Topic = topic,
         QoS = MqttQoS.AtLeastOnce,
         PacketIdentifier = PublishPacketIdentifier,
+    };
+
+    /// <summary>
+    /// Builds the fields of the benchmark CONNACK from the user properties prepared in setup.
+    /// </summary>
+    /// <returns>
+    /// The fields of a successful CONNACK; a ref struct, so it is built inside each benchmark.
+    /// </returns>
+    private ConnAckFields CreateConnAckFields() => new()
+    {
+        ReasonCode = MqttReasonCode.Success,
+        ReceiveMaximum = 256,
+        UserProperties = _userProperties,
     };
 }
