@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MqttWire/MqttWire.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MqttWire.Tests/MqttWire.Tests.csproj" />
+  </Folder>
+</Solution>

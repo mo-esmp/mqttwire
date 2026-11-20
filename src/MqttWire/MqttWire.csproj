@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <Description>A lean MQTT 5 connection server and client for .NET, over WebSockets.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="MqttWire.Server" />
+    <InternalsVisibleTo Include="MqttWire.Tests" />
+    <InternalsVisibleTo Include="MqttWire.Microbench" />
+  </ItemGroup>
+
+</Project>
