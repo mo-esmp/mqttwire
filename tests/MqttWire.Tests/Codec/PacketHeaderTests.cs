@@ -3,8 +3,14 @@ using MqttWire.Codec;
 
 namespace MqttWire.Tests.Codec;
 
+/// <summary>
+/// Tests reading and writing the fixed header.
+/// </summary>
 public class PacketHeaderTests
 {
+    /// <summary>
+    /// Proves a valid header gives its type, flags and lengths.
+    /// </summary>
     [Theory]
     [InlineData("10 0E", (byte)PacketType.Connect, 0x0, 14, 2)]
     [InlineData("3D 07", (byte)PacketType.Publish, 0xD, 7, 2)]
@@ -29,6 +35,9 @@ public class PacketHeaderTests
         header.TotalLength.ShouldBe(headerLength + remaining);
     }
 
+    /// <summary>
+    /// Proves an unknown type, flags not allowed for the type or an invalid length return invalid data.
+    /// </summary>
     [Theory]
     [InlineData("00 00")]
     [InlineData("60 02")]
@@ -51,6 +60,9 @@ public class PacketHeaderTests
         status.ShouldBe(OperationStatus.InvalidData);
     }
 
+    /// <summary>
+    /// Proves a header cut off before its length ends returns need more data.
+    /// </summary>
     [Theory]
     [InlineData("")]
     [InlineData("30")]
@@ -68,6 +80,9 @@ public class PacketHeaderTests
         status.ShouldBe(OperationStatus.NeedMoreData);
     }
 
+    /// <summary>
+    /// Proves a packet returns need more data until its last byte is in the buffer and done after, ignoring trailing bytes.
+    /// </summary>
     [Fact]
     public void TryReadPacket_PacketNotComplete_ReturnsNeedMoreDataUntilItsLastByte()
     {
@@ -87,6 +102,9 @@ public class PacketHeaderTests
         trailing.TotalLength.ShouldBe(12);
     }
 
+    /// <summary>
+    /// Proves an invalid header returns invalid data even from the whole-packet read.
+    /// </summary>
     [Fact]
     public void TryReadPacket_InvalidHeader_ReturnsInvalidData()
     {
@@ -100,6 +118,9 @@ public class PacketHeaderTests
         status.ShouldBe(OperationStatus.InvalidData);
     }
 
+    /// <summary>
+    /// Proves a written header has the expected bytes and reads back unchanged.
+    /// </summary>
     [Fact]
     public void WriteAndTryRead_PublishHeader_ReadsBack()
     {
@@ -120,6 +141,9 @@ public class PacketHeaderTests
         header.RemainingLength.ShouldBe(128);
     }
 
+    /// <summary>
+    /// Proves flags that do not fit in four bits throw.
+    /// </summary>
     [Fact]
     public void Write_FlagsAboveTheLowNibble_Throws()
     {
@@ -130,6 +154,9 @@ public class PacketHeaderTests
         Should.Throw<ArgumentOutOfRangeException>(() => PacketHeader.Write(destination, PacketType.Publish, 0x10, 0));
     }
 
+    /// <summary>
+    /// Proves a remaining length above the maximum throws.
+    /// </summary>
     [Fact]
     public void Write_RemainingLengthOutOfRange_Throws()
     {

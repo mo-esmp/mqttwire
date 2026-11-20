@@ -3,8 +3,14 @@ using MqttWire.Codec;
 
 namespace MqttWire.Tests.Codec;
 
+/// <summary>
+/// Tests reading and writing the variable byte integer.
+/// </summary>
 public class VariableByteIntegerTests
 {
+    /// <summary>
+    /// Proves each value the MQTT standard lists is written as, and read back from, the standard's bytes.
+    /// </summary>
     [Theory]
     [InlineData(0, "00")]
     [InlineData(127, "7F")]
@@ -35,6 +41,9 @@ public class VariableByteIntegerTests
         readLength.ShouldBe(expected.Length);
     }
 
+    /// <summary>
+    /// Proves a value cut off before its last byte returns need more data.
+    /// </summary>
     [Theory]
     [InlineData("")]
     [InlineData("80")]
@@ -51,6 +60,9 @@ public class VariableByteIntegerTests
         status.ShouldBe(OperationStatus.NeedMoreData);
     }
 
+    /// <summary>
+    /// Proves four bytes without an end, or a longer form than needed, return invalid data.
+    /// </summary>
     [Theory]
     [InlineData("FF FF FF FF")]
     [InlineData("80 00")]
@@ -67,6 +79,9 @@ public class VariableByteIntegerTests
         status.ShouldBe(OperationStatus.InvalidData);
     }
 
+    /// <summary>
+    /// Proves a negative value or one above the maximum throws.
+    /// </summary>
     [Theory]
     [InlineData(-1)]
     [InlineData(268_435_456)]

@@ -2,8 +2,14 @@ using MqttWire.Codec;
 
 namespace MqttWire.Tests.Codec;
 
+/// <summary>
+/// Tests the reader's fields, its failure results and that a failed read does not move the position.
+/// </summary>
 public class MqttReaderTests
 {
+    /// <summary>
+    /// Proves two- and four-byte integers are read big-endian.
+    /// </summary>
     [Fact]
     public void TryReadUInt16AndUInt32_TwoAndFourBytes_ReadsBigEndian()
     {
@@ -22,6 +28,9 @@ public class MqttReaderTests
         reader.Remaining.ShouldBe(0);
     }
 
+    /// <summary>
+    /// Proves a valid string, including an empty one, comes back as its UTF-8 bytes without the length.
+    /// </summary>
     [Theory]
     [InlineData("00 01 61", "61")]
     [InlineData("00 02 C3 BC", "C3 BC")]
@@ -41,6 +50,9 @@ public class MqttReaderTests
         reader.Remaining.ShouldBe(0);
     }
 
+    /// <summary>
+    /// Proves a string of the longest allowed length is read whole.
+    /// </summary>
     [Fact]
     public void TryReadUtf8String_StringOf65535Bytes_ReturnsAllBytes()
     {
@@ -60,6 +72,9 @@ public class MqttReaderTests
         reader.Remaining.ShouldBe(0);
     }
 
+    /// <summary>
+    /// Proves a malformed, cut-off or U+0000 string returns false and leaves the position alone.
+    /// </summary>
     [Theory]
     [InlineData("00 02 61")]
     [InlineData("00 02 C3 28")]
@@ -83,6 +98,9 @@ public class MqttReaderTests
         reader.Remaining.ShouldBe(source.Length);
     }
 
+    /// <summary>
+    /// Proves binary data is returned as it is, whatever its content.
+    /// </summary>
     [Fact]
     public void TryReadBinary_InvalidUtf8_ReturnsTheBytes()
     {
@@ -98,6 +116,9 @@ public class MqttReaderTests
         reader.Remaining.ShouldBe(0);
     }
 
+    /// <summary>
+    /// Proves a length past the end returns false and leaves the position alone.
+    /// </summary>
     [Fact]
     public void TryReadBinary_LengthPastTheEnd_ReturnsFalseAndMovesNothing()
     {
@@ -112,6 +133,9 @@ public class MqttReaderTests
         reader.Remaining.ShouldBe(4);
     }
 
+    /// <summary>
+    /// Proves a valid integer is read and a cut or overlong one returns false and leaves the position alone.
+    /// </summary>
     [Fact]
     public void TryReadVariableByteInteger_ValidAndMalformed_ReadsOrReturnsFalse()
     {
@@ -135,6 +159,9 @@ public class MqttReaderTests
         overlong.Remaining.ShouldBe(2);
     }
 
+    /// <summary>
+    /// Proves a byte is read and the rest is then returned and consumed.
+    /// </summary>
     [Fact]
     public void TryReadByteAndReadToEnd_SomeBytes_ReadsThenReturnsTheRest()
     {
@@ -152,6 +179,9 @@ public class MqttReaderTests
         reader.Remaining.ShouldBe(0);
     }
 
+    /// <summary>
+    /// Proves reads past the end of the buffer return false and leave the position alone.
+    /// </summary>
     [Fact]
     public void TryRead_PastTheEnd_ReturnsFalseAndMovesNothing()
     {

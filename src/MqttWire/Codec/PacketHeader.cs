@@ -2,34 +2,92 @@
 
 namespace MqttWire.Codec;
 
+/// <summary>
+/// The fixed header every MQTT packet starts with: a first byte holding the packet type and its flags,
+/// then the remaining length as a variable byte integer.
+/// </summary>
 internal readonly struct PacketHeader
 {
+    /// <summary>
+    /// Selects the flags in the low nibble of the first byte.
+    /// </summary>
     private const int FlagsMask = 0x0F;
 
+    /// <summary>
+    /// The position of the packet type in the first byte.
+    /// </summary>
     private const int TypeShift = 4;
 
+    /// <summary>
+    /// The flags PUBREL, SUBSCRIBE and UNSUBSCRIBE must carry.
+    /// </summary>
     private const int RequiredFlags = 0b0010;
 
+    /// <summary>
+    /// The QoS bits of the PUBLISH flags; all set is the forbidden QoS 3.
+    /// </summary>
     private const int PublishQosMask = 0b0110;
 
+    /// <summary>
+    /// The first byte of the packet: the type in the high nibble, the flags in the low.
+    /// </summary>
     private readonly byte _firstByte;
 
+    /// <summary>
+    /// Creates a header from values already validated by <see cref="TryRead"/>.
+    /// </summary>
+    /// <param name="firstByte">
+    /// The first byte of the packet.
+    /// </param>
+    /// <param name="remainingLength">
+    /// The remaining length.
+    /// </param>
     private PacketHeader(byte firstByte, int remainingLength)
     {
         _firstByte = firstByte;
         RemainingLength = remainingLength;
     }
 
+    /// <summary>
+    /// The packet type. Only meaningful for a header that <see cref="TryRead"/> returned as done.
+    /// </summary>
     public PacketType Type => (PacketType)(_firstByte >> TypeShift);
 
+    /// <summary>
+    /// The four flag bits of the first byte.
+    /// </summary>
     public byte Flags => (byte)(_firstByte & FlagsMask);
 
+    /// <summary>
+    /// The number of bytes after the fixed header: the variable header and the payload.
+    /// </summary>
     public int RemainingLength { get; }
 
+    /// <summary>
+    /// The size of the fixed header in bytes: the first byte and the remaining length, two to five.
+    /// </summary>
     public int HeaderLength => 1 + VariableByteInteger.GetLength(RemainingLength);
 
+    /// <summary>
+    /// The size of the whole packet in bytes: the fixed header plus the remaining length.
+    /// </summary>
     public int TotalLength => HeaderLength + RemainingLength;
 
+    /// <summary>
+    /// Reads the fixed header from the start of a buffer. The buffer need not hold the whole packet.
+    /// </summary>
+    /// <param name="buffer">
+    /// The bytes to read from.
+    /// </param>
+    /// <param name="header">
+    /// The header when the status is done; otherwise the default value.
+    /// </param>
+    /// <returns>
+    /// <see cref="OperationStatus.Done"/> when a valid header was read; <see cref="OperationStatus.NeedMoreData"/>
+    /// when the header is cut off; <see cref="OperationStatus.InvalidData"/> when the type is 0, the flags are not
+    /// allowed for the type, or the remaining length can never be valid. The first byte is checked first, so a
+    /// bad one is reported even when the length is not yet complete.
+    /// </returns>
     public static OperationStatus TryRead(ReadOnlySpan<byte> buffer, out PacketHeader header)
     {
         header = default;
@@ -56,6 +114,19 @@ internal readonly struct PacketHeader
         return status;
     }
 
+    /// <summary>
+    /// Reads the fixed header and checks the buffer holds the whole packet.
+    /// </summary>
+    /// <param name="buffer">
+    /// The bytes to read from; bytes after the packet are ignored.
+    /// </param>
+    /// <param name="header">
+    /// The header when the status is done or when only the body is missing; otherwise the default value.
+    /// </param>
+    /// <returns>
+    /// The status of <see cref="TryRead"/>, or <see cref="OperationStatus.NeedMoreData"/> when the header is valid
+    /// but fewer than <see cref="TotalLength"/> bytes are in the buffer.
+    /// </returns>
     public static OperationStatus TryReadPacket(ReadOnlySpan<byte> buffer, out PacketHeader header)
     {
         OperationStatus status = TryRead(buffer, out header);
@@ -70,8 +141,41 @@ internal readonly struct PacketHeader
             : OperationStatus.NeedMoreData;
     }
 
+    /// <summary>
+    /// Gets the size of the fixed header for a remaining length.
+    /// </summary>
+    /// <param name="remainingLength">
+    /// The remaining length; not validated here, <see cref="Write"/> refuses an invalid one.
+    /// </param>
+    /// <returns>
+    /// The size of the fixed header in bytes, two to five.
+    /// </returns>
     public static int GetLength(int remainingLength) => 1 + VariableByteInteger.GetLength(remainingLength);
 
+    /// <summary>
+    /// Writes a fixed header. The flags are not checked against the type; that is the packet writer's job.
+    /// </summary>
+    /// <param name="destination">
+    /// Where to write the header.
+    /// </param>
+    /// <param name="type">
+    /// The packet type.
+    /// </param>
+    /// <param name="flags">
+    /// The flags, from 0 to 15.
+    /// </param>
+    /// <param name="remainingLength">
+    /// The remaining length, from 0 to <see cref="VariableByteInteger.MaxValue"/>.
+    /// </param>
+    /// <returns>
+    /// The number of bytes written.
+    /// </returns>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The flags are above 15 or the remaining length is out of range. Nothing is written.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// The destination is too small. Nothing is written.
+    /// </exception>
     public static int Write(Span<byte> destination, PacketType type, byte flags, int remainingLength)
     {
         ArgumentOutOfRangeException.ThrowIfGreaterThan(flags, FlagsMask);
@@ -83,6 +187,19 @@ internal readonly struct PacketHeader
     }
 
     // MQTT 2.1.3: the flags of every type except PUBLISH are fixed; PUBLISH may not use QoS 3.
+    /// <summary>
+    /// Checks the flags allowed for a packet type.
+    /// </summary>
+    /// <param name="type">
+    /// The type nibble.
+    /// </param>
+    /// <param name="flags">
+    /// The flags nibble.
+    /// </param>
+    /// <returns>
+    /// <see langword="false"/> for type 0, for PUBLISH with QoS 3, and for any other type whose flags differ
+    /// from the fixed value.
+    /// </returns>
     private static bool AreFlagsValid(int type, int flags) => type switch
     {
         0 => false,

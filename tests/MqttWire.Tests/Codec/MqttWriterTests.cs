@@ -2,8 +2,14 @@ using MqttWire.Codec;
 
 namespace MqttWire.Tests.Codec;
 
+/// <summary>
+/// Tests the writer, the field size checks and that a failed write writes nothing.
+/// </summary>
 public class MqttWriterTests
 {
+    /// <summary>
+    /// Proves a string is written as its length then its UTF-8 bytes, matching its measured size.
+    /// </summary>
     [Fact]
     public void WriteUtf8String_String_WritesItsLengthThenItsBytes()
     {
@@ -21,6 +27,9 @@ public class MqttWriterTests
         size.ShouldBe(4);
     }
 
+    /// <summary>
+    /// Proves measuring a string too long for the length prefix throws.
+    /// </summary>
     [Fact]
     public void Utf8String_StringOver65535Bytes_ThrowsArgumentException()
     {
@@ -31,6 +40,9 @@ public class MqttWriterTests
         Should.Throw<ArgumentException>(() => FieldSize.Utf8String(value));
     }
 
+    /// <summary>
+    /// Proves measuring UTF-8 bytes or binary data too long for the length prefix throws.
+    /// </summary>
     [Fact]
     public void Utf8StringAndBinary_Over65535Bytes_ThrowsArgumentException()
     {
@@ -42,6 +54,9 @@ public class MqttWriterTests
         Should.Throw<ArgumentException>(() => FieldSize.Binary(65_536));
     }
 
+    /// <summary>
+    /// Proves measuring a string with U+0000 throws.
+    /// </summary>
     [Fact]
     public void Utf8String_StringWithNullCharacter_ThrowsArgumentException()
     {
@@ -52,6 +67,9 @@ public class MqttWriterTests
         Should.Throw<ArgumentException>(() => FieldSize.Utf8String(value));
     }
 
+    /// <summary>
+    /// Proves measuring a string with an unpaired surrogate throws.
+    /// </summary>
     [Fact]
     public void Utf8String_StringWithUnpairedSurrogate_ThrowsArgumentException()
     {
@@ -62,6 +80,9 @@ public class MqttWriterTests
         Should.Throw<ArgumentException>(() => FieldSize.Utf8String(value));
     }
 
+    /// <summary>
+    /// Proves writing a string with an unpaired surrogate throws before anything is written.
+    /// </summary>
     [Fact]
     public void WriteUtf8String_StringWithUnpairedSurrogate_ThrowsAndWritesNothing()
     {
@@ -77,6 +98,9 @@ public class MqttWriterTests
         destination.ShouldAllBe(b => b == 0);
     }
 
+    /// <summary>
+    /// Proves a string of the longest allowed length is written and the reader reads it back.
+    /// </summary>
     [Fact]
     public void WriteUtf8String_StringOf65535Bytes_WritesItAndReaderReadsIt()
     {
@@ -95,6 +119,9 @@ public class MqttWriterTests
         value.Length.ShouldBe(65_535);
     }
 
+    /// <summary>
+    /// Proves writing a string too long for the length prefix throws before anything is written.
+    /// </summary>
     [Fact]
     public void WriteUtf8String_StringOver65535Bytes_ThrowsAndWritesNothing()
     {
@@ -110,6 +137,9 @@ public class MqttWriterTests
         destination.ShouldAllBe(b => b == 0);
     }
 
+    /// <summary>
+    /// Proves a string that does not fit throws before anything is written.
+    /// </summary>
     [Fact]
     public void WriteUtf8String_DestinationTooSmall_ThrowsAndWritesNothing()
     {
@@ -125,6 +155,9 @@ public class MqttWriterTests
         destination.ShouldAllBe(b => b == 0);
     }
 
+    /// <summary>
+    /// Proves writing to a full destination throws.
+    /// </summary>
     [Fact]
     public void WriteByte_DestinationFull_ThrowsArgumentException()
     {
@@ -139,6 +172,9 @@ public class MqttWriterTests
         });
     }
 
+    /// <summary>
+    /// Proves every kind of field the writer writes is read back by the reader.
+    /// </summary>
     [Fact]
     public void WriteAndTryRead_EveryFieldKind_RoundTrips()
     {
