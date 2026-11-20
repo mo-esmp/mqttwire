@@ -3,30 +3,92 @@ using MqttWire.Codec;
 
 namespace MqttWire.Tests.Codec;
 
+/// <summary>
+/// Tests validating, reading and writing MQTT 5 properties.
+/// </summary>
 public class PropertyBlockTests
 {
+    /// <summary>
+    /// A valid one-byte value, accepted by every byte property.
+    /// </summary>
     private const string ByteValue = "01";
+    /// <summary>
+    /// A valid two-byte value, accepted by every two-byte property.
+    /// </summary>
     private const string TwoByteValue = "00 01";
+    /// <summary>
+    /// A valid four-byte value, accepted by every four-byte property.
+    /// </summary>
     private const string FourByteValue = "00 00 00 01";
+    /// <summary>
+    /// A valid variable byte integer value.
+    /// </summary>
     private const string VariableValue = "01";
+    /// <summary>
+    /// A valid UTF-8 string value.
+    /// </summary>
     private const string StringValue = "00 01 61";
+    /// <summary>
+    /// A valid binary value.
+    /// </summary>
     private const string BinaryValue = "00 01 61";
+    /// <summary>
+    /// A valid user property: a name and a value.
+    /// </summary>
     private const string PairValue = "00 01 61 00 01 62";
 
+    /// <summary>
+    /// The PropertyContext.Connect flag.
+    /// </summary>
     private const ushort Connect = 1;
+    /// <summary>
+    /// The PropertyContext.Will flag.
+    /// </summary>
     private const ushort Will = 2;
+    /// <summary>
+    /// The PropertyContext.ConnAck flag.
+    /// </summary>
     private const ushort ConnAck = 4;
+    /// <summary>
+    /// The PropertyContext.Publish flag.
+    /// </summary>
     private const ushort Publish = 8;
+    /// <summary>
+    /// The PropertyContext.Ack flag.
+    /// </summary>
     private const ushort Ack = 16;
+    /// <summary>
+    /// The PropertyContext.Subscribe flag.
+    /// </summary>
     private const ushort Subscribe = 32;
+    /// <summary>
+    /// The PropertyContext.SubAck flag.
+    /// </summary>
     private const ushort SubAck = 64;
+    /// <summary>
+    /// The PropertyContext.Unsubscribe flag.
+    /// </summary>
     private const ushort Unsubscribe = 128;
+    /// <summary>
+    /// The PropertyContext.UnsubAck flag.
+    /// </summary>
     private const ushort UnsubAck = 256;
+    /// <summary>
+    /// The PropertyContext.Disconnect flag.
+    /// </summary>
     private const ushort Disconnect = 512;
+    /// <summary>
+    /// The PropertyContext.Auth flag.
+    /// </summary>
     private const ushort Auth = 1024;
+    /// <summary>
+    /// Every context flag at once.
+    /// </summary>
     private const ushort Every = 2047;
 
-    // The test's own copy of MQTT 5 section 2.2.2.2: id, a valid value of its type, the contexts that allow it.
+    /// <summary>
+    /// The test's own copy of MQTT 5 section 2.2.2.2: id, a valid value of its type, the contexts that allow it.
+    /// </summary>
     private static readonly (byte Id, string Value, ushort Contexts)[] s_table =
     [
         (0x01, ByteValue, Publish | Will),
@@ -58,9 +120,15 @@ public class PropertyBlockTests
         (0x2A, ByteValue, ConnAck),
     ];
 
+    /// <summary>
+    /// Every context a property can be read in.
+    /// </summary>
     private static readonly ushort[] s_contexts =
         [Connect, Will, ConnAck, Publish, Ack, Subscribe, SubAck, Unsubscribe, UnsubAck, Disconnect, Auth];
 
+    /// <summary>
+    /// Yields every property in every context with whether the standard allows it there.
+    /// </summary>
     public static IEnumerable<object[]> EveryPropertyInEveryContext()
     {
         foreach ((byte id, string value, ushort allowedIn) in s_table)
@@ -72,6 +140,9 @@ public class PropertyBlockTests
         }
     }
 
+    /// <summary>
+    /// A property is accepted exactly in the contexts the standard allows it in, and malformed elsewhere.
+    /// </summary>
     [Theory]
     [MemberData(nameof(EveryPropertyInEveryContext))]
     public void TryRead_PropertyInContext_IsAcceptedExactlyWhereTheStandardAllowsIt(byte id, string value, ushort context, bool allowed)
@@ -88,6 +159,9 @@ public class PropertyBlockTests
         result.ShouldBe(allowed ? MqttReasonCode.Success : MqttReasonCode.MalformedPacket);
     }
 
+    /// <summary>
+    /// An empty block succeeds and leaves the reader just after the length.
+    /// </summary>
     [Fact]
     public void TryRead_EmptyBlock_SucceedsAndMovesPastTheLength()
     {
@@ -103,6 +177,9 @@ public class PropertyBlockTests
         reader.Remaining.ShouldBe(1);
     }
 
+    /// <summary>
+    /// An unknown property identifier is malformed.
+    /// </summary>
     [Theory]
     [InlineData("02 05 00")]
     [InlineData("02 7F 00")]
@@ -118,6 +195,9 @@ public class PropertyBlockTests
         result.ShouldBe(MqttReasonCode.MalformedPacket);
     }
 
+    /// <summary>
+    /// A block past the input, a cut two-byte value and a string past its block are malformed.
+    /// </summary>
     [Theory]
     [InlineData("05 21 00")]
     [InlineData("02 21 00")]
@@ -134,6 +214,9 @@ public class PropertyBlockTests
         result.ShouldBe(MqttReasonCode.MalformedPacket);
     }
 
+    /// <summary>
+    /// A once-only property seen twice is malformed.
+    /// </summary>
     [Fact]
     public void TryRead_OnceOnlyPropertyTwice_IsMalformed()
     {
@@ -147,6 +230,9 @@ public class PropertyBlockTests
         result.ShouldBe(MqttReasonCode.MalformedPacket);
     }
 
+    /// <summary>
+    /// User properties may repeat and are enumerated in wire order.
+    /// </summary>
     [Fact]
     public void TryRead_UserPropertiesRepeated_KeepsTheirOrder()
     {
@@ -166,6 +252,9 @@ public class PropertyBlockTests
         pairs.ShouldBe([("a", string.Empty), (string.Empty, string.Empty)]);
     }
 
+    /// <summary>
+    /// A subscription identifier may repeat in a publish but not in a subscribe.
+    /// </summary>
     [Theory]
     [InlineData(Publish, MqttReasonCode.Success)]
     [InlineData(Subscribe, MqttReasonCode.MalformedPacket)]
@@ -181,6 +270,9 @@ public class PropertyBlockTests
         result.ShouldBe(expected);
     }
 
+    /// <summary>
+    /// A value the standard forbids is a protocol error.
+    /// </summary>
     [Theory]
     [InlineData("03 21 00 00", Connect)]
     [InlineData("05 27 00 00 00 00", Connect)]
@@ -201,6 +293,9 @@ public class PropertyBlockTests
         result.ShouldBe(MqttReasonCode.ProtocolError);
     }
 
+    /// <summary>
+    /// When a forbidden value comes first in byte order the result is a protocol error.
+    /// </summary>
     [Fact]
     public void TryRead_ForbiddenValueBeforeAnUnknownProperty_IsProtocolError()
     {
@@ -214,6 +309,9 @@ public class PropertyBlockTests
         result.ShouldBe(MqttReasonCode.ProtocolError);
     }
 
+    /// <summary>
+    /// When an unknown property comes first in byte order the result is malformed.
+    /// </summary>
     [Fact]
     public void TryRead_UnknownPropertyBeforeAForbiddenValue_IsMalformed()
     {
@@ -227,6 +325,9 @@ public class PropertyBlockTests
         result.ShouldBe(MqttReasonCode.MalformedPacket);
     }
 
+    /// <summary>
+    /// Invalid UTF-8 in a user property name is malformed.
+    /// </summary>
     [Fact]
     public void TryRead_InvalidUtf8InUserPropertyName_IsMalformed()
     {
@@ -240,6 +341,9 @@ public class PropertyBlockTests
         result.ShouldBe(MqttReasonCode.MalformedPacket);
     }
 
+    /// <summary>
+    /// The accessors read integers and bytes by identifier and refuse the wrong value type.
+    /// </summary>
     [Fact]
     public void Accessors_BlockWithValues_ReadByIdentifier()
     {
@@ -262,6 +366,9 @@ public class PropertyBlockTests
         block.TryGetBytes(PropertyId.ReceiveMaximum, out _).ShouldBeFalse();
     }
 
+    /// <summary>
+    /// The accessors on an empty block find nothing.
+    /// </summary>
     [Fact]
     public void Accessors_EmptyBlock_FindNothing()
     {
@@ -277,6 +384,9 @@ public class PropertyBlockTests
         block.UserProperties.MoveNext().ShouldBeFalse();
     }
 
+    /// <summary>
+    /// What every property writer method writes, TryRead reads back, and the sizes add up.
+    /// </summary>
     [Fact]
     public void PropertyWriter_EveryMethod_IsReadBackByTryRead()
     {

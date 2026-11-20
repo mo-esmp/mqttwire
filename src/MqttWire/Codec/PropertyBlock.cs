@@ -1,41 +1,114 @@
 namespace MqttWire.Codec;
 
-// The wire type of a property value.
+/// <summary>
+/// The wire type of a property value.
+/// </summary>
 internal enum PropertyType : byte
 {
+    /// <summary>
+    /// One byte.
+    /// </summary>
     Byte,
+
+    /// <summary>
+    /// Two-byte big-endian integer.
+    /// </summary>
     UInt16,
+
+    /// <summary>
+    /// Four-byte big-endian integer.
+    /// </summary>
     UInt32,
+
+    /// <summary>
+    /// Variable byte integer.
+    /// </summary>
     VariableByteInteger,
+
+    /// <summary>
+    /// Length-prefixed UTF-8 string.
+    /// </summary>
     String,
+
+    /// <summary>
+    /// Length-prefixed binary data.
+    /// </summary>
     Binary,
+
+    /// <summary>
+    /// Two length-prefixed UTF-8 strings: a name and a value.
+    /// </summary>
     StringPair,
 }
 
-// A validated MQTT 5 property block: the properties without their length prefix.
+/// <summary>
+/// A validated MQTT 5 property block: the properties without their length prefix. The accessors walk the
+/// already validated bytes again, so they have no error paths and allocate nothing.
+/// </summary>
 internal readonly ref struct PropertyBlock
 {
+    /// <summary>
+    /// The number of table slots: one per identifier up to the highest one.
+    /// </summary>
     private const int TableLength = (int)PropertyId.SharedSubscriptionAvailable + 1;
 
+    /// <summary>
+    /// Every context flag; the user property is allowed and repeatable in all of them.
+    /// </summary>
     private const PropertyContext EveryContext = (PropertyContext)2047;
 
-    // The rule a value must obey on top of its type (MQTT 5, 2.2.2.2); a broken rule is a protocol error.
+    /// <summary>
+    /// The value rule: any value of the type is allowed.
+    /// </summary>
     private const byte NoRule = 0;
+
+    /// <summary>
+    /// The value rule: 0 is a protocol error.
+    /// </summary>
     private const byte NonZero = 1;
+
+    /// <summary>
+    /// The value rule: anything other than 0 or 1 is a protocol error.
+    /// </summary>
     private const byte ZeroOrOne = 2;
 
-    // Indexed by property id; an unlisted id has no allowed context, so it is unknown.
+    /// <summary>
+    /// The property table (MQTT 5, 2.2.2.2) indexed by identifier; an unlisted identifier has no allowed context, so it is unknown.
+    /// </summary>
     private static readonly Entry[] s_entries = BuildTable();
 
+    /// <summary>
+    /// The validated properties, without the length prefix.
+    /// </summary>
     private readonly ReadOnlySpan<byte> _properties;
 
+    /// <summary>
+    /// Wraps an already validated span.
+    /// </summary>
+    /// <param name="properties">The validated properties, without the length prefix.</param>
     private PropertyBlock(ReadOnlySpan<byte> properties) => _properties = properties;
 
+    /// <summary>
+    /// A block with no properties; the same as <c>default</c>.
+    /// </summary>
     public static PropertyBlock Empty => default;
 
+    /// <summary>
+    /// The user properties in wire order; enumerating an empty block yields nothing.
+    /// </summary>
     public UserPropertyEnumerator UserProperties => new(_properties);
 
-    // Reads the length and the whole block, validates it in one pass and moves the reader past it.
+    /// <summary>
+    /// Reads the length and the whole block, validates it in one pass and moves the reader past it.
+    /// </summary>
+    /// <param name="reader">The reader, positioned at the property length; after a failure its position is unspecified.</param>
+    /// <param name="context">The packet the block belongs to; a single flag.</param>
+    /// <param name="block">The validated block; <see cref="Empty"/> unless the result is success.</param>
+    /// <returns>
+    /// <see cref="MqttReasonCode.Success"/>; <see cref="MqttReasonCode.MalformedPacket"/> for a block or value running
+    /// past its end, an unknown property, one not allowed in the context, invalid UTF-8 or a repeated once-only property;
+    /// <see cref="MqttReasonCode.ProtocolError"/> for a value the standard forbids. The first fault in byte order decides.
+    /// </returns>
     public static MqttReasonCode TryRead(ref MqttReader reader, PropertyContext context, out PropertyBlock block)
     {
         block = default;
@@ -81,8 +154,19 @@ internal readonly ref struct PropertyBlock
         return MqttReasonCode.Success;
     }
 
+    /// <summary>
+    /// Tells whether the block holds the property.
+    /// </summary>
+    /// <param name="id">The property to look for.</param>
+    /// <returns><see langword="true"/> if the property is present.</returns>
     public bool Contains(PropertyId id) => TryFind(id, out _, out _);
 
+    /// <summary>
+    /// Gets the first occurrence of a byte, two-byte, four-byte or variable byte integer property.
+    /// </summary>
+    /// <param name="id">The property to look for.</param>
+    /// <param name="value">The value, or 0 when the result is <see langword="false"/>.</param>
+    /// <returns><see langword="false"/> if the property is absent or is not an integer property.</returns>
     public bool TryGetInteger(PropertyId id, out uint value)
     {
         if (TryFind(id, out value, out _) && s_entries[(int)id].Type is not (PropertyType.String or PropertyType.Binary or PropertyType.StringPair))
@@ -94,6 +178,12 @@ internal readonly ref struct PropertyBlock
         return false;
     }
 
+    /// <summary>
+    /// Gets the first occurrence of a string or binary property, without its length prefix.
+    /// </summary>
+    /// <param name="id">The property to look for.</param>
+    /// <param name="value">The bytes, or empty when the result is <see langword="false"/>.</param>
+    /// <returns><see langword="false"/> if the property is absent or is not a string or binary property.</returns>
     public bool TryGetBytes(PropertyId id, out ReadOnlySpan<byte> value)
     {
         if (TryFind(id, out _, out value) && s_entries[(int)id].Type is PropertyType.String or PropertyType.Binary)
@@ -105,7 +195,14 @@ internal readonly ref struct PropertyBlock
         return false;
     }
 
-    // Reads one value of the given type; a validated block never fails, a block under validation can.
+    /// <summary>
+    /// Reads one value of the given type.
+    /// </summary>
+    /// <param name="reader">The reader, positioned at the value; it does not move on failure.</param>
+    /// <param name="type">The wire type of the value.</param>
+    /// <param name="number">The value of an integer type, otherwise 0.</param>
+    /// <param name="bytes">The data of a string or binary type, the value of a pair; otherwise empty.</param>
+    /// <returns><see langword="false"/> if the value is cut short or invalid; a validated block never fails.</returns>
     internal static bool TryReadValue(scoped ref MqttReader reader, PropertyType type, out uint number, out ReadOnlySpan<byte> bytes)
     {
         number = 0;
@@ -135,8 +232,20 @@ internal readonly ref struct PropertyBlock
         }
     }
 
+    /// <summary>
+    /// Gets the wire type of a property that has already been validated.
+    /// </summary>
+    /// <param name="id">The identifier byte of a property in a validated block.</param>
+    /// <returns>The wire type of the property.</returns>
     internal static PropertyType TypeOf(byte id) => s_entries[id].Type;
 
+    /// <summary>
+    /// Walks the validated block for the first occurrence of a property.
+    /// </summary>
+    /// <param name="id">The property to look for.</param>
+    /// <param name="number">The value if it is an integer property, otherwise 0.</param>
+    /// <param name="bytes">The data if it is a string or binary property, otherwise empty.</param>
+    /// <returns><see langword="false"/> if the property is absent; an empty block returns at once.</returns>
     private bool TryFind(PropertyId id, out uint number, out ReadOnlySpan<byte> bytes)
     {
         number = 0;
@@ -162,6 +271,10 @@ internal readonly ref struct PropertyBlock
         return false;
     }
 
+    /// <summary>
+    /// Builds the property table.
+    /// </summary>
+    /// <returns>The table indexed by identifier.</returns>
     private static Entry[] BuildTable()
     {
         Entry[] table = new Entry[TableLength];
@@ -202,35 +315,86 @@ internal readonly ref struct PropertyBlock
         return table;
     }
 
+    /// <summary>
+    /// Fills one table slot.
+    /// </summary>
+    /// <param name="table">The table to fill.</param>
+    /// <param name="id">The property identifier, which is the slot.</param>
+    /// <param name="type">The wire type of the value.</param>
+    /// <param name="rule">The rule the value must obey.</param>
+    /// <param name="allowed">The contexts the property is allowed in.</param>
+    /// <param name="repeatable">The contexts the property may repeat in; none means once only.</param>
     private static void Set(Entry[] table, PropertyId id, PropertyType type, byte rule, PropertyContext allowed, PropertyContext repeatable = 0)
         => table[(int)id] = new Entry(type, rule, allowed, repeatable);
 
+    /// <summary>
+    /// One row of the property table.
+    /// </summary>
+    /// <param name="Type">The wire type of the value.</param>
+    /// <param name="Rule">The rule the value must obey.</param>
+    /// <param name="Allowed">The contexts the property is allowed in.</param>
+    /// <param name="Repeatable">The contexts the property may repeat in.</param>
     private readonly record struct Entry(PropertyType Type, byte Rule, PropertyContext Allowed, PropertyContext Repeatable);
 }
 
+/// <summary>
+/// The name and value of a user property, as UTF-8 bytes inside the block.
+/// </summary>
 internal readonly ref struct Utf8Pair
 {
+    /// <summary>
+    /// Creates a pair.
+    /// </summary>
+    /// <param name="name">The UTF-8 name.</param>
+    /// <param name="value">The UTF-8 value.</param>
     public Utf8Pair(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value)
     {
         Name = name;
         Value = value;
     }
 
+    /// <summary>
+    /// The UTF-8 name, without its length prefix.
+    /// </summary>
     public ReadOnlySpan<byte> Name { get; }
 
+    /// <summary>
+    /// The UTF-8 value, without its length prefix.
+    /// </summary>
     public ReadOnlySpan<byte> Value { get; }
 }
 
+/// <summary>
+/// Walks the user properties of a validated block in wire order, skipping the other properties.
+/// </summary>
 internal ref struct UserPropertyEnumerator
 {
+    /// <summary>
+    /// The reader over the validated block; it only moves forward.
+    /// </summary>
     private MqttReader _reader;
 
+    /// <summary>
+    /// Creates an enumerator over a validated block.
+    /// </summary>
+    /// <param name="properties">The validated properties, without the length prefix.</param>
     public UserPropertyEnumerator(ReadOnlySpan<byte> properties) => _reader = new MqttReader(properties);
 
+    /// <summary>
+    /// The pair found by the last successful <see cref="MoveNext"/>.
+    /// </summary>
     public Utf8Pair Current { get; private set; }
 
+    /// <summary>
+    /// Returns this enumerator, so the struct works in <c>foreach</c>.
+    /// </summary>
+    /// <returns>A copy of this enumerator.</returns>
     public readonly UserPropertyEnumerator GetEnumerator() => this;
 
+    /// <summary>
+    /// Moves to the next user property.
+    /// </summary>
+    /// <returns><see langword="false"/> when there are no more user properties.</returns>
     public bool MoveNext()
     {
         while (_reader.Remaining > 0)
