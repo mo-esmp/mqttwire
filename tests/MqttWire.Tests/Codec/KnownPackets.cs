@@ -40,4 +40,54 @@ internal static class KnownPackets
     /// PUBLISH with DUP, QoS 2 and retain, topic "t", packet identifier 1 and payload "x".
     /// </summary>
     public static readonly byte[] PublishQoS2 = Hex.Parse("3D 07 00 01 74 00 01 00 78");
+
+    /// <summary>
+    /// PUBACK for packet identifier 10 in the short form: success, no reason code.
+    /// </summary>
+    public static readonly byte[] PubAck = Hex.Parse("40 02 00 0A");
+
+    /// <summary>
+    /// PUBREC for packet identifier 10 refused with quota exceeded and no reason string.
+    /// </summary>
+    public static readonly byte[] PubRecRefused = Hex.Parse("50 03 00 0A 97");
+
+    /// <summary>
+    /// PUBREL for packet identifier 10 in the short form; its flags are 0b0010.
+    /// </summary>
+    public static readonly byte[] PubRel = Hex.Parse("62 02 00 0A");
+
+    /// <summary>
+    /// PUBCOMP for packet identifier 10 with packet identifier not found.
+    /// </summary>
+    public static readonly byte[] PubCompNotFound = Hex.Parse("70 03 00 0A 92");
+
+    /// <summary>
+    /// PUBACK for packet identifier 10 with quota exceeded and the reason string "x".
+    /// </summary>
+    public static readonly byte[] PubAckWithReason = Hex.Parse("40 08 00 0A 97 04 1F 00 01 78");
+
+    /// <summary>
+    /// PINGREQ.
+    /// </summary>
+    public static readonly byte[] PingReq = Hex.Parse("C0 00");
+
+    /// <summary>
+    /// PINGRESP.
+    /// </summary>
+    public static readonly byte[] PingResp = Hex.Parse("D0 00");
+
+    /// <summary>
+    /// DISCONNECT in the short form: normal disconnection, no reason code.
+    /// </summary>
+    public static readonly byte[] Disconnect = Hex.Parse("E0 00");
+
+    /// <summary>
+    /// DISCONNECT with the session taken over and nothing else.
+    /// </summary>
+    public static readonly byte[] DisconnectTakenOver = Hex.Parse("E0 01 8E");
+
+    /// <summary>
+    /// DISCONNECT with the session taken over and the reason string "x".
+    /// </summary>
+    public static readonly byte[] DisconnectWithReason = Hex.Parse("E0 06 8E 04 1F 00 01 78");
 }

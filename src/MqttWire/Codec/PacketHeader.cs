@@ -160,29 +160,62 @@ internal readonly struct PacketHeader
     /// longer than <see cref="TotalLength"/>.
     /// </exception>
     public static PacketHeader ReadExact(ReadOnlySpan<byte> packet, PacketType expected)
+        => ReadExact(packet, expected, expected);
+
+    /// <summary>
+    /// Reads the fixed header of a buffer that must hold exactly one whole packet whose type is in a range of
+    /// adjacent types, such as PUBACK to PUBCOMP. The same rule as <see cref="ReadExact(ReadOnlySpan{byte}, PacketType)"/>,
+    /// with the type check widened.
+    /// </summary>
+    /// <param name="packet">
+    /// The bytes of one framed packet: the fixed header and the remaining length bytes after it, nothing more.
+    /// </param>
+    /// <param name="first">
+    /// The lowest packet type the codec handles.
+    /// </param>
+    /// <param name="last">
+    /// The highest packet type the codec handles.
+    /// </param>
+    /// <returns>
+    /// The header; the body is <c>packet[header.HeaderLength..]</c>, and <see cref="Type"/> says which type it was.
+    /// </returns>
+    /// <exception cref="ArgumentException">
+    /// The header is invalid or cut off, the type is outside <paramref name="first"/> to <paramref name="last"/>,
+    /// or the buffer is shorter or longer than <see cref="TotalLength"/>.
+    /// </exception>
+    public static PacketHeader ReadExact(ReadOnlySpan<byte> packet, PacketType first, PacketType last)
     {
         if (TryReadPacket(packet, out PacketHeader header) != OperationStatus.Done
-            || header.Type != expected
+            || header.Type < first
+            || header.Type > last
             || packet.Length != header.TotalLength)
         {
-            ThrowNotExactPacket(expected);
+            ThrowNotExactPacket(first, last);
         }
 
         return header;
     }
 
     /// <summary>
-    /// Throws for <see cref="ReadExact"/>; kept out of line so the success path stays small enough to inline.
+    /// Throws for <see cref="ReadExact(ReadOnlySpan{byte}, PacketType, PacketType)"/>; kept out of line so the
+    /// success path stays small enough to inline.
     /// </summary>
-    /// <param name="expected">
-    /// The packet type that was expected.
+    /// <param name="first">
+    /// The lowest packet type that was expected.
+    /// </param>
+    /// <param name="last">
+    /// The highest packet type that was expected.
     /// </param>
     /// <exception cref="ArgumentException">
     /// Always.
     /// </exception>
     [DoesNotReturn]
-    private static void ThrowNotExactPacket(PacketType expected)
-        => throw new ArgumentException($"The buffer is not exactly one framed {expected} packet.", "packet");
+    private static void ThrowNotExactPacket(PacketType first, PacketType last)
+        => throw new ArgumentException(
+            first == last
+                ? $"The buffer is not exactly one framed {first} packet."
+                : $"The buffer is not exactly one framed packet of type {first} to {last}.",
+            "packet");
 
     /// <summary>
     /// Gets the size of the fixed header for a remaining length.

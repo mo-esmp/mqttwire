@@ -110,7 +110,7 @@ internal static class ConnAckCodec
     /// property length and bytes left over after the properties.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// The buffer is not exactly one framed CONNACK packet (a caller bug, see <see cref="PacketHeader.ReadExact"/>).
+    /// The buffer is not exactly one framed CONNACK packet (a caller bug, see <see cref="PacketHeader.ReadExact(ReadOnlySpan{byte}, PacketType)"/>).
     /// </exception>
     public static MqttReasonCode TryDecode(ReadOnlySpan<byte> packet, out ConnAckPacket connAck)
     {

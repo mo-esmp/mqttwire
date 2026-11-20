@@ -134,7 +134,7 @@ internal static class PublishCodec
     /// <see cref="MqttReasonCode.MalformedPacket"/> for any other fault in the body.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// The buffer is not exactly one framed PUBLISH packet (a caller bug, see <see cref="PacketHeader.ReadExact"/>).
+    /// The buffer is not exactly one framed PUBLISH packet (a caller bug, see <see cref="PacketHeader.ReadExact(ReadOnlySpan{byte}, PacketType)"/>).
     /// </exception>
     public static MqttReasonCode TryDecode(ReadOnlySpan<byte> packet, PacketSource source, out PublishPacket publish)
     {

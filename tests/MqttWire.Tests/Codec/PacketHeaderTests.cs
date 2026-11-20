@@ -206,4 +206,29 @@ public class PacketHeaderTests
         // Act & Assert
         Should.Throw<ArgumentException>(() => PacketHeader.ReadExact(packet, PacketType.ConnAck));
     }
+
+    /// <summary>
+    /// Proves a packet whose type is anywhere in the range gives its header, and one outside it, a cut-off one or one
+    /// with a trailing byte throws.
+    /// </summary>
+    [Fact]
+    public void ReadExact_TypeRange_AcceptsTheRangeAndRefusesTheRest()
+    {
+        // Arrange
+        byte[] first = Hex.Parse("40 02 00 0A");
+        byte[] last = Hex.Parse("70 02 00 0A");
+        byte[] outside = Hex.Parse("80 02 00 0A");
+        byte[] trailing = Hex.Parse("40 02 00 0A 00");
+
+        // Act
+        PacketHeader firstHeader = PacketHeader.ReadExact(first, PacketType.PubAck, PacketType.PubComp);
+        PacketHeader lastHeader = PacketHeader.ReadExact(last, PacketType.PubAck, PacketType.PubComp);
+
+        // Assert
+        firstHeader.Type.ShouldBe(PacketType.PubAck);
+        lastHeader.Type.ShouldBe(PacketType.PubComp);
+        Should.Throw<ArgumentException>(() => PacketHeader.ReadExact(outside, PacketType.PubAck, PacketType.PubComp));
+        Should.Throw<ArgumentException>(() => PacketHeader.ReadExact(trailing, PacketType.PubAck, PacketType.PubComp));
+    }
 }
+

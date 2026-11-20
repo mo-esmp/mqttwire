@@ -164,7 +164,7 @@ internal static class ConnectCodec
     /// other fault in the body, including bytes left over after the last field.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// The buffer is not exactly one framed CONNECT packet (a caller bug, see <see cref="PacketHeader.ReadExact"/>).
+    /// The buffer is not exactly one framed CONNECT packet (a caller bug, see <see cref="PacketHeader.ReadExact(ReadOnlySpan{byte}, PacketType)"/>).
     /// </exception>
     public static MqttReasonCode TryDecode(ReadOnlySpan<byte> packet, out ConnectPacket connect)
     {
