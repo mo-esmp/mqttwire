@@ -1,114 +1,6 @@
 ﻿namespace MqttWire.Codec;
 
 /// <summary>
-/// Walks the topic filters of a validated UNSUBSCRIBE in wire order. The packet was validated whole when it was
-/// decoded; over bytes that were not, the walk stops at the first filter that cannot be read.
-/// </summary>
-internal ref struct TopicFilterEnumerator
-{
-    /// <summary>
-    /// The reader over the validated filters; it only moves forward.
-    /// </summary>
-    private MqttReader _reader;
-
-    /// <summary>
-    /// Creates an enumerator over validated filters.
-    /// </summary>
-    /// <param name="filters">
-    /// The filters of an UNSUBSCRIBE that <see cref="UnsubscribeCodec.TryDecode"/> accepted.
-    /// </param>
-    public TopicFilterEnumerator(ReadOnlySpan<byte> filters) => _reader = new MqttReader(filters);
-
-    /// <summary>
-    /// The filter found by the last successful <see cref="MoveNext"/>, as UTF-8 without its length prefix.
-    /// </summary>
-    public ReadOnlySpan<byte> Current { get; private set; }
-
-    /// <summary>
-    /// Returns this enumerator, so the struct works in <c>foreach</c>.
-    /// </summary>
-    /// <returns>
-    /// A copy of this enumerator.
-    /// </returns>
-    public readonly TopicFilterEnumerator GetEnumerator() => this;
-
-    /// <summary>
-    /// Moves to the next filter.
-    /// </summary>
-    /// <returns>
-    /// <see langword="false"/> when there are no more filters, or when the next one runs past the end (only possible
-    /// over bytes the decoder did not validate).
-    /// </returns>
-    public bool MoveNext()
-    {
-        if (!_reader.TryReadBinary(out ReadOnlySpan<byte> filter))
-        {
-            return false;
-        }
-
-        Current = filter;
-        return true;
-    }
-}
-
-/// <summary>
-/// A decoded UNSUBSCRIBE packet: views over the bytes it was decoded from, so it is only valid while they are.
-/// </summary>
-internal readonly ref struct UnsubscribePacket
-{
-    /// <summary>
-    /// The topic filters, already validated by <see cref="UnsubscribeCodec.TryDecode"/>: each length-prefixed.
-    /// </summary>
-    private readonly ReadOnlySpan<byte> _filters;
-
-    /// <summary>
-    /// Creates a packet over validated filters.
-    /// </summary>
-    /// <param name="packetIdentifier">
-    /// The packet identifier.
-    /// </param>
-    /// <param name="properties">
-    /// The validated properties.
-    /// </param>
-    /// <param name="filters">
-    /// The validated filters.
-    /// </param>
-    /// <param name="count">
-    /// The number of filters.
-    /// </param>
-    public UnsubscribePacket(ushort packetIdentifier, PropertyBlock properties, ReadOnlySpan<byte> filters, int count)
-    {
-        PacketIdentifier = packetIdentifier;
-        Properties = properties;
-        _filters = filters;
-        Count = count;
-    }
-
-    /// <summary>
-    /// The packet identifier; never 0 in a decoded packet.
-    /// </summary>
-    public ushort PacketIdentifier { get; }
-
-    /// <summary>
-    /// The validated UNSUBSCRIBE properties.
-    /// </summary>
-    public PropertyBlock Properties { get; }
-
-    /// <summary>
-    /// The number of topic filters, at least 1.
-    /// </summary>
-    public int Count { get; }
-
-    /// <summary>
-    /// Gets an enumerator over the topic filters, which cannot fail.
-    /// </summary>
-    /// <returns>
-    /// The enumerator.
-    /// </returns>
-    public TopicFilterEnumerator GetTopicFilters() => new(_filters);
-}
-
-/// <summary>
 /// Decodes and encodes the MQTT 5 UNSUBSCRIBE packet (MQTT 5, 3.10). The encoder writes one filter per packet.
 /// </summary>
 internal static class UnsubscribeCodec
@@ -241,7 +133,7 @@ internal static class UnsubscribeCodec
         int remainingLength = GetRemainingLength(topicFilter);
         if (destination.Length < PacketHeader.GetLength(remainingLength) + remainingLength)
         {
-            CodecThrow.DestinationTooSmall();
+            CodecThrow.DestinationTooSmall(nameof(destination));
         }
 
         int headerLength = PacketHeader.Write(destination, PacketType.Unsubscribe, Flags, remainingLength);

@@ -142,7 +142,7 @@ internal static class ReasonCodeList
         int remainingLength = GetRemainingLength(reasonCodes.Length, reasonString, out int propertiesLength);
         if (destination.Length < PacketHeader.GetLength(remainingLength) + remainingLength)
         {
-            CodecThrow.DestinationTooSmall();
+            CodecThrow.DestinationTooSmall(nameof(destination));
         }
 
         int headerLength = PacketHeader.Write(destination, type, 0, remainingLength);

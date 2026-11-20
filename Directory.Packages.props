@@ -11,4 +11,11 @@
     <PackageVersion Include="MQTTnet" Version="5.2.0.1603" />
     <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
   </ItemGroup>
+
+  <ItemGroup Label="Analyzers">
+    <PackageVersion Include="Meziantou.Analyzer" Version="2.0.257" />
+    <PackageVersion Include="SonarAnalyzer.CSharp" Version="10.16.0.128591" />
+    <PackageVersion Include="Roslynator.Analyzers" Version="4.14.1" />
+    <PackageVersion Include="xunit.analyzers" Version="1.26.0" />
+  </ItemGroup>
 </Project>

@@ -1,76 +1,6 @@
 ﻿namespace MqttWire.Codec;
 
 /// <summary>
-/// A decoded CONNACK packet: views over the bytes it was decoded from, so it is only valid while they are.
-/// </summary>
-internal readonly ref struct ConnAckPacket
-{
-    /// <summary>
-    /// Whether the server holds a session for the client; the client closes the connection on it (MQTT 5, 3.2.2.1.1).
-    /// </summary>
-    public bool SessionPresent { get; init; }
-
-    /// <summary>
-    /// The reason code as the server sent it; its value is not checked against the packet type.
-    /// </summary>
-    public MqttReasonCode ReasonCode { get; init; }
-
-    /// <summary>
-    /// The validated CONNACK properties.
-    /// </summary>
-    public PropertyBlock Properties { get; init; }
-}
-
-/// <summary>
-/// What a server writes into a CONNACK. Session present is always written as 0, and a <see langword="null"/> field
-/// writes no property.
-/// </summary>
-internal readonly ref struct ConnAckFields
-{
-    /// <summary>
-    /// The reason code.
-    /// </summary>
-    public MqttReasonCode ReasonCode { get; init; }
-
-    /// <summary>
-    /// The Session Expiry Interval property in seconds, or <see langword="null"/> to write none.
-    /// </summary>
-    public uint? SessionExpiryInterval { get; init; }
-
-    /// <summary>
-    /// The Receive Maximum property, or <see langword="null"/> to write none. The standard forbids 0, so the encoder
-    /// refuses it.
-    /// </summary>
-    public ushort? ReceiveMaximum { get; init; }
-
-    /// <summary>
-    /// The Maximum QoS property, or <see langword="null"/> to write none. Only 0 and 1 can be carried, so the encoder
-    /// refuses anything above 1.
-    /// </summary>
-    public byte? MaximumQoS { get; init; }
-
-    /// <summary>
-    /// The Subscription Identifier Available property, or <see langword="null"/> to write none.
-    /// </summary>
-    public bool? SubscriptionIdentifiersAvailable { get; init; }
-
-    /// <summary>
-    /// The Server Keep Alive property in seconds, or <see langword="null"/> to write none.
-    /// </summary>
-    public ushort? ServerKeepAlive { get; init; }
-
-    /// <summary>
-    /// The Reason String property, or <see langword="null"/> to write none.
-    /// </summary>
-    public string? ReasonString { get; init; }
-
-    /// <summary>
-    /// The user properties, written last; empty writes none.
-    /// </summary>
-    public ReadOnlySpan<MqttWireUserProperty> UserProperties { get; init; }
-}
-
-/// <summary>
 /// Decodes and encodes the MQTT 5 CONNACK packet (MQTT 5, 3.2).
 /// </summary>
 internal static class ConnAckCodec
@@ -193,7 +123,7 @@ internal static class ConnAckCodec
         int size = PacketHeader.GetLength(remainingLength) + remainingLength;
         if (destination.Length < size)
         {
-            CodecThrow.DestinationTooSmall();
+            CodecThrow.DestinationTooSmall(nameof(destination));
         }
 
         int headerLength = PacketHeader.Write(destination, PacketType.ConnAck, 0, remainingLength);
@@ -258,14 +188,14 @@ internal static class ConnAckCodec
     /// </exception>
     private static int GetRemainingLength(in ConnAckFields fields, out int propertiesLength)
     {
-        if (fields.ReceiveMaximum is ushort receiveMaximum)
+        if (fields.ReceiveMaximum is 0)
         {
-            ArgumentOutOfRangeException.ThrowIfZero(receiveMaximum, "ReceiveMaximum");
+            CodecThrow.OutOfRange("The Receive Maximum cannot be 0.", nameof(ConnAckFields.ReceiveMaximum));
         }
 
-        if (fields.MaximumQoS is byte maximumQoS)
+        if (fields.MaximumQoS is > HighestMaximumQoS)
         {
-            ArgumentOutOfRangeException.ThrowIfGreaterThan(maximumQoS, HighestMaximumQoS, "MaximumQoS");
+            CodecThrow.OutOfRange("The Maximum QoS cannot be above 1.", nameof(ConnAckFields.MaximumQoS));
         }
 
         // Summed in a long: many large user properties can pass int.MaxValue.

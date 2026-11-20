@@ -1,88 +1,8 @@
 ﻿using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Text.Unicode;
 
 namespace MqttWire.Codec;
-
-/// <summary>
-/// A decoded PUBLISH packet: views over the bytes it was decoded from, so it is only valid while they are.
-/// </summary>
-internal readonly ref struct PublishPacket
-{
-    /// <summary>
-    /// The quality of service of the delivery.
-    /// </summary>
-    public MqttQoS QoS { get; init; }
-
-    /// <summary>
-    /// Whether this is a re-delivery of an earlier attempt; the flag as the sender set it.
-    /// </summary>
-    public bool Dup { get; init; }
-
-    /// <summary>
-    /// Whether the message is to be retained.
-    /// </summary>
-    public bool Retain { get; init; }
-
-    /// <summary>
-    /// The topic name as UTF-8, checked to be well-formed and free of wildcards. It is empty only when
-    /// <see cref="HasTopicAlias"/> is <see langword="true"/>.
-    /// </summary>
-    public ReadOnlySpan<byte> Topic { get; init; }
-
-    /// <summary>
-    /// The packet identifier; 0 at QoS 0, where the packet has none.
-    /// </summary>
-    public ushort PacketIdentifier { get; init; }
-
-    /// <summary>
-    /// The validated PUBLISH properties.
-    /// </summary>
-    public PropertyBlock Properties { get; init; }
-
-    /// <summary>
-    /// The application message, which may be empty.
-    /// </summary>
-    public ReadOnlySpan<byte> Payload { get; init; }
-
-    /// <summary>
-    /// Whether the properties hold a Topic Alias, found once while decoding. The decoder reports it and does not
-    /// resolve it.
-    /// </summary>
-    public bool HasTopicAlias { get; init; }
-}
-
-/// <summary>
-/// What is written into a PUBLISH. MqttWire never writes PUBLISH properties, so the property length is always 0.
-/// </summary>
-internal readonly ref struct PublishFields
-{
-    /// <summary>
-    /// The topic name as UTF-8, encoded once by the caller. The encoder checks that it is not empty, holds no
-    /// wildcard and no U+0000 and fits 65,535 bytes. It does not check that the bytes are well-formed UTF-8: that is
-    /// the duty of whoever makes the topic bytes, met once per topic rather than once per packet written.
-    /// </summary>
-    public ReadOnlySpan<byte> Topic { get; init; }
-
-    /// <summary>
-    /// The quality of service; the default is QoS 0.
-    /// </summary>
-    public MqttQoS QoS { get; init; }
-
-    /// <summary>
-    /// The retain flag.
-    /// </summary>
-    public bool Retain { get; init; }
-
-    /// <summary>
-    /// The DUP flag, written as given.
-    /// </summary>
-    public bool Dup { get; init; }
-
-    /// <summary>
-    /// The packet identifier: 0 at QoS 0, from 1 to 65,535 at QoS 1 and 2; the encoder refuses anything else.
-    /// </summary>
-    public ushort PacketIdentifier { get; init; }
-}
 
 /// <summary>
 /// Decodes and encodes the MQTT 5 PUBLISH packet (MQTT 5, 3.3).
@@ -147,35 +67,13 @@ internal static class PublishCodec
         MqttReader reader = new(packet[header.HeaderLength..]);
         MqttQoS qos = (MqttQoS)((header.Flags >> QosShift) & QosMask);
 
-        // The topic is read as binary and checked here, so it is scanned twice rather than three times: once for
-        // well-formed UTF-8, once for U+0000 and the wildcards together.
-        if (!reader.TryReadBinary(out ReadOnlySpan<byte> topic) || !Utf8.IsValid(topic))
+        MqttReasonCode result = TryReadTopicAndIdentifier(ref reader, qos, out ReadOnlySpan<byte> topic, out int found, out ushort identifier);
+        if (result != MqttReasonCode.Success)
         {
-            return MqttReasonCode.MalformedPacket;
+            return result;
         }
 
-        // U+0000 anywhere makes the packet malformed at once; a wildcard is reported only after the later checks.
-        int found = Topics.IndexOfWildcardOrNull(topic);
-        if (found >= 0 && topic[found..].Contains((byte)0))
-        {
-            return MqttReasonCode.MalformedPacket;
-        }
-
-        ushort identifier = 0;
-        if (qos != MqttQoS.AtMostOnce)
-        {
-            if (!reader.TryReadUInt16(out identifier))
-            {
-                return MqttReasonCode.MalformedPacket;
-            }
-
-            if (identifier == 0)
-            {
-                return MqttReasonCode.ProtocolError;
-            }
-        }
-
-        MqttReasonCode result = PropertyBlock.TryRead(ref reader, PropertyContext.Publish, out PropertyBlock properties);
+        result = PropertyBlock.TryRead(ref reader, PropertyContext.Publish, out PropertyBlock properties);
         if (result != MqttReasonCode.Success)
         {
             return result;
@@ -210,6 +108,69 @@ internal static class PublishCodec
             Payload = reader.ReadToEnd(),
             HasTopicAlias = hasTopicAlias,
         };
+        return MqttReasonCode.Success;
+    }
+
+    /// <summary>
+    /// Reads the part of the variable header ahead of the properties: the topic name, checked to be well-formed
+    /// UTF-8 without U+0000, and the packet identifier at QoS 1 and 2. A wildcard is not a fault here: its position
+    /// is handed back so the caller reports it only after its later checks.
+    /// </summary>
+    /// <param name="reader">
+    /// The reader, positioned at the topic; it moves past the topic and the identifier. After a failure its
+    /// position is unspecified.
+    /// </param>
+    /// <param name="qos">
+    /// The QoS from the fixed header, which decides whether a packet identifier follows the topic.
+    /// </param>
+    /// <param name="topic">
+    /// The topic name as UTF-8, a view of the input; unspecified after a failure.
+    /// </param>
+    /// <param name="found">
+    /// The index of the first wildcard in the topic, or -1 when it has none; unspecified after a failure.
+    /// </param>
+    /// <param name="identifier">
+    /// The packet identifier; 0 at QoS 0 and after a failure.
+    /// </param>
+    /// <returns>
+    /// <see cref="MqttReasonCode.Success"/>; <see cref="MqttReasonCode.MalformedPacket"/> for a topic that is cut
+    /// short, not well-formed UTF-8 or holds U+0000, or a missing packet identifier;
+    /// <see cref="MqttReasonCode.ProtocolError"/> for a packet identifier of 0 at QoS 1 or 2.
+    /// </returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static MqttReasonCode TryReadTopicAndIdentifier(
+        scoped ref MqttReader reader, MqttQoS qos, out ReadOnlySpan<byte> topic, out int found, out ushort identifier)
+    {
+        found = -1;
+        identifier = 0;
+
+        // The topic is read as binary and checked here, so it is scanned twice rather than three times: once for
+        // well-formed UTF-8, once for U+0000 and the wildcards together.
+        if (!reader.TryReadBinary(out topic) || !Utf8.IsValid(topic))
+        {
+            return MqttReasonCode.MalformedPacket;
+        }
+
+        // U+0000 anywhere makes the packet malformed at once; a wildcard is reported only after the later checks.
+        found = Topics.IndexOfWildcardOrNull(topic);
+        if (found >= 0 && topic[found..].Contains((byte)0))
+        {
+            return MqttReasonCode.MalformedPacket;
+        }
+
+        if (qos != MqttQoS.AtMostOnce)
+        {
+            if (!reader.TryReadUInt16(out identifier))
+            {
+                return MqttReasonCode.MalformedPacket;
+            }
+
+            if (identifier == 0)
+            {
+                return MqttReasonCode.ProtocolError;
+            }
+        }
+
         return MqttReasonCode.Success;
     }
 
@@ -286,7 +247,7 @@ internal static class PublishCodec
         int remainingLength = GetRemainingLength(fields, payloadLength, out int variableHeaderLength);
         if (destination.Length < PacketHeader.GetLength(remainingLength) + variableHeaderLength)
         {
-            CodecThrow.DestinationTooSmall();
+            CodecThrow.DestinationTooSmall(nameof(destination));
         }
 
         return WriteHeaderCore(destination, fields, remainingLength);
@@ -316,7 +277,7 @@ internal static class PublishCodec
         int remainingLength = GetRemainingLength(fields, payload.Length, out _);
         if (destination.Length < PacketHeader.GetLength(remainingLength) + remainingLength)
         {
-            CodecThrow.DestinationTooSmall();
+            CodecThrow.DestinationTooSmall(nameof(destination));
         }
 
         int headerLength = WriteHeaderCore(destination, fields, remainingLength);

@@ -7,6 +7,11 @@
 internal enum PropertyContext : ushort
 {
     /// <summary>
+    /// No context: a property allowed or repeatable in none.
+    /// </summary>
+    None = 0,
+
+    /// <summary>
     /// CONNECT.
     /// </summary>
     Connect = 1,

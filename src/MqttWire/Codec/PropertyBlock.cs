@@ -1,50 +1,12 @@
-﻿namespace MqttWire.Codec;
+﻿using System.Runtime.InteropServices;
 
-/// <summary>
-/// The wire type of a property value.
-/// </summary>
-internal enum PropertyType : byte
-{
-    /// <summary>
-    /// One byte.
-    /// </summary>
-    Byte,
-
-    /// <summary>
-    /// Two-byte big-endian integer.
-    /// </summary>
-    UInt16,
-
-    /// <summary>
-    /// Four-byte big-endian integer.
-    /// </summary>
-    UInt32,
-
-    /// <summary>
-    /// Variable byte integer.
-    /// </summary>
-    VariableByteInteger,
-
-    /// <summary>
-    /// Length-prefixed UTF-8 string.
-    /// </summary>
-    String,
-
-    /// <summary>
-    /// Length-prefixed binary data.
-    /// </summary>
-    Binary,
-
-    /// <summary>
-    /// Two length-prefixed UTF-8 strings: a name and a value.
-    /// </summary>
-    StringPair,
-}
+namespace MqttWire.Codec;
 
 /// <summary>
 /// A validated MQTT 5 property block: the properties without their length prefix. The accessors walk the
 /// already validated bytes again, so they have no error paths and allocate nothing.
 /// </summary>
+[StructLayout(LayoutKind.Auto)]
 internal readonly ref struct PropertyBlock
 {
     /// <summary>
@@ -150,13 +112,13 @@ internal readonly ref struct PropertyBlock
             }
 
             ref readonly Entry entry = ref s_entries[id];
-            if ((entry.Allowed & context) == 0 || !TryReadValue(ref properties, entry.Type, out uint number, out _))
+            if ((entry.Allowed & context) == PropertyContext.None || !TryReadValue(ref properties, entry.Type, out uint number, out _))
             {
                 return MqttReasonCode.MalformedPacket;
             }
 
             ulong bit = 1UL << id;
-            if ((entry.Repeatable & context) == 0 && (present & bit) != 0)
+            if ((entry.Repeatable & context) == PropertyContext.None && (present & bit) != 0)
             {
                 return MqttReasonCode.MalformedPacket;
             }
@@ -444,7 +406,7 @@ internal readonly ref struct PropertyBlock
     /// <param name="repeatable">
     /// The contexts the property may repeat in; none means once only.
     /// </param>
-    private static void Set(Entry[] table, PropertyId id, PropertyType type, byte rule, PropertyContext allowed, PropertyContext repeatable = 0)
+    private static void Set(Entry[] table, PropertyId id, PropertyType type, byte rule, PropertyContext allowed, PropertyContext repeatable = PropertyContext.None)
         => table[(int)id] = new Entry(type, rule, allowed, repeatable);
 
     /// <summary>
@@ -462,93 +424,6 @@ internal readonly ref struct PropertyBlock
     /// <param name="Repeatable">
     /// The contexts the property may repeat in.
     /// </param>
+    [StructLayout(LayoutKind.Auto)]
     private readonly record struct Entry(PropertyType Type, byte Rule, PropertyContext Allowed, PropertyContext Repeatable);
-}
-
-/// <summary>
-/// The name and value of a user property, as UTF-8 bytes inside the block.
-/// </summary>
-internal readonly ref struct Utf8Pair
-{
-    /// <summary>
-    /// Creates a pair.
-    /// </summary>
-    /// <param name="name">
-    /// The UTF-8 name.
-    /// </param>
-    /// <param name="value">
-    /// The UTF-8 value.
-    /// </param>
-    public Utf8Pair(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value)
-    {
-        Name = name;
-        Value = value;
-    }
-
-    /// <summary>
-    /// The UTF-8 name, without its length prefix.
-    /// </summary>
-    public ReadOnlySpan<byte> Name { get; }
-
-    /// <summary>
-    /// The UTF-8 value, without its length prefix.
-    /// </summary>
-    public ReadOnlySpan<byte> Value { get; }
-}
-
-/// <summary>
-/// Walks the user properties of a validated block in wire order, skipping the other properties.
-/// </summary>
-internal ref struct UserPropertyEnumerator
-{
-    /// <summary>
-    /// The reader over the validated block; it only moves forward.
-    /// </summary>
-    private MqttReader _reader;
-
-    /// <summary>
-    /// Creates an enumerator over a validated block.
-    /// </summary>
-    /// <param name="properties">
-    /// The validated properties, without the length prefix.
-    /// </param>
-    public UserPropertyEnumerator(ReadOnlySpan<byte> properties) => _reader = new MqttReader(properties);
-
-    /// <summary>
-    /// The pair found by the last successful <see cref="MoveNext"/>.
-    /// </summary>
-    public Utf8Pair Current { get; private set; }
-
-    /// <summary>
-    /// Returns this enumerator, so the struct works in <c>foreach</c>.
-    /// </summary>
-    /// <returns>
-    /// A copy of this enumerator.
-    /// </returns>
-    public readonly UserPropertyEnumerator GetEnumerator() => this;
-
-    /// <summary>
-    /// Moves to the next user property.
-    /// </summary>
-    /// <returns>
-    /// <see langword="false"/> when there are no more user properties.
-    /// </returns>
-    public bool MoveNext()
-    {
-        while (_reader.Remaining > 0)
-        {
-            _reader.TryReadByte(out byte id);
-            if (id == (byte)PropertyId.UserProperty)
-            {
-                _reader.TryReadBinary(out ReadOnlySpan<byte> name);
-                _reader.TryReadBinary(out ReadOnlySpan<byte> value);
-                Current = new Utf8Pair(name, value);
-                return true;
-            }
-
-            PropertyBlock.ReadValidated(ref _reader, PropertyBlock.TypeOf(id), out _, out _);
-        }
-
-        return false;
-    }
 }

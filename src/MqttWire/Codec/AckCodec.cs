@@ -1,34 +1,6 @@
 ﻿namespace MqttWire.Codec;
 
 /// <summary>
-/// A decoded PUBACK, PUBREC, PUBREL or PUBCOMP packet: views over the bytes it was decoded from, so it is only
-/// valid while they are.
-/// </summary>
-internal readonly ref struct AckPacket
-{
-    /// <summary>
-    /// Which of the four acknowledgements this is.
-    /// </summary>
-    public PacketType Type { get; init; }
-
-    /// <summary>
-    /// The identifier of the publish exchange; never 0 in a decoded packet.
-    /// </summary>
-    public ushort PacketIdentifier { get; init; }
-
-    /// <summary>
-    /// The reason code as sent; <see cref="MqttReasonCode.Success"/> when the packet is in its short form. Its value
-    /// is not checked against the packet type.
-    /// </summary>
-    public MqttReasonCode ReasonCode { get; init; }
-
-    /// <summary>
-    /// The validated acknowledgement properties; empty in the short forms.
-    /// </summary>
-    public PropertyBlock Properties { get; init; }
-}
-
-/// <summary>
 /// Decodes and encodes the MQTT 5 acknowledgements PUBACK, PUBREC, PUBREL and PUBCOMP (MQTT 5, 3.4 to 3.7). They
 /// share one layout, so one codec handles the four.
 /// </summary>
@@ -162,7 +134,7 @@ internal static class AckCodec
         int size = PacketHeader.GetLength(remainingLength) + remainingLength;
         if (destination.Length < size)
         {
-            CodecThrow.DestinationTooSmall();
+            CodecThrow.DestinationTooSmall(nameof(destination));
         }
 
         int headerLength = PacketHeader.Write(destination, type, type == PacketType.PubRel ? PubRelFlags : (byte)0, remainingLength);

@@ -131,7 +131,7 @@ internal static class VariableByteInteger
         int length = GetLength(value);
         if (destination.Length < length)
         {
-            CodecThrow.DestinationTooSmall();
+            CodecThrow.DestinationTooSmall(nameof(destination));
         }
 
         for (int i = 0; i < length - 1; i++)

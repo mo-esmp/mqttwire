@@ -1,89 +1,6 @@
 ﻿namespace MqttWire.Codec;
 
 /// <summary>
-/// A decoded CONNECT packet: views over the bytes it was decoded from, so it is only valid while they are.
-/// </summary>
-internal readonly ref struct ConnectPacket
-{
-    /// <summary>
-    /// The client identifier as UTF-8 bytes; empty when the client sent none, which the server decides about.
-    /// </summary>
-    public ReadOnlySpan<byte> ClientId { get; init; }
-
-    /// <summary>
-    /// Whether the user name flag was set; the name itself may be empty.
-    /// </summary>
-    public bool HasUserName { get; init; }
-
-    /// <summary>
-    /// The user name as UTF-8 bytes; empty when <see cref="HasUserName"/> is <see langword="false"/>.
-    /// </summary>
-    public ReadOnlySpan<byte> UserName { get; init; }
-
-    /// <summary>
-    /// Whether the password flag was set; the password itself may be empty.
-    /// </summary>
-    public bool HasPassword { get; init; }
-
-    /// <summary>
-    /// The password bytes; empty when <see cref="HasPassword"/> is <see langword="false"/>.
-    /// </summary>
-    public ReadOnlySpan<byte> Password { get; init; }
-
-    /// <summary>
-    /// The keep-alive interval in seconds; 0 means the client asks for none.
-    /// </summary>
-    public ushort KeepAliveSeconds { get; init; }
-
-    /// <summary>
-    /// Whether the client asks to start a new session rather than resume one.
-    /// </summary>
-    public bool CleanStart { get; init; }
-
-    /// <summary>
-    /// Whether the packet carries a Will; its content is validated but not exposed.
-    /// </summary>
-    public bool HasWill { get; init; }
-
-    /// <summary>
-    /// The validated CONNECT properties.
-    /// </summary>
-    public PropertyBlock Properties { get; init; }
-}
-
-/// <summary>
-/// What the client writes into a CONNECT: protocol 5, clean start, no Will, and Receive Maximum as the only property.
-/// </summary>
-internal readonly ref struct ConnectFields
-{
-    /// <summary>
-    /// The client identifier.
-    /// </summary>
-    public required string ClientId { get; init; }
-
-    /// <summary>
-    /// The user name, or <see langword="null"/> to write neither the flag nor the field.
-    /// </summary>
-    public string? UserName { get; init; }
-
-    /// <summary>
-    /// The password, or <see langword="null"/> to write neither the flag nor the field.
-    /// </summary>
-    public byte[]? Password { get; init; }
-
-    /// <summary>
-    /// The keep-alive interval in seconds.
-    /// </summary>
-    public ushort KeepAliveSeconds { get; init; }
-
-    /// <summary>
-    /// The Receive Maximum property: how many QoS 1 and 2 publications the client accepts at once. The client
-    /// sends 1,024 (MQTT 5, 3.1.2.11.3). The standard forbids 0, so the encoder refuses it.
-    /// </summary>
-    public ushort ReceiveMaximum { get; init; }
-}
-
-/// <summary>
 /// Decodes and encodes the MQTT 5 CONNECT packet (MQTT 5, 3.1).
 /// </summary>
 internal static class ConnectCodec
@@ -198,36 +115,82 @@ internal static class ConnectCodec
             return MqttReasonCode.ProtocolError;
         }
 
-        if (!reader.TryReadUtf8String(out ReadOnlySpan<byte> clientId))
+        result = TryReadPayload(ref reader, flags, out ReadOnlySpan<byte> clientId, out ReadOnlySpan<byte> userName, out ReadOnlySpan<byte> password);
+        if (result != MqttReasonCode.Success)
+        {
+            return result;
+        }
+
+        connect = new ConnectPacket
+        {
+            ClientId = clientId,
+            HasUserName = (flags & UserNameFlag) != 0,
+            UserName = userName,
+            HasPassword = (flags & PasswordFlag) != 0,
+            Password = password,
+            KeepAliveSeconds = keepAlive,
+            CleanStart = (flags & CleanStartFlag) != 0,
+            HasWill = (flags & WillFlag) != 0,
+            Properties = properties,
+        };
+        return MqttReasonCode.Success;
+    }
+
+    /// <summary>
+    /// Reads the payload of a CONNECT (MQTT 5, 3.1.3) in wire order: the client identifier, the Will when its flag is
+    /// set, then the user name and the password when theirs are, and checks that nothing is left after them.
+    /// </summary>
+    /// <param name="reader">
+    /// The reader, positioned at the client identifier; it moves to the end of the packet. After a failure its
+    /// position is unspecified.
+    /// </param>
+    /// <param name="flags">
+    /// The connect flags, already checked by <see cref="AreFlagsValid"/>; they say which fields are present.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier as UTF-8 bytes, a view of the input; empty when it cannot be read.
+    /// </param>
+    /// <param name="userName">
+    /// The user name as UTF-8 bytes, a view of the input; empty when its flag is clear or the payload is faulty
+    /// before it.
+    /// </param>
+    /// <param name="password">
+    /// The password bytes, a view of the input; empty when its flag is clear or the payload is faulty before it.
+    /// </param>
+    /// <returns>
+    /// <see cref="MqttReasonCode.Success"/>; the error of <see cref="TryReadWill"/> for a faulty Will;
+    /// <see cref="MqttReasonCode.MalformedPacket"/> for a field that cannot be read or bytes left over after the
+    /// last field.
+    /// </returns>
+    private static MqttReasonCode TryReadPayload(
+        scoped ref MqttReader reader,
+        byte flags,
+        out ReadOnlySpan<byte> clientId,
+        out ReadOnlySpan<byte> userName,
+        out ReadOnlySpan<byte> password)
+    {
+        userName = default;
+        password = default;
+        if (!reader.TryReadUtf8String(out clientId))
         {
             return MqttReasonCode.MalformedPacket;
         }
 
-        bool hasWill = (flags & WillFlag) != 0;
-        if (hasWill)
+        if ((flags & WillFlag) != 0)
         {
-            result = PropertyBlock.TryRead(ref reader, PropertyContext.Will, out _);
+            MqttReasonCode result = TryReadWill(ref reader);
             if (result != MqttReasonCode.Success)
             {
                 return result;
             }
-
-            if (!reader.TryReadUtf8String(out _) || !reader.TryReadBinary(out _))
-            {
-                return MqttReasonCode.MalformedPacket;
-            }
         }
 
-        ReadOnlySpan<byte> userName = default;
-        bool hasUserName = (flags & UserNameFlag) != 0;
-        if (hasUserName && !reader.TryReadUtf8String(out userName))
+        if ((flags & UserNameFlag) != 0 && !reader.TryReadUtf8String(out userName))
         {
             return MqttReasonCode.MalformedPacket;
         }
 
-        ReadOnlySpan<byte> password = default;
-        bool hasPassword = (flags & PasswordFlag) != 0;
-        if (hasPassword && !reader.TryReadBinary(out password))
+        if ((flags & PasswordFlag) != 0 && !reader.TryReadBinary(out password))
         {
             return MqttReasonCode.MalformedPacket;
         }
@@ -237,18 +200,34 @@ internal static class ConnectCodec
             return MqttReasonCode.MalformedPacket;
         }
 
-        connect = new ConnectPacket
+        return MqttReasonCode.Success;
+    }
+
+    /// <summary>
+    /// Reads and validates the Will of a CONNECT (MQTT 5, 3.1.3.2 to 3.1.3.4): its properties, topic and payload.
+    /// The content is checked but not kept.
+    /// </summary>
+    /// <param name="reader">
+    /// The reader, positioned at the Will properties; it moves past the Will payload. After a failure its position
+    /// is unspecified.
+    /// </param>
+    /// <returns>
+    /// <see cref="MqttReasonCode.Success"/>; the error of <see cref="PropertyBlock.TryRead"/> for a faulty property
+    /// block; <see cref="MqttReasonCode.MalformedPacket"/> for a Will topic or payload that cannot be read.
+    /// </returns>
+    private static MqttReasonCode TryReadWill(scoped ref MqttReader reader)
+    {
+        MqttReasonCode result = PropertyBlock.TryRead(ref reader, PropertyContext.Will, out _);
+        if (result != MqttReasonCode.Success)
         {
-            ClientId = clientId,
-            HasUserName = hasUserName,
-            UserName = userName,
-            HasPassword = hasPassword,
-            Password = password,
-            KeepAliveSeconds = keepAlive,
-            CleanStart = (flags & CleanStartFlag) != 0,
-            HasWill = hasWill,
-            Properties = properties,
-        };
+            return result;
+        }
+
+        if (!reader.TryReadUtf8String(out _) || !reader.TryReadBinary(out _))
+        {
+            return MqttReasonCode.MalformedPacket;
+        }
+
         return MqttReasonCode.Success;
     }
 
@@ -304,7 +283,7 @@ internal static class ConnectCodec
         int size = PacketHeader.GetLength(remainingLength) + remainingLength;
         if (destination.Length < size)
         {
-            CodecThrow.DestinationTooSmall();
+            CodecThrow.DestinationTooSmall(nameof(destination));
         }
 
         int headerLength = PacketHeader.Write(destination, PacketType.Connect, 0, remainingLength);
@@ -362,7 +341,10 @@ internal static class ConnectCodec
     /// </exception>
     private static int GetRemainingLength(in ConnectFields fields)
     {
-        ArgumentOutOfRangeException.ThrowIfZero(fields.ReceiveMaximum, "ReceiveMaximum");
+        if (fields.ReceiveMaximum == 0)
+        {
+            CodecThrow.OutOfRange("The Receive Maximum cannot be 0.", nameof(ConnectFields.ReceiveMaximum));
+        }
 
         int length = FixedVariableHeaderSize + PropertiesSize + FieldSize.Utf8String(fields.ClientId);
 
