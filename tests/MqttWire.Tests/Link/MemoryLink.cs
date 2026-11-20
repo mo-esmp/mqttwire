@@ -61,6 +61,7 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     private Exception? _readFailure;
     private Exception? _writeFailure;
     private bool _holdWrites;
+    private CancellationTokenRegistration _registration;
 
     /// <summary>
     /// Gets the number of writes that completed successfully since the link was created.
@@ -152,6 +153,7 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
         }
 
         int result;
+        CancellationTokenRegistration registration;
         lock (_gate)
         {
             Append(bytes);
@@ -161,8 +163,10 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
             }
 
             result = CompletePendingLocked();
+            registration = TakeRegistrationLocked();
         }
 
+        registration.Dispose();
         _core.SetResult(result);
     }
 
@@ -192,6 +196,7 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     public void EndFromPeer()
     {
         int result;
+        CancellationTokenRegistration registration;
         lock (_gate)
         {
             _ended = true;
@@ -201,8 +206,10 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
             }
 
             result = CompletePendingLocked();
+            registration = TakeRegistrationLocked();
         }
 
+        registration.Dispose();
         _core.SetResult(result);
     }
 
@@ -215,6 +222,7 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     public void FailReads(Exception exception)
     {
         ArgumentNullException.ThrowIfNull(exception);
+        CancellationTokenRegistration registration;
         lock (_gate)
         {
             _readFailure = exception;
@@ -224,8 +232,10 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
             }
 
             _pending = Pending.None;
+            registration = TakeRegistrationLocked();
         }
 
+        registration.Dispose();
         _core.SetException(exception);
     }
 
@@ -312,7 +322,7 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     /// Completes when a read would not wait; a wait already satisfied completes at once.
     /// </summary>
     /// <param name="cancellationToken">
-    /// Observed only on entry: an already cancelled token throws.
+    /// An already cancelled token throws; one that fires while the operation is pending ends it with <see cref="OperationCanceledException"/>.
     /// </param>
     /// <returns>
     /// A task that completes when data has arrived or the link has ended.
@@ -337,7 +347,7 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
                 return default;
             }
 
-            BeginPendingLocked(Pending.Wait, default);
+            BeginPendingLocked(Pending.Wait, default, cancellationToken);
             return new ValueTask(this, _core.Version);
         }
     }
@@ -349,7 +359,7 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     /// Receives the bytes.
     /// </param>
     /// <param name="cancellationToken">
-    /// Observed only on entry: an already cancelled token throws.
+    /// An already cancelled token throws; one that fires while the operation is pending ends it with <see cref="OperationCanceledException"/>.
     /// </param>
     /// <returns>
     /// The number of bytes read, or 0 after <see cref="EndFromPeer"/>.
@@ -379,7 +389,7 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
                 return new ValueTask<int>(0);
             }
 
-            BeginPendingLocked(Pending.Read, buffer);
+            BeginPendingLocked(Pending.Read, buffer, cancellationToken);
             return new ValueTask<int>(this, _core.Version);
         }
     }
@@ -452,6 +462,7 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     /// </summary>
     public void Abort()
     {
+        CancellationTokenRegistration registration;
         lock (_gate)
         {
             IsAborted = true;
@@ -461,9 +472,46 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
             }
 
             _pending = Pending.None;
+            registration = TakeRegistrationLocked();
         }
 
+        registration.Dispose();
         _core.SetException(new OperationCanceledException());
+    }
+
+    /// <summary>
+    /// Ends a pending wait or read because its cancellation token fired.
+    /// </summary>
+    private void CancelPending()
+    {
+        CancellationTokenRegistration registration;
+        lock (_gate)
+        {
+            if (_pending == Pending.None)
+            {
+                return;
+            }
+
+            _pending = Pending.None;
+            registration = TakeRegistrationLocked();
+        }
+
+        registration.Dispose();
+        _core.SetException(new OperationCanceledException());
+    }
+
+    /// <summary>
+    /// Takes the cancellation registration of the pending operation, to be disposed outside the lock.
+    /// The caller holds the lock.
+    /// </summary>
+    /// <returns>
+    /// The registration, or a default one when the operation has none.
+    /// </returns>
+    private CancellationTokenRegistration TakeRegistrationLocked()
+    {
+        CancellationTokenRegistration registration = _registration;
+        _registration = default;
+        return registration;
     }
 
     /// <inheritdoc/>
@@ -524,10 +572,13 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     /// <param name="buffer">
     /// The buffer a read fills when data arrives.
     /// </param>
+    /// <param name="cancellationToken">
+    /// Ends the operation with <see cref="OperationCanceledException"/> when it fires while pending.
+    /// </param>
     /// <exception cref="InvalidOperationException">
     /// Another wait or read is already pending.
     /// </exception>
-    private void BeginPendingLocked(Pending kind, Memory<byte> buffer)
+    private void BeginPendingLocked(Pending kind, Memory<byte> buffer, CancellationToken cancellationToken)
     {
         if (_pending != Pending.None)
         {
@@ -536,6 +587,12 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
 
         _pending = kind;
         _pendingBuffer = buffer;
+        if (cancellationToken.CanBeCanceled)
+        {
+            // The state is always this link, passed just below. If the token fires before Register returns, the
+            // callback runs inline on this thread (the lock is re-entrant) before any continuation is attached.
+            _registration = cancellationToken.UnsafeRegister(static state => ((MemoryLink)state!).CancelPending(), this);
+        }
     }
 
     /// <summary>
