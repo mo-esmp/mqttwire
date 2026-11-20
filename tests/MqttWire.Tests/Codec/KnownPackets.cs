@@ -116,4 +116,10 @@ internal static class KnownPackets
     /// UNSUBACK for packet identifier 2 with success.
     /// </summary>
     public static readonly byte[] UnsubAck = Hex.Parse("B0 04 00 02 00 00");
+
+    /// <summary>
+    /// PUBLISH at QoS 1 with topic "a/b", packet identifier 10 and a payload of 128 bytes "x", so its remaining
+    /// length, 136, takes two bytes (88 01).
+    /// </summary>
+    public static readonly byte[] PublishTwoByteLength = [.. Hex.Parse("32 88 01 00 03 61 2F 62 00 0A 00"), .. Enumerable.Repeat((byte)'x', 128)];
 }

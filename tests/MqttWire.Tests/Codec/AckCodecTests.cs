@@ -8,7 +8,7 @@ namespace MqttWire.Tests.Codec;
 /// <summary>
 /// Tests decoding and encoding PUBACK, PUBREC, PUBREL and PUBCOMP, including a cross-check against MQTTnet.
 /// </summary>
-public class AckCodecTests
+public sealed class AckCodecTests
 {
     /// <summary>
     /// The known acknowledgements and the values they carry.
@@ -217,8 +217,8 @@ public class AckCodecTests
     }
 
     /// <summary>
-    /// Proves a type that is not one of the four acknowledgements, or an identifier of 0, throws from GetSize and
-    /// Write and leaves the destination untouched.
+    /// Proves a type that is not one of the four acknowledgements, or an identifier of 0, throws from Write and
+    /// leaves the destination untouched.
     /// </summary>
     [Fact]
     public void Write_TypeNotAnAckOrIdentifierZero_ThrowsWithoutWriting()

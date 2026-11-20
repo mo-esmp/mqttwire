@@ -9,10 +9,11 @@ namespace MqttWire.Tests.Codec;
 /// readings of the allocated bytes of the current thread, taken after one warm-up pass; everything the measured
 /// work needs is built before the first reading, and no assertion runs between the readings.
 /// </summary>
-public class AllocationTests
+public sealed class AllocationTests
 {
     /// <summary>
     /// Added to a checksum for every packet that did not decode as success, so a checksum below this is all success.
+    /// A decoder's error reason code is added with it, so a test can tell which errors were seen.
     /// </summary>
     private const long FailureWeight = 1L << 40;
 
@@ -94,6 +95,60 @@ public class AllocationTests
     ];
 
     /// <summary>
+    /// Framed packets a server reads that its decoders refuse: bad UTF-8, a property the packet does not allow, an
+    /// identifier of 0, a reserved bit and left-over bytes.
+    /// </summary>
+    private static readonly byte[][] s_serverMalformed =
+    [
+        Hex.Parse("30 04 00 01 C3 00"),
+        Hex.Parse("30 09 00 01 74 05 11 00 00 00 01"),
+        Hex.Parse("82 07 00 00 00 00 01 78 01"),
+        Hex.Parse("82 07 00 01 00 00 01 78 40"),
+        Hex.Parse("E0 03 8E 00 00"),
+        Hex.Parse("C0 01 00"),
+    ];
+
+    /// <summary>
+    /// The reason code each packet of <see cref="s_serverMalformed"/> decodes to, in the same order.
+    /// </summary>
+    private static readonly MqttReasonCode[] s_serverMalformedResults =
+    [
+        MqttReasonCode.MalformedPacket,
+        MqttReasonCode.MalformedPacket,
+        MqttReasonCode.ProtocolError,
+        MqttReasonCode.MalformedPacket,
+        MqttReasonCode.MalformedPacket,
+        MqttReasonCode.MalformedPacket,
+    ];
+
+    /// <summary>
+    /// Framed packets a client reads that its decoders refuse: bad UTF-8, a property the packet does not allow, an
+    /// identifier of 0, a reserved bit and left-over bytes.
+    /// </summary>
+    private static readonly byte[][] s_clientMalformed =
+    [
+        Hex.Parse("30 04 00 01 C3 00"),
+        Hex.Parse("20 08 00 00 05 18 00 00 00 01"),
+        Hex.Parse("90 04 00 00 00 01"),
+        Hex.Parse("20 03 02 00 00"),
+        Hex.Parse("20 04 00 00 00 00"),
+        Hex.Parse("D0 01 00"),
+    ];
+
+    /// <summary>
+    /// The reason code each packet of <see cref="s_clientMalformed"/> decodes to, in the same order.
+    /// </summary>
+    private static readonly MqttReasonCode[] s_clientMalformedResults =
+    [
+        MqttReasonCode.MalformedPacket,
+        MqttReasonCode.MalformedPacket,
+        MqttReasonCode.ProtocolError,
+        MqttReasonCode.MalformedPacket,
+        MqttReasonCode.MalformedPacket,
+        MqttReasonCode.MalformedPacket,
+    ];
+
+    /// <summary>
     /// The client id of the encoded CONNECT.
     /// </summary>
     private static readonly string s_clientId = "client-1";
@@ -157,6 +212,35 @@ public class AllocationTests
         (after - before).ShouldBe(0);
         checksum.ShouldBe(expected);
         checksum.ShouldBeLessThan(FailureWeight);
+    }
+
+    /// <summary>
+    /// Proves framing and decoding framed but malformed packets, for each reader, allocates nothing, and that the
+    /// decoders answered each with its expected error.
+    /// </summary>
+    [Fact]
+    public void TryDecode_MalformedPackets_AllocatesNothing()
+    {
+        // Arrange
+        long expected = DecodeEvery(s_serverMalformed, Reader.Server) + DecodeEvery(s_clientMalformed, Reader.Client);
+
+        // Act
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        long checksum = DecodeEvery(s_serverMalformed, Reader.Server) + DecodeEvery(s_clientMalformed, Reader.Client);
+        long after = GC.GetAllocatedBytesForCurrentThread();
+
+        // Assert
+        (after - before).ShouldBe(0);
+        checksum.ShouldBe(expected);
+        for (int i = 0; i < s_serverMalformed.Length; i++)
+        {
+            DecodeEvery([s_serverMalformed[i]], Reader.Server).ShouldBe(Failure(s_serverMalformedResults[i]));
+        }
+
+        for (int i = 0; i < s_clientMalformed.Length; i++)
+        {
+            DecodeEvery([s_clientMalformed[i]], Reader.Client).ShouldBe(Failure(s_clientMalformedResults[i]));
+        }
     }
 
     /// <summary>
@@ -243,8 +327,8 @@ public class AllocationTests
     /// Who reads it.
     /// </param>
     /// <returns>
-    /// A checksum of what was read, or <see cref="FailureWeight"/> when the decoder did not answer success or the
-    /// reader never reads the type.
+    /// A checksum of what was read; <see cref="Failure"/> of the reason code when the decoder did not answer
+    /// success; <see cref="FailureWeight"/> alone when the reader never reads the type.
     /// </returns>
     private static long DecodeAndRead(ReadOnlySpan<byte> packet, PacketType type, Reader reader)
     {
@@ -253,42 +337,47 @@ public class AllocationTests
         switch (type)
         {
             case PacketType.Connect when server:
-                if (ConnectCodec.TryDecode(packet, out ConnectPacket connect) != MqttReasonCode.Success)
+                MqttReasonCode connectResult = ConnectCodec.TryDecode(packet, out ConnectPacket connect);
+                if (connectResult != MqttReasonCode.Success)
                 {
-                    return FailureWeight;
+                    return Failure(connectResult);
                 }
 
                 sum += connect.ClientId.Length + connect.UserName.Length + connect.Password.Length + connect.KeepAliveSeconds;
                 sum += (connect.HasUserName ? 1 : 0) + (connect.HasPassword ? 1 : 0) + (connect.CleanStart ? 1 : 0) + (connect.HasWill ? 1 : 0);
                 return sum + ReadProperties(connect.Properties);
             case PacketType.ConnAck when !server:
-                if (ConnAckCodec.TryDecode(packet, out ConnAckPacket connAck) != MqttReasonCode.Success)
+                MqttReasonCode connAckResult = ConnAckCodec.TryDecode(packet, out ConnAckPacket connAck);
+                if (connAckResult != MqttReasonCode.Success)
                 {
-                    return FailureWeight;
+                    return Failure(connAckResult);
                 }
 
                 sum += (connAck.SessionPresent ? 1 : 0) + (int)connAck.ReasonCode;
                 return sum + ReadProperties(connAck.Properties);
             case PacketType.Publish:
-                if (PublishCodec.TryDecode(packet, server ? PacketSource.Client : PacketSource.Server, out PublishPacket publish) != MqttReasonCode.Success)
+                MqttReasonCode publishResult = PublishCodec.TryDecode(packet, server ? PacketSource.Client : PacketSource.Server, out PublishPacket publish);
+                if (publishResult != MqttReasonCode.Success)
                 {
-                    return FailureWeight;
+                    return Failure(publishResult);
                 }
 
                 sum += (int)publish.QoS + (publish.Dup ? 1 : 0) + (publish.Retain ? 1 : 0) + publish.Topic.Length + publish.PacketIdentifier + publish.Payload.Length + (publish.HasTopicAlias ? 1 : 0);
                 return sum + ReadProperties(publish.Properties);
             case PacketType.PubAck or PacketType.PubRec or PacketType.PubRel or PacketType.PubComp:
-                if (AckCodec.TryDecode(packet, out AckPacket ack) != MqttReasonCode.Success)
+                MqttReasonCode ackResult = AckCodec.TryDecode(packet, out AckPacket ack);
+                if (ackResult != MqttReasonCode.Success)
                 {
-                    return FailureWeight;
+                    return Failure(ackResult);
                 }
 
                 sum += (int)ack.Type + ack.PacketIdentifier + (int)ack.ReasonCode;
                 return sum + ReadProperties(ack.Properties);
             case PacketType.Subscribe when server:
-                if (SubscribeCodec.TryDecode(packet, out SubscribePacket subscribe) != MqttReasonCode.Success)
+                MqttReasonCode subscribeResult = SubscribeCodec.TryDecode(packet, out SubscribePacket subscribe);
+                if (subscribeResult != MqttReasonCode.Success)
                 {
-                    return FailureWeight;
+                    return Failure(subscribeResult);
                 }
 
                 sum += subscribe.PacketIdentifier + subscribe.Count + ReadProperties(subscribe.Properties);
@@ -300,9 +389,10 @@ public class AllocationTests
 
                 return sum;
             case PacketType.SubAck when !server:
-                if (SubAckCodec.TryDecode(packet, out SubAckPacket subAck) != MqttReasonCode.Success)
+                MqttReasonCode subAckResult = SubAckCodec.TryDecode(packet, out SubAckPacket subAck);
+                if (subAckResult != MqttReasonCode.Success)
                 {
-                    return FailureWeight;
+                    return Failure(subAckResult);
                 }
 
                 sum += subAck.PacketIdentifier + ReadProperties(subAck.Properties);
@@ -313,9 +403,10 @@ public class AllocationTests
 
                 return sum;
             case PacketType.Unsubscribe when server:
-                if (UnsubscribeCodec.TryDecode(packet, out UnsubscribePacket unsubscribe) != MqttReasonCode.Success)
+                MqttReasonCode unsubscribeResult = UnsubscribeCodec.TryDecode(packet, out UnsubscribePacket unsubscribe);
+                if (unsubscribeResult != MqttReasonCode.Success)
                 {
-                    return FailureWeight;
+                    return Failure(unsubscribeResult);
                 }
 
                 sum += unsubscribe.PacketIdentifier + unsubscribe.Count + ReadProperties(unsubscribe.Properties);
@@ -326,9 +417,10 @@ public class AllocationTests
 
                 return sum;
             case PacketType.UnsubAck when !server:
-                if (UnsubAckCodec.TryDecode(packet, out UnsubAckPacket unsubAck) != MqttReasonCode.Success)
+                MqttReasonCode unsubAckResult = UnsubAckCodec.TryDecode(packet, out UnsubAckPacket unsubAck);
+                if (unsubAckResult != MqttReasonCode.Success)
                 {
-                    return FailureWeight;
+                    return Failure(unsubAckResult);
                 }
 
                 sum += unsubAck.PacketIdentifier + ReadProperties(unsubAck.Properties);
@@ -340,11 +432,13 @@ public class AllocationTests
                 return sum;
             case PacketType.PingReq when server:
             case PacketType.PingResp when !server:
-                return PingCodec.TryDecode(packet) == MqttReasonCode.Success ? 1 : FailureWeight;
+                MqttReasonCode pingResult = PingCodec.TryDecode(packet);
+                return pingResult == MqttReasonCode.Success ? 1 : Failure(pingResult);
             case PacketType.Disconnect:
-                if (DisconnectCodec.TryDecode(packet, out DisconnectPacket disconnect) != MqttReasonCode.Success)
+                MqttReasonCode disconnectResult = DisconnectCodec.TryDecode(packet, out DisconnectPacket disconnect);
+                if (disconnectResult != MqttReasonCode.Success)
                 {
-                    return FailureWeight;
+                    return Failure(disconnectResult);
                 }
 
                 return (int)disconnect.ReasonCode + ReadProperties(disconnect.Properties);
@@ -352,6 +446,17 @@ public class AllocationTests
                 return FailureWeight;
         }
     }
+
+    /// <summary>
+    /// Gets what a packet the decoder refused adds to a checksum: <see cref="FailureWeight"/> plus the reason code.
+    /// </summary>
+    /// <param name="reasonCode">
+    /// The error the decoder answered.
+    /// </param>
+    /// <returns>
+    /// The weight of one failure carrying its reason code.
+    /// </returns>
+    private static long Failure(MqttReasonCode reasonCode) => FailureWeight + (long)reasonCode;
 
     /// <summary>
     /// Tries every property accessor on a block and enumerates its user properties.

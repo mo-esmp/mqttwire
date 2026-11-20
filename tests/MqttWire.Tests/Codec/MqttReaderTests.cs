@@ -5,7 +5,7 @@ namespace MqttWire.Tests.Codec;
 /// <summary>
 /// Tests the reader's fields, its failure results and that a failed read does not move the position.
 /// </summary>
-public class MqttReaderTests
+public sealed class MqttReaderTests
 {
     /// <summary>
     /// Proves two- and four-byte integers are read big-endian.

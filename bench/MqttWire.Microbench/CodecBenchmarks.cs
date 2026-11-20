@@ -8,7 +8,7 @@ namespace MqttWire.Microbench;
 /// Measures the speed of the codec's hot paths: decoding and encoding PUBLISH, decoding CONNECT and SUBSCRIBE, and
 /// framing packets out of a stream. The inputs are built in <see cref="Setup"/>, so only the codec call is timed.
 /// The Allocated column is reported for information; that the codec allocates nothing is asserted by the test
-/// project, not here.
+/// project, not here. The class is not sealed because BenchmarkDotNet generates a class that derives from it.
 /// </summary>
 [MemoryDiagnoser]
 public class CodecBenchmarks

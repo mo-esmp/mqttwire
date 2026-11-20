@@ -5,7 +5,7 @@ namespace MqttWire.Tests.Codec;
 /// <summary>
 /// Tests the writer, the field size checks and that a failed write writes nothing.
 /// </summary>
-public class MqttWriterTests
+public sealed class MqttWriterTests
 {
     /// <summary>
     /// Proves a string is written as its length then its UTF-8 bytes, matching its measured size.
@@ -38,6 +38,23 @@ public class MqttWriterTests
 
         // Act & Assert
         Should.Throw<ArgumentException>(() => FieldSize.Utf8String(value));
+    }
+
+    /// <summary>
+    /// Proves measuring a string of fewer than 65,536 chars but more than 65,535 UTF-8 bytes throws, naming the
+    /// string rather than an internal length.
+    /// </summary>
+    [Fact]
+    public void Utf8String_MultiByteStringOver65535Bytes_ThrowsNamingTheString()
+    {
+        // Arrange
+        string value = new('ü', 32_768);
+
+        // Act
+        ArgumentException exception = Should.Throw<ArgumentException>(() => FieldSize.Utf8String(value));
+
+        // Assert
+        exception.ParamName.ShouldBe("value");
     }
 
     /// <summary>
@@ -152,6 +169,27 @@ public class MqttWriterTests
             MqttWriter writer = new(destination);
             writer.WriteUtf8String("abc");
         });
+        destination.ShouldAllBe(b => b == 0);
+    }
+
+    /// <summary>
+    /// Proves a variable byte integer that does not fit throws, naming the destination, and writes nothing.
+    /// </summary>
+    [Fact]
+    public void WriteVariableByteInteger_DestinationTooSmall_ThrowsAndWritesNothing()
+    {
+        // Arrange
+        byte[] destination = new byte[1];
+
+        // Act
+        ArgumentException exception = Should.Throw<ArgumentException>(() =>
+        {
+            MqttWriter writer = new(destination);
+            writer.WriteVariableByteInteger(128);
+        });
+
+        // Assert
+        exception.ParamName.ShouldBe("destination");
         destination.ShouldAllBe(b => b == 0);
     }
 

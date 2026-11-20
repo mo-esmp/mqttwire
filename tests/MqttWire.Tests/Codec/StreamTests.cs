@@ -6,7 +6,7 @@ namespace MqttWire.Tests.Codec;
 /// Tests the framing and the codecs over streams of packets cut at every byte, joined and split at random, and
 /// over random and mutated bytes.
 /// </summary>
-public class StreamTests
+public sealed class StreamTests
 {
     /// <summary>
     /// The packets a client sends, in the order of <see cref="s_clientStream"/>.
@@ -17,6 +17,7 @@ public class StreamTests
         KnownPackets.PublishQoS0,
         KnownPackets.PublishQoS1,
         KnownPackets.PublishQoS2,
+        KnownPackets.PublishTwoByteLength,
         KnownPackets.PubAck,
         KnownPackets.PubRecRefused,
         KnownPackets.PubRel,
@@ -36,6 +37,7 @@ public class StreamTests
         KnownPackets.ConnAck,
         KnownPackets.PublishQoS1,
         KnownPackets.PublishQoS2,
+        KnownPackets.PublishTwoByteLength,
         KnownPackets.PubAckWithReason,
         KnownPackets.PubRel,
         KnownPackets.SubAck,

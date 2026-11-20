@@ -6,7 +6,7 @@ namespace MqttWire.Tests.Codec;
 /// <summary>
 /// Tests reading and writing the variable byte integer.
 /// </summary>
-public class VariableByteIntegerTests
+public sealed class VariableByteIntegerTests
 {
     /// <summary>
     /// Proves each value the MQTT standard lists is written as, and read back from, the standard's bytes.
@@ -92,5 +92,23 @@ public class VariableByteIntegerTests
 
         // Act & Assert
         Should.Throw<ArgumentOutOfRangeException>(() => VariableByteInteger.Write(destination, value));
+    }
+
+    /// <summary>
+    /// Proves a value that needs more bytes than the destination holds throws, naming the destination, and writes
+    /// nothing.
+    /// </summary>
+    [Fact]
+    public void Write_DestinationTooSmall_ThrowsAndWritesNothing()
+    {
+        // Arrange
+        byte[] destination = new byte[1];
+
+        // Act
+        ArgumentException exception = Should.Throw<ArgumentException>(() => VariableByteInteger.Write(destination, 128));
+
+        // Assert
+        exception.ParamName.ShouldBe("destination");
+        destination.ShouldAllBe(b => b == 0);
     }
 }

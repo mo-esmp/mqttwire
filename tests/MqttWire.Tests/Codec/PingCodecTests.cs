@@ -6,7 +6,7 @@ namespace MqttWire.Tests.Codec;
 /// <summary>
 /// Tests the PINGREQ and PINGRESP packets.
 /// </summary>
-public class PingCodecTests
+public sealed class PingCodecTests
 {
     /// <summary>
     /// Proves the two constant packets are the bytes the standard gives.
@@ -35,13 +35,18 @@ public class PingCodecTests
     }
 
     /// <summary>
-    /// Proves a ping with a body is malformed.
+    /// Proves a PINGREQ or PINGRESP with a body is malformed.
     /// </summary>
-    [Fact]
-    public void TryDecode_PingWithABody_IsMalformed()
+    /// <param name="hex">
+    /// The ping with a one-byte body.
+    /// </param>
+    [Theory]
+    [InlineData("C0 01 00")]
+    [InlineData("D0 01 00")]
+    public void TryDecode_PingWithABody_IsMalformed(string hex)
     {
         // Arrange
-        byte[] packet = Hex.Parse("C0 01 00");
+        byte[] packet = Hex.Parse(hex);
 
         // Act
         MqttReasonCode result = PingCodec.TryDecode(packet);

@@ -8,7 +8,7 @@ namespace MqttWire.Tests.Codec;
 /// <summary>
 /// Tests decoding and encoding SUBSCRIBE and SUBACK, including a cross-check against MQTTnet.
 /// </summary>
-public class SubscribeCodecTests
+public sealed class SubscribeCodecTests
 {
     /// <summary>
     /// Every packet type of the family at the smallest and largest packet identifier.
@@ -234,6 +234,23 @@ public class SubscribeCodecTests
         // Assert
         result.ShouldBe(MqttReasonCode.ProtocolError);
         subAck.ReasonCodes.IsEmpty.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// Proves a SUBACK reason code is handed on as sent, even 0xFF, which MQTT does not define (plan decision 8).
+    /// </summary>
+    [Fact]
+    public void TryDecode_SubAckWithUndefinedReasonCode_HandsItOnUnchanged()
+    {
+        // Arrange
+        byte[] packet = Hex.Parse("90 04 00 01 00 FF");
+
+        // Act
+        MqttReasonCode result = SubAckCodec.TryDecode(packet, out SubAckPacket subAck);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        subAck.ReasonCodes.ToArray().ShouldBe([(byte)0xFF]);
     }
 
     /// <summary>

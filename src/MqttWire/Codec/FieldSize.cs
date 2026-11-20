@@ -53,7 +53,14 @@ internal static class FieldSize
             throw new ArgumentException("The string contains U+0000, which MQTT does not allow.", nameof(value));
         }
 
-        return Binary(StrictUtf8.GetByteCount(value));
+        // Checked here rather than by Binary, so the exception names the caller's string.
+        int byteCount = StrictUtf8.GetByteCount(value);
+        if (byteCount > MaxDataLength)
+        {
+            throw new ArgumentException("The string is longer than 65,535 bytes in UTF-8.", nameof(value));
+        }
+
+        return LengthPrefix + byteCount;
     }
 
     /// <summary>

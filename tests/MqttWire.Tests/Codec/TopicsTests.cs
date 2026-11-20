@@ -6,7 +6,7 @@ namespace MqttWire.Tests.Codec;
 /// <summary>
 /// Tests the topic name and topic filter rules.
 /// </summary>
-public class TopicsTests
+public sealed class TopicsTests
 {
     /// <summary>
     /// Proves a topic name is valid when it is not empty and holds no wildcard and no U+0000.

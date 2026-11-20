@@ -6,136 +6,190 @@ namespace MqttWire.Tests.Codec;
 /// <summary>
 /// Tests validating, reading and writing MQTT 5 properties.
 /// </summary>
-public class PropertyBlockTests
+public sealed class PropertyBlockTests
 {
     /// <summary>
     /// A valid one-byte value, accepted by every byte property.
     /// </summary>
     private const string ByteValue = "01";
+
     /// <summary>
     /// A valid two-byte value, accepted by every two-byte property.
     /// </summary>
     private const string TwoByteValue = "00 01";
+
     /// <summary>
     /// A valid four-byte value, accepted by every four-byte property.
     /// </summary>
     private const string FourByteValue = "00 00 00 01";
+
     /// <summary>
     /// A valid variable byte integer value.
     /// </summary>
     private const string VariableValue = "01";
+
     /// <summary>
     /// A valid UTF-8 string value.
     /// </summary>
     private const string StringValue = "00 01 61";
+
     /// <summary>
     /// A valid binary value.
     /// </summary>
     private const string BinaryValue = "00 01 61";
+
     /// <summary>
     /// A valid user property: a name and a value.
     /// </summary>
     private const string PairValue = "00 01 61 00 01 62";
 
     /// <summary>
-    /// The PropertyContext.Connect flag.
+    /// Every context flag at once, where the user property is allowed.
     /// </summary>
-    private const ushort Connect = 1;
-    /// <summary>
-    /// The PropertyContext.Will flag.
-    /// </summary>
-    private const ushort Will = 2;
-    /// <summary>
-    /// The PropertyContext.ConnAck flag.
-    /// </summary>
-    private const ushort ConnAck = 4;
-    /// <summary>
-    /// The PropertyContext.Publish flag.
-    /// </summary>
-    private const ushort Publish = 8;
-    /// <summary>
-    /// The PropertyContext.Ack flag.
-    /// </summary>
-    private const ushort Ack = 16;
-    /// <summary>
-    /// The PropertyContext.Subscribe flag.
-    /// </summary>
-    private const ushort Subscribe = 32;
-    /// <summary>
-    /// The PropertyContext.SubAck flag.
-    /// </summary>
-    private const ushort SubAck = 64;
-    /// <summary>
-    /// The PropertyContext.Unsubscribe flag.
-    /// </summary>
-    private const ushort Unsubscribe = 128;
-    /// <summary>
-    /// The PropertyContext.UnsubAck flag.
-    /// </summary>
-    private const ushort UnsubAck = 256;
-    /// <summary>
-    /// The PropertyContext.Disconnect flag.
-    /// </summary>
-    private const ushort Disconnect = 512;
-    /// <summary>
-    /// The PropertyContext.Auth flag.
-    /// </summary>
-    private const ushort Auth = 1024;
-    /// <summary>
-    /// Every context flag at once.
-    /// </summary>
-    private const ushort Every = 2047;
+    private const PropertyContext Every = PropertyContext.Connect | PropertyContext.Will | PropertyContext.ConnAck
+        | PropertyContext.Publish | PropertyContext.Ack | PropertyContext.Subscribe | PropertyContext.SubAck
+        | PropertyContext.Unsubscribe | PropertyContext.UnsubAck | PropertyContext.Disconnect | PropertyContext.Auth;
 
     /// <summary>
     /// The test's own copy of MQTT 5 section 2.2.2.2: id, a valid value of its type, the contexts that allow it.
     /// </summary>
-    private static readonly (byte Id, string Value, ushort Contexts)[] s_table =
+    private static readonly (byte Id, string Value, PropertyContext Contexts)[] s_table =
     [
-        (0x01, ByteValue, Publish | Will),
-        (0x02, FourByteValue, Publish | Will),
-        (0x03, StringValue, Publish | Will),
-        (0x08, StringValue, Publish | Will),
-        (0x09, BinaryValue, Publish | Will),
-        (0x0B, VariableValue, Publish | Subscribe),
-        (0x11, FourByteValue, Connect | ConnAck | Disconnect),
-        (0x12, StringValue, ConnAck),
-        (0x13, TwoByteValue, ConnAck),
-        (0x15, StringValue, Connect | ConnAck | Auth),
-        (0x16, BinaryValue, Connect | ConnAck | Auth),
-        (0x17, ByteValue, Connect),
-        (0x18, FourByteValue, Will),
-        (0x19, ByteValue, Connect),
-        (0x1A, StringValue, ConnAck),
-        (0x1C, StringValue, ConnAck | Disconnect),
-        (0x1F, StringValue, ConnAck | Ack | SubAck | UnsubAck | Disconnect | Auth),
-        (0x21, TwoByteValue, Connect | ConnAck),
-        (0x22, TwoByteValue, Connect | ConnAck),
-        (0x23, TwoByteValue, Publish),
-        (0x24, ByteValue, ConnAck),
-        (0x25, ByteValue, ConnAck),
+        (0x01, ByteValue, PropertyContext.Publish | PropertyContext.Will),
+        (0x02, FourByteValue, PropertyContext.Publish | PropertyContext.Will),
+        (0x03, StringValue, PropertyContext.Publish | PropertyContext.Will),
+        (0x08, StringValue, PropertyContext.Publish | PropertyContext.Will),
+        (0x09, BinaryValue, PropertyContext.Publish | PropertyContext.Will),
+        (0x0B, VariableValue, PropertyContext.Publish | PropertyContext.Subscribe),
+        (0x11, FourByteValue, PropertyContext.Connect | PropertyContext.ConnAck | PropertyContext.Disconnect),
+        (0x12, StringValue, PropertyContext.ConnAck),
+        (0x13, TwoByteValue, PropertyContext.ConnAck),
+        (0x15, StringValue, PropertyContext.Connect | PropertyContext.ConnAck | PropertyContext.Auth),
+        (0x16, BinaryValue, PropertyContext.Connect | PropertyContext.ConnAck | PropertyContext.Auth),
+        (0x17, ByteValue, PropertyContext.Connect),
+        (0x18, FourByteValue, PropertyContext.Will),
+        (0x19, ByteValue, PropertyContext.Connect),
+        (0x1A, StringValue, PropertyContext.ConnAck),
+        (0x1C, StringValue, PropertyContext.ConnAck | PropertyContext.Disconnect),
+        (0x1F, StringValue, PropertyContext.ConnAck | PropertyContext.Ack | PropertyContext.SubAck | PropertyContext.UnsubAck
+            | PropertyContext.Disconnect | PropertyContext.Auth),
+        (0x21, TwoByteValue, PropertyContext.Connect | PropertyContext.ConnAck),
+        (0x22, TwoByteValue, PropertyContext.Connect | PropertyContext.ConnAck),
+        (0x23, TwoByteValue, PropertyContext.Publish),
+        (0x24, ByteValue, PropertyContext.ConnAck),
+        (0x25, ByteValue, PropertyContext.ConnAck),
         (0x26, PairValue, Every),
-        (0x27, FourByteValue, Connect | ConnAck),
-        (0x28, ByteValue, ConnAck),
-        (0x29, ByteValue, ConnAck),
-        (0x2A, ByteValue, ConnAck),
+        (0x27, FourByteValue, PropertyContext.Connect | PropertyContext.ConnAck),
+        (0x28, ByteValue, PropertyContext.ConnAck),
+        (0x29, ByteValue, PropertyContext.ConnAck),
+        (0x2A, ByteValue, PropertyContext.ConnAck),
+    ];
+
+    /// <summary>
+    /// The test's own list of the values the standard forbids (the property sections of MQTT 5, chapter 3): 0 for the
+    /// properties that must not be 0, and values above 1 for those that must be 0 or 1. Each row is an id of
+    /// <see cref="s_table"/> and one forbidden value.
+    /// </summary>
+    private static readonly (byte Id, string Value)[] s_forbidden =
+    [
+        (0x01, "02"),
+        (0x01, "FF"),
+        (0x0B, "00"),
+        (0x17, "02"),
+        (0x17, "FF"),
+        (0x19, "02"),
+        (0x19, "FF"),
+        (0x21, "00 00"),
+        (0x23, "00 00"),
+        (0x24, "02"),
+        (0x24, "FF"),
+        (0x25, "02"),
+        (0x25, "FF"),
+        (0x27, "00 00 00 00"),
+        (0x28, "02"),
+        (0x28, "FF"),
+        (0x29, "02"),
+        (0x29, "FF"),
+        (0x2A, "02"),
+        (0x2A, "FF"),
     ];
 
     /// <summary>
     /// Every context a property can be read in.
     /// </summary>
-    private static readonly ushort[] s_contexts =
-        [Connect, Will, ConnAck, Publish, Ack, Subscribe, SubAck, Unsubscribe, UnsubAck, Disconnect, Auth];
+    private static readonly PropertyContext[] s_contexts =
+    [
+        PropertyContext.Connect,
+        PropertyContext.Will,
+        PropertyContext.ConnAck,
+        PropertyContext.Publish,
+        PropertyContext.Ack,
+        PropertyContext.Subscribe,
+        PropertyContext.SubAck,
+        PropertyContext.Unsubscribe,
+        PropertyContext.UnsubAck,
+        PropertyContext.Disconnect,
+        PropertyContext.Auth,
+    ];
 
     /// <summary>
     /// Yields every property in every context with whether the standard allows it there.
     /// </summary>
+    /// <returns>
+    /// Rows of id, value, context as its underlying type, and whether it is allowed.
+    /// </returns>
     public static IEnumerable<object[]> EveryPropertyInEveryContext()
     {
-        foreach ((byte id, string value, ushort allowedIn) in s_table)
+        foreach ((byte id, string value, PropertyContext allowedIn) in s_table)
         {
-            foreach (ushort context in s_contexts)
+            foreach (PropertyContext context in s_contexts)
             {
-                yield return [id, value, context, (allowedIn & context) != 0];
+                yield return [id, value, (ushort)context, (allowedIn & context) != 0];
+            }
+        }
+    }
+
+    /// <summary>
+    /// Yields every once-only property in every context that allows it. The user property may repeat everywhere and
+    /// the Subscription Identifier may repeat in a PUBLISH (MQTT 5, 3.3.2.3.8), so those pairs are left out.
+    /// </summary>
+    /// <returns>
+    /// Rows of id, value and context as its underlying type.
+    /// </returns>
+    public static IEnumerable<object[]> EveryOnceOnlyPropertyWhereAllowed()
+    {
+        foreach ((byte id, string value, PropertyContext allowedIn) in s_table)
+        {
+            foreach (PropertyContext context in s_contexts)
+            {
+                bool repeatable = id == (byte)PropertyId.UserProperty
+                    || (id == (byte)PropertyId.SubscriptionIdentifier && context == PropertyContext.Publish);
+                if ((allowedIn & context) != 0 && !repeatable)
+                {
+                    yield return [id, value, (ushort)context];
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Yields every forbidden value of <see cref="s_forbidden"/> in every context of <see cref="s_table"/> that
+    /// allows its property.
+    /// </summary>
+    /// <returns>
+    /// Rows of id, forbidden value and context as its underlying type.
+    /// </returns>
+    public static IEnumerable<object[]> EveryForbiddenValueWhereAllowed()
+    {
+        foreach ((byte id, string value) in s_forbidden)
+        {
+            PropertyContext allowedIn = Array.Find(s_table, row => row.Id == id).Contexts;
+            foreach (PropertyContext context in s_contexts)
+            {
+                if ((allowedIn & context) != 0)
+                {
+                    yield return [id, value, (ushort)context];
+                }
             }
         }
     }
@@ -143,6 +197,18 @@ public class PropertyBlockTests
     /// <summary>
     /// A property is accepted exactly in the contexts the standard allows it in, and malformed elsewhere.
     /// </summary>
+    /// <param name="id">
+    /// The property identifier.
+    /// </param>
+    /// <param name="value">
+    /// A valid value of its type, as hex.
+    /// </param>
+    /// <param name="context">
+    /// The context, as the underlying type of <see cref="PropertyContext"/>.
+    /// </param>
+    /// <param name="allowed">
+    /// Whether the standard allows the property in the context.
+    /// </param>
     [Theory]
     [MemberData(nameof(EveryPropertyInEveryContext))]
     public void TryRead_PropertyInContext_IsAcceptedExactlyWhereTheStandardAllowsIt(byte id, string value, ushort context, bool allowed)
@@ -201,14 +267,14 @@ public class PropertyBlockTests
     [Theory]
     [InlineData("05 21 00")]
     [InlineData("02 21 00")]
-    [InlineData("04 03 00 05 61")]
+    [InlineData("04 15 00 05 61")]
     public void TryRead_BlockOrValueRunningPastItsEnd_IsMalformed(string block)
     {
         // Arrange
         MqttReader reader = new(Hex.Parse(block));
 
         // Act
-        MqttReasonCode result = PropertyBlock.TryRead(ref reader, PropertyContext.Publish | PropertyContext.Connect, out _);
+        MqttReasonCode result = PropertyBlock.TryRead(ref reader, PropertyContext.Connect, out _);
 
         // Assert
         result.ShouldBe(MqttReasonCode.MalformedPacket);
@@ -228,6 +294,62 @@ public class PropertyBlockTests
 
         // Assert
         result.ShouldBe(MqttReasonCode.MalformedPacket);
+    }
+
+    /// <summary>
+    /// Every once-only property of the test's table, given twice in each context that allows it, is malformed.
+    /// </summary>
+    /// <param name="id">
+    /// The property identifier.
+    /// </param>
+    /// <param name="value">
+    /// A valid value of its type, as hex.
+    /// </param>
+    /// <param name="context">
+    /// The context, as the underlying type of <see cref="PropertyContext"/>.
+    /// </param>
+    [Theory]
+    [MemberData(nameof(EveryOnceOnlyPropertyWhereAllowed))]
+    public void TryRead_EveryOnceOnlyPropertyTwice_IsMalformed(byte id, string value, ushort context)
+    {
+        // Arrange
+        byte[] valueBytes = Hex.Parse(value);
+        byte[] source = [(byte)(2 * (1 + valueBytes.Length)), id, .. valueBytes, id, .. valueBytes];
+        MqttReader reader = new(source);
+
+        // Act
+        MqttReasonCode result = PropertyBlock.TryRead(ref reader, (PropertyContext)context, out _);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.MalformedPacket);
+    }
+
+    /// <summary>
+    /// Every forbidden value of the test's list, in each context that allows its property, is a protocol error.
+    /// </summary>
+    /// <param name="id">
+    /// The property identifier.
+    /// </param>
+    /// <param name="value">
+    /// The forbidden value, as hex.
+    /// </param>
+    /// <param name="context">
+    /// The context, as the underlying type of <see cref="PropertyContext"/>.
+    /// </param>
+    [Theory]
+    [MemberData(nameof(EveryForbiddenValueWhereAllowed))]
+    public void TryRead_EveryForbiddenValue_IsProtocolError(byte id, string value, ushort context)
+    {
+        // Arrange
+        byte[] valueBytes = Hex.Parse(value);
+        byte[] source = [(byte)(1 + valueBytes.Length), id, .. valueBytes];
+        MqttReader reader = new(source);
+
+        // Act
+        MqttReasonCode result = PropertyBlock.TryRead(ref reader, (PropertyContext)context, out _);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.ProtocolError);
     }
 
     /// <summary>
@@ -256,8 +378,8 @@ public class PropertyBlockTests
     /// A subscription identifier may repeat in a publish but not in a subscribe.
     /// </summary>
     [Theory]
-    [InlineData(Publish, MqttReasonCode.Success)]
-    [InlineData(Subscribe, MqttReasonCode.MalformedPacket)]
+    [InlineData((ushort)PropertyContext.Publish, MqttReasonCode.Success)]
+    [InlineData((ushort)PropertyContext.Subscribe, MqttReasonCode.MalformedPacket)]
     public void TryRead_SubscriptionIdentifierTwice_RepeatsOnlyInPublish(ushort context, MqttReasonCode expected)
     {
         // Arrange
@@ -274,13 +396,13 @@ public class PropertyBlockTests
     /// A value the standard forbids is a protocol error.
     /// </summary>
     [Theory]
-    [InlineData("03 21 00 00", Connect)]
-    [InlineData("05 27 00 00 00 00", Connect)]
-    [InlineData("02 0B 00", Publish)]
-    [InlineData("03 23 00 00", Publish)]
-    [InlineData("02 17 02", Connect)]
-    [InlineData("02 24 02", ConnAck)]
-    [InlineData("02 01 02", Publish)]
+    [InlineData("03 21 00 00", (ushort)PropertyContext.Connect)]
+    [InlineData("05 27 00 00 00 00", (ushort)PropertyContext.Connect)]
+    [InlineData("02 0B 00", (ushort)PropertyContext.Publish)]
+    [InlineData("03 23 00 00", (ushort)PropertyContext.Publish)]
+    [InlineData("02 17 02", (ushort)PropertyContext.Connect)]
+    [InlineData("02 24 02", (ushort)PropertyContext.ConnAck)]
+    [InlineData("02 01 02", (ushort)PropertyContext.Publish)]
     public void TryRead_ValueTheStandardForbids_IsProtocolError(string block, ushort context)
     {
         // Arrange

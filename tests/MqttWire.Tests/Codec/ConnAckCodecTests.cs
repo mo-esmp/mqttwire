@@ -8,7 +8,7 @@ namespace MqttWire.Tests.Codec;
 /// <summary>
 /// Tests decoding and encoding the CONNACK packet, including a cross-check against MQTTnet.
 /// </summary>
-public class ConnAckCodecTests
+public sealed class ConnAckCodecTests
 {
     /// <summary>
     /// Proves the encoder writes the known CONNACK bytes and sizes them correctly.

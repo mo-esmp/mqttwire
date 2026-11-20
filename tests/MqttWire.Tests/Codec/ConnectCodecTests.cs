@@ -7,7 +7,7 @@ namespace MqttWire.Tests.Codec;
 /// <summary>
 /// Tests decoding and encoding the CONNECT packet, including a cross-check against MQTTnet.
 /// </summary>
-public class ConnectCodecTests
+public sealed class ConnectCodecTests
 {
     /// <summary>
     /// Proves the known CONNECT decodes to its fields and properties.
@@ -151,6 +151,23 @@ public class ConnectCodecTests
     }
 
     /// <summary>
+    /// Proves a Will at QoS 1 with retain set is valid and reported.
+    /// </summary>
+    [Fact]
+    public void TryDecode_WillAtQoS1WithRetain_ReportsTheWill()
+    {
+        // Arrange
+        byte[] packet = Hex.Parse("10 15 00 04 4D 51 54 54 05 2E 00 00 00 00 01 63 00 00 01 77 00 01 78");
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out ConnectPacket connect);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        connect.HasWill.ShouldBeTrue();
+    }
+
+    /// <summary>
     /// Proves an Authentication Method is reported in the properties, not refused by the codec.
     /// </summary>
     [Fact]
@@ -182,6 +199,7 @@ public class ConnectCodecTests
     [InlineData("10 0E 00 04 4D 51 54 54 05 82 00 00 00 00 01 63")] // user name flagged but missing
     [InlineData("10 0F 00 04 4D 51 54 54 05 02 00 00 00 00 01 63 00")] // a left-over byte
     [InlineData("10 03 00 04 4D")] // protocol name cut
+    [InlineData("10 1A 00 04 4D 51 54 54 05 06 00 00 00 00 01 63 05 11 00 00 00 01 00 01 77 00 01 78")] // Session Expiry among the Will properties
     public void TryDecode_BrokenConnect_IsMalformed(string hex)
     {
         // Arrange
@@ -197,7 +215,8 @@ public class ConnectCodecTests
     }
 
     /// <summary>
-    /// Proves another protocol name or version is reported as unsupported.
+    /// Proves another protocol name or version is reported as unsupported, before the connect flags are checked
+    /// (plan decision 3).
     /// </summary>
     /// <param name="hex">
     /// The packet with another protocol name or level.
@@ -205,6 +224,7 @@ public class ConnectCodecTests
     [Theory]
     [InlineData("10 0F 00 06 4D 51 49 73 64 70 03 02 00 3C 00 01 63")] // "MQIsdp", level 3
     [InlineData("10 0E 00 04 4D 51 54 54 04 02 00 00 00 00 01 63")] // "MQTT", level 4
+    [InlineData("10 0E 00 04 4D 51 54 54 04 03 00 00 00 00 01 63")] // "MQTT", level 4 and a reserved flag
     public void TryDecode_OtherProtocolOrVersion_IsUnsupported(string hex)
     {
         // Arrange

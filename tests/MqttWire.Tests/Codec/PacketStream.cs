@@ -59,7 +59,9 @@ internal static class PacketStream
         int offset = 0;
         int calls = 0;
         Drain(stream, ref offset, ref calls, entries, reader);
-        calls.ShouldBeLessThanOrEqualTo(stream.Length + 2);
+
+        // One call per packet, each at least 2 bytes, and one that ends the only piece.
+        calls.ShouldBeLessThanOrEqualTo((stream.Length / 2) + 1 + 1);
         return entries;
     }
 
@@ -104,7 +106,8 @@ internal static class PacketStream
             }
         }
 
-        calls.ShouldBeLessThanOrEqualTo(stream.Length + cuts.Count + 2);
+        // One call per packet, each at least 2 bytes, and at most one that ends each piece.
+        calls.ShouldBeLessThanOrEqualTo((stream.Length / 2) + (cuts.Count + 1) + 1);
         return entries;
     }
 

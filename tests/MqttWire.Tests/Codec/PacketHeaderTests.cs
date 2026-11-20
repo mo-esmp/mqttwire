@@ -6,7 +6,7 @@ namespace MqttWire.Tests.Codec;
 /// <summary>
 /// Tests reading and writing the fixed header.
 /// </summary>
-public class PacketHeaderTests
+public sealed class PacketHeaderTests
 {
     /// <summary>
     /// Proves a valid header gives its type, flags and lengths.
@@ -100,6 +100,37 @@ public class PacketHeaderTests
         exact.TotalLength.ShouldBe(12);
         PacketHeader.TryReadPacket(withTrailingByte, out PacketHeader trailing).ShouldBe(OperationStatus.Done);
         trailing.TotalLength.ShouldBe(12);
+    }
+
+    /// <summary>
+    /// Proves a complete header whose body is missing returns need more data with the header filled, so a read loop
+    /// can check the packet's total length before it buffers the body.
+    /// </summary>
+    /// <param name="hex">
+    /// A complete fixed header and less than its body.
+    /// </param>
+    /// <param name="headerLength">
+    /// The size of the fixed header.
+    /// </param>
+    /// <param name="totalLength">
+    /// The size of the whole packet the header announces.
+    /// </param>
+    [Theory]
+    [InlineData("30 FF FF FF 7F 00", 5, 268_435_460)]
+    [InlineData("30 05", 2, 7)]
+    public void TryReadPacket_HeaderCompleteBodyMissing_ReturnsNeedMoreDataWithTheHeader(string hex, int headerLength, int totalLength)
+    {
+        // Arrange
+        byte[] source = Hex.Parse(hex);
+
+        // Act
+        OperationStatus status = PacketHeader.TryReadPacket(source, out PacketHeader header);
+
+        // Assert
+        status.ShouldBe(OperationStatus.NeedMoreData);
+        header.Type.ShouldBe(PacketType.Publish);
+        header.HeaderLength.ShouldBe(headerLength);
+        header.TotalLength.ShouldBe(totalLength);
     }
 
     /// <summary>
@@ -208,8 +239,8 @@ public class PacketHeaderTests
     }
 
     /// <summary>
-    /// Proves a packet whose type is anywhere in the range gives its header, and one outside it, a cut-off one or one
-    /// with a trailing byte throws.
+    /// Proves a packet whose type is anywhere in the range gives its header, and one above it, one below it or one
+    /// with a trailing byte throws; the packets outside the range carry valid flags for their type.
     /// </summary>
     [Fact]
     public void ReadExact_TypeRange_AcceptsTheRangeAndRefusesTheRest()
@@ -217,7 +248,8 @@ public class PacketHeaderTests
         // Arrange
         byte[] first = Hex.Parse("40 02 00 0A");
         byte[] last = Hex.Parse("70 02 00 0A");
-        byte[] outside = Hex.Parse("80 02 00 0A");
+        byte[] above = Hex.Parse("82 02 00 0A");
+        byte[] below = Hex.Parse("30 02 00 00");
         byte[] trailing = Hex.Parse("40 02 00 0A 00");
 
         // Act
@@ -227,7 +259,8 @@ public class PacketHeaderTests
         // Assert
         firstHeader.Type.ShouldBe(PacketType.PubAck);
         lastHeader.Type.ShouldBe(PacketType.PubComp);
-        Should.Throw<ArgumentException>(() => PacketHeader.ReadExact(outside, PacketType.PubAck, PacketType.PubComp));
+        Should.Throw<ArgumentException>(() => PacketHeader.ReadExact(above, PacketType.PubAck, PacketType.PubComp));
+        Should.Throw<ArgumentException>(() => PacketHeader.ReadExact(below, PacketType.PubAck, PacketType.PubComp));
         Should.Throw<ArgumentException>(() => PacketHeader.ReadExact(trailing, PacketType.PubAck, PacketType.PubComp));
     }
 }

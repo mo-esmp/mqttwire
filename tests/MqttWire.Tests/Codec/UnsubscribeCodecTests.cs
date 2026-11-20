@@ -8,7 +8,7 @@ namespace MqttWire.Tests.Codec;
 /// <summary>
 /// Tests decoding and encoding UNSUBSCRIBE and UNSUBACK, including a cross-check against MQTTnet.
 /// </summary>
-public class UnsubscribeCodecTests
+public sealed class UnsubscribeCodecTests
 {
     /// <summary>
     /// Proves the known UNSUBSCRIBE decodes to its values and is the bytes the encoder writes for them.
@@ -160,6 +160,23 @@ public class UnsubscribeCodecTests
         // Assert
         result.ShouldBe(MqttReasonCode.ProtocolError);
         unsubAck.ReasonCodes.IsEmpty.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// Proves an UNSUBACK reason code is handed on as sent, even 0xFF, which MQTT does not define (plan decision 8).
+    /// </summary>
+    [Fact]
+    public void TryDecode_UnsubAckWithUndefinedReasonCode_HandsItOnUnchanged()
+    {
+        // Arrange
+        byte[] packet = Hex.Parse("B0 04 00 02 00 FF");
+
+        // Act
+        MqttReasonCode result = UnsubAckCodec.TryDecode(packet, out UnsubAckPacket unsubAck);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        unsubAck.ReasonCodes.ToArray().ShouldBe([(byte)0xFF]);
     }
 
     /// <summary>

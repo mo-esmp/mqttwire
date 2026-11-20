@@ -9,7 +9,7 @@ namespace MqttWire.Tests.Codec;
 /// <summary>
 /// Tests decoding and encoding the PUBLISH packet, including a cross-check against MQTTnet.
 /// </summary>
-public class PublishCodecTests
+public sealed class PublishCodecTests
 {
     /// <summary>
     /// The known PUBLISH packets and the values they carry.

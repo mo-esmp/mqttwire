@@ -8,7 +8,7 @@ namespace MqttWire.Tests.Codec;
 /// <summary>
 /// Tests decoding and encoding the DISCONNECT packet, including a cross-check against MQTTnet.
 /// </summary>
-public class DisconnectCodecTests
+public sealed class DisconnectCodecTests
 {
     /// <summary>
     /// The known DISCONNECT packets and the values they carry.
