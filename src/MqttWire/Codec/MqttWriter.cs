@@ -161,7 +161,7 @@ internal ref struct MqttWriter
     {
         if (count > _remaining.Length)
         {
-            throw new ArgumentException("The destination is too small for the value.");
+            CodecThrow.DestinationTooSmall();
         }
 
         Span<byte> field = _remaining[..count];

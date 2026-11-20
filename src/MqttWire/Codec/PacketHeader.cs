@@ -35,17 +35,27 @@ internal readonly struct PacketHeader
     private readonly byte _firstByte;
 
     /// <summary>
+    /// The size of the fixed header, two to five, stored when it is read so the lengths need no recomputing. It
+    /// fits the struct's padding, which stays 8 bytes.
+    /// </summary>
+    private readonly byte _headerLength;
+
+    /// <summary>
     /// Creates a header from values already validated by <see cref="TryRead"/>.
     /// </summary>
     /// <param name="firstByte">
     /// The first byte of the packet.
     /// </param>
+    /// <param name="headerLength">
+    /// The size of the fixed header: the first byte and the remaining length as it was written.
+    /// </param>
     /// <param name="remainingLength">
     /// The remaining length.
     /// </param>
-    private PacketHeader(byte firstByte, int remainingLength)
+    private PacketHeader(byte firstByte, byte headerLength, int remainingLength)
     {
         _firstByte = firstByte;
+        _headerLength = headerLength;
         RemainingLength = remainingLength;
     }
 
@@ -67,12 +77,12 @@ internal readonly struct PacketHeader
     /// <summary>
     /// The size of the fixed header in bytes: the first byte and the remaining length, two to five.
     /// </summary>
-    public int HeaderLength => 1 + VariableByteInteger.GetLength(RemainingLength);
+    public int HeaderLength => _headerLength;
 
     /// <summary>
     /// The size of the whole packet in bytes: the fixed header plus the remaining length.
     /// </summary>
-    public int TotalLength => HeaderLength + RemainingLength;
+    public int TotalLength => _headerLength + RemainingLength;
 
     /// <summary>
     /// Reads the fixed header from the start of a buffer. The buffer need not hold the whole packet.
@@ -105,11 +115,11 @@ internal readonly struct PacketHeader
             return OperationStatus.InvalidData;
         }
 
-        OperationStatus status = VariableByteInteger.TryRead(buffer[1..], out int remainingLength, out _);
+        OperationStatus status = VariableByteInteger.TryRead(buffer[1..], out int remainingLength, out int lengthLength);
 
         if (status == OperationStatus.Done)
         {
-            header = new PacketHeader(firstByte, remainingLength);
+            header = new PacketHeader(firstByte, (byte)(1 + lengthLength), remainingLength);
         }
 
         return status;

@@ -105,9 +105,10 @@ internal readonly ref struct PropertyBlock
     public static PropertyBlock Empty => default;
 
     /// <summary>
-    /// The user properties in wire order; enumerating an empty block yields nothing.
+    /// The user properties in wire order; enumerating a block without one yields nothing and, as the presence mask
+    /// tells, does not walk the block.
     /// </summary>
-    public UserPropertyEnumerator UserProperties => new(_properties);
+    public UserPropertyEnumerator UserProperties => Contains(PropertyId.UserProperty) ? new(_properties) : default;
 
     /// <summary>
     /// Reads the length and the whole block, validates it in one pass and moves the reader past it.
@@ -178,7 +179,7 @@ internal readonly ref struct PropertyBlock
     /// <returns><see langword="false"/> if the property is absent or is not an integer property.</returns>
     public bool TryGetInteger(PropertyId id, out uint value)
     {
-        if (Contains(id) && TryFind(id, out value, out _) && s_entries[(int)id].Type is not (PropertyType.String or PropertyType.Binary or PropertyType.StringPair))
+        if (Contains(id) && s_entries[(int)id].Type is not (PropertyType.String or PropertyType.Binary or PropertyType.StringPair) && TryFind(id, out value, out _))
         {
             return true;
         }
@@ -195,7 +196,7 @@ internal readonly ref struct PropertyBlock
     /// <returns><see langword="false"/> if the property is absent or is not a string or binary property.</returns>
     public bool TryGetBytes(PropertyId id, out ReadOnlySpan<byte> value)
     {
-        if (Contains(id) && TryFind(id, out _, out value) && s_entries[(int)id].Type is PropertyType.String or PropertyType.Binary)
+        if (Contains(id) && s_entries[(int)id].Type is (PropertyType.String or PropertyType.Binary) && TryFind(id, out _, out value))
         {
             return true;
         }

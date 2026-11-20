@@ -147,7 +147,16 @@ internal static class PublishCodec
         MqttReader reader = new(packet[header.HeaderLength..]);
         MqttQoS qos = (MqttQoS)((header.Flags >> QosShift) & QosMask);
 
-        if (!reader.TryReadUtf8String(out ReadOnlySpan<byte> topic))
+        // The topic is read as binary and checked here, so it is scanned twice rather than three times: once for
+        // well-formed UTF-8, once for U+0000 and the wildcards together.
+        if (!reader.TryReadBinary(out ReadOnlySpan<byte> topic) || !Utf8.IsValid(topic))
+        {
+            return MqttReasonCode.MalformedPacket;
+        }
+
+        // U+0000 anywhere makes the packet malformed at once; a wildcard is reported only after the later checks.
+        int found = Topics.IndexOfWildcardOrNull(topic);
+        if (found >= 0 && topic[found..].Contains((byte)0))
         {
             return MqttReasonCode.MalformedPacket;
         }
@@ -185,7 +194,7 @@ internal static class PublishCodec
                 return MqttReasonCode.ProtocolError;
             }
         }
-        else if (!Topics.IsValidName(topic))
+        else if (found >= 0)
         {
             return MqttReasonCode.TopicNameInvalid;
         }

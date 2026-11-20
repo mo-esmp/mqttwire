@@ -207,11 +207,6 @@ internal static class SubscribeCodec
     private const int OptionsSize = 1;
 
     /// <summary>
-    /// The start of a shared subscription filter.
-    /// </summary>
-    private static ReadOnlySpan<byte> SharePrefix => "$share/"u8;
-
-    /// <summary>
     /// Decodes one SUBSCRIBE packet, validating every entry in one pass. Nothing allocates; the properties and
     /// filters are views of the input.
     /// </summary>
@@ -275,7 +270,7 @@ internal static class SubscribeCodec
 
             if ((options & QosMask) == QosMask
                 || ((options >> RetainHandlingShift) & RetainHandlingMask) == RetainHandlingMask
-                || ((options & NoLocalFlag) != 0 && filter.StartsWith(SharePrefix)))
+                || ((options & NoLocalFlag) != 0 && Topics.IsShared(filter)))
             {
                 return MqttReasonCode.ProtocolError;
             }

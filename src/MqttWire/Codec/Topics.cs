@@ -45,6 +45,28 @@ internal static class Topics
         => !utf8.IsEmpty && !utf8.ContainsAny(SingleLevel, MultiLevel, Null);
 
     /// <summary>
+    /// Finds the first wildcard or U+0000 in a topic name, so a decoder tells both faults apart in one scan.
+    /// </summary>
+    /// <param name="utf8">
+    /// The topic name.
+    /// </param>
+    /// <returns>
+    /// The index of the first <c>+</c>, <c>#</c> or U+0000; -1 when there is none.
+    /// </returns>
+    public static int IndexOfWildcardOrNull(ReadOnlySpan<byte> utf8) => utf8.IndexOfAny(SingleLevel, MultiLevel, Null);
+
+    /// <summary>
+    /// Tells whether a topic filter is a shared subscription, one that starts with <c>$share/</c>.
+    /// </summary>
+    /// <param name="utf8">
+    /// The topic filter; whether the rest of it is valid is not checked here.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the filter starts with <c>$share/</c>.
+    /// </returns>
+    public static bool IsShared(ReadOnlySpan<byte> utf8) => utf8.StartsWith(SharePrefix);
+
+    /// <summary>
     /// Tells whether bytes are a valid topic filter, the filter of a SUBSCRIBE or UNSUBSCRIBE.
     /// </summary>
     /// <param name="utf8">
@@ -57,7 +79,7 @@ internal static class Topics
     /// </returns>
     public static bool IsValidFilter(ReadOnlySpan<byte> utf8)
     {
-        if (!utf8.StartsWith(SharePrefix))
+        if (!IsShared(utf8))
         {
             return IsValidPlainFilter(utf8);
         }

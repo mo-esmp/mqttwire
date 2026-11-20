@@ -131,7 +131,7 @@ internal static class VariableByteInteger
         int length = GetLength(value);
         if (destination.Length < length)
         {
-            throw new ArgumentException("The destination is too small for the value.", nameof(destination));
+            CodecThrow.DestinationTooSmall();
         }
 
         for (int i = 0; i < length - 1; i++)
