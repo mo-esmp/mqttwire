@@ -335,7 +335,7 @@ git commit -m "Add the fixed header and packet framing to the codec."
   | 0x26 | string pair, repeatable | every context |
   | 0x27 | four-byte | Connect, ConnAck |
 
-  Also `MalformedPacket`: an unknown id, a block or value running past its end, invalid UTF-8, and a once-only property seen twice (tracked in a `ulong` bit mask). **`ProtocolError`**: a value of 0 for 0x0B, 0x21, 0x23 or 0x27; a value other than 0 or 1 for 0x01, 0x17, 0x19, 0x24, 0x25, 0x28, 0x29 or 0x2A.
+  Also `MalformedPacket`: an unknown id, a block or value running past its end, invalid UTF-8, and a once-only property seen twice (tracked in a `ulong` bit mask). **`ProtocolError`**: a value of 0 for 0x0B, 0x21, 0x23 or 0x27; a value other than 0 or 1 for 0x01, 0x17, 0x19, 0x24, 0x25, 0x28, 0x29 or 0x2A; a Response Topic (0x08) that is not a topic name, empty or holding `+` or `#` (MQTT 5, 3.3.2.3.5 and 3.1.3.2.6).
 
 - [ ] **Step 1: Write the failing tests**
 

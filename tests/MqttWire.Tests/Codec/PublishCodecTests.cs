@@ -434,6 +434,49 @@ public sealed class PublishCodecTests
     }
 
     /// <summary>
+    /// Proves a PUBLISH whose Response Topic is not a topic name, empty or holding a wildcard, is a protocol error
+    /// and leaves the output at its default.
+    /// </summary>
+    /// <param name="hex">
+    /// The PUBLISH with the topic "t" and the invalid Response Topic.
+    /// </param>
+    [Theory]
+    [InlineData("30 0E 00 01 74 0A 08 00 07 72 65 70 6C 79 2F 2B")] // "reply/+"
+    [InlineData("30 0E 00 01 74 0A 08 00 07 72 65 70 6C 79 2F 23")] // "reply/#"
+    [InlineData("30 07 00 01 74 03 08 00 00")] // empty
+    public void TryDecode_ResponseTopicNotATopicName_IsProtocolError(string hex)
+    {
+        // Arrange
+        byte[] packet = Hex.Parse(hex);
+
+        // Act
+        MqttReasonCode result = PublishCodec.TryDecode(packet, PacketSource.Client, out PublishPacket publish);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.ProtocolError);
+        publish.Topic.IsEmpty.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// Proves a PUBLISH whose Response Topic is a topic name decodes and reports the property.
+    /// </summary>
+    [Fact]
+    public void TryDecode_ResponseTopicThatIsATopicName_Succeeds()
+    {
+        // Arrange: topic "t", Response Topic "reply/x".
+        byte[] packet = Hex.Parse("30 0E 00 01 74 0A 08 00 07 72 65 70 6C 79 2F 78");
+
+        // Act
+        MqttReasonCode result = PublishCodec.TryDecode(packet, PacketSource.Client, out PublishPacket publish);
+        bool found = publish.Properties.TryGetBytes(PropertyId.ResponseTopic, out ReadOnlySpan<byte> responseTopic);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        found.ShouldBeTrue();
+        Encoding.UTF8.GetString(responseTopic).ShouldBe("reply/x");
+    }
+
+    /// <summary>
     /// Proves DUP at QoS 0, which a sender must clear (MQTT-3.3.1-2), throws from every sizing and writing method,
     /// with and without retain, and writes nothing.
     /// </summary>

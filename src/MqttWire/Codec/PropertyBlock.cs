@@ -35,6 +35,11 @@ internal readonly ref struct PropertyBlock
     private const byte ZeroOrOne = 2;
 
     /// <summary>
+    /// The value rule: a string that is not a topic name, empty or holding a wildcard, is a protocol error.
+    /// </summary>
+    private const byte TopicName = 3;
+
+    /// <summary>
     /// The property table (MQTT 5, 2.2.2.2) indexed by identifier; an unlisted identifier has no allowed context, so it is unknown.
     /// </summary>
     private static readonly Entry[] s_entries = BuildTable();
@@ -91,7 +96,8 @@ internal readonly ref struct PropertyBlock
     /// <returns>
     /// <see cref="MqttReasonCode.Success"/>; <see cref="MqttReasonCode.MalformedPacket"/> for a block or value running
     /// past its end, an unknown property, one not allowed in the context, invalid UTF-8 or a repeated once-only property;
-    /// <see cref="MqttReasonCode.ProtocolError"/> for a value the standard forbids. The first fault in byte order decides.
+    /// <see cref="MqttReasonCode.ProtocolError"/> for a value the standard forbids: a number outside its range, or a
+    /// Response Topic that is empty or holds a wildcard. The first fault in byte order decides.
     /// </returns>
     public static MqttReasonCode TryRead(scoped ref MqttReader reader, PropertyContext context, out PropertyBlock block)
     {
@@ -112,7 +118,8 @@ internal readonly ref struct PropertyBlock
             }
 
             ref readonly Entry entry = ref s_entries[id];
-            if ((entry.Allowed & context) == PropertyContext.None || !TryReadValue(ref properties, entry.Type, out uint number, out _))
+            if ((entry.Allowed & context) == PropertyContext.None
+                || !TryReadValue(ref properties, entry.Type, out uint number, out ReadOnlySpan<byte> bytes))
             {
                 return MqttReasonCode.MalformedPacket;
             }
@@ -125,7 +132,9 @@ internal readonly ref struct PropertyBlock
 
             present |= bit;
 
-            if ((entry.Rule == NonZero && number == 0) || (entry.Rule == ZeroOrOne && number > 1))
+            if ((entry.Rule == NonZero && number == 0)
+                || (entry.Rule == ZeroOrOne && number > 1)
+                || (entry.Rule == TopicName && !Topics.IsValidName(bytes)))
             {
                 return MqttReasonCode.ProtocolError;
             }
@@ -353,7 +362,7 @@ internal readonly ref struct PropertyBlock
         Set(table, PropertyId.PayloadFormatIndicator, PropertyType.Byte, ZeroOrOne, PublishOrWill);
         Set(table, PropertyId.MessageExpiryInterval, PropertyType.UInt32, NoRule, PublishOrWill);
         Set(table, PropertyId.ContentType, PropertyType.String, NoRule, PublishOrWill);
-        Set(table, PropertyId.ResponseTopic, PropertyType.String, NoRule, PublishOrWill);
+        Set(table, PropertyId.ResponseTopic, PropertyType.String, TopicName, PublishOrWill);
         Set(table, PropertyId.CorrelationData, PropertyType.Binary, NoRule, PublishOrWill);
         Set(table, PropertyId.SubscriptionIdentifier, PropertyType.VariableByteInteger, NonZero, PropertyContext.Publish | PropertyContext.Subscribe, PropertyContext.Publish);
         Set(table, PropertyId.SessionExpiryInterval, PropertyType.UInt32, NoRule, ConnectOrConnAck | PropertyContext.Disconnect);

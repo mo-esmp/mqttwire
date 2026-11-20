@@ -242,6 +242,48 @@ public sealed class ConnectCodecTests
     }
 
     /// <summary>
+    /// Proves a Will whose Response Topic property is not a topic name, empty or holding a wildcard, is a protocol
+    /// error and leaves the output at its default.
+    /// </summary>
+    /// <param name="hex">
+    /// The CONNECT with a valid Will topic and the invalid Response Topic among the Will properties.
+    /// </param>
+    [Theory]
+    [InlineData("10 1F 00 04 4D 51 54 54 05 06 00 00 00 00 01 63 0A 08 00 07 72 65 70 6C 79 2F 2B 00 01 77 00 01 78")] // "reply/+"
+    [InlineData("10 1F 00 04 4D 51 54 54 05 06 00 00 00 00 01 63 0A 08 00 07 72 65 70 6C 79 2F 23 00 01 77 00 01 78")] // "reply/#"
+    [InlineData("10 18 00 04 4D 51 54 54 05 06 00 00 00 00 01 63 03 08 00 00 00 01 77 00 01 78")] // empty
+    public void TryDecode_WillResponseTopicNotATopicName_IsProtocolError(string hex)
+    {
+        // Arrange
+        byte[] packet = Hex.Parse(hex);
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out ConnectPacket connect);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.ProtocolError);
+        connect.ClientId.IsEmpty.ShouldBeTrue();
+        connect.HasWill.ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// Proves a Will whose Response Topic property is a topic name is accepted.
+    /// </summary>
+    [Fact]
+    public void TryDecode_WillResponseTopicThatIsATopicName_ReportsTheWill()
+    {
+        // Arrange: Will topic "w", Response Topic "reply/x".
+        byte[] packet = Hex.Parse("10 1F 00 04 4D 51 54 54 05 06 00 00 00 00 01 63 0A 08 00 07 72 65 70 6C 79 2F 78 00 01 77 00 01 78");
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out ConnectPacket connect);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        connect.HasWill.ShouldBeTrue();
+    }
+
+    /// <summary>
     /// Proves a packet that is malformed after an invalid Will topic is reported as malformed, not as an invalid
     /// topic name.
     /// </summary>

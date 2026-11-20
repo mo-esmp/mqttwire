@@ -87,13 +87,19 @@ public sealed class PropertyBlockTests
 
     /// <summary>
     /// The test's own list of the values the standard forbids (the property sections of MQTT 5, chapter 3): 0 for the
-    /// properties that must not be 0, and values above 1 for those that must be 0 or 1. Each row is an id of
+    /// properties that must not be 0, values above 1 for those that must be 0 or 1, and for the Response Topic,
+    /// which must be a topic name, the empty string and strings holding a wildcard. Each row is an id of
     /// <see cref="s_table"/> and one forbidden value.
     /// </summary>
     private static readonly (byte Id, string Value)[] s_forbidden =
     [
         (0x01, "02"),
         (0x01, "FF"),
+        (0x08, "00 00"),
+        (0x08, "00 01 2B"),
+        (0x08, "00 01 23"),
+        (0x08, "00 07 72 65 70 6C 79 2F 2B"),
+        (0x08, "00 07 72 65 70 6C 79 2F 23"),
         (0x0B, "00"),
         (0x17, "02"),
         (0x17, "FF"),
@@ -413,6 +419,31 @@ public sealed class PropertyBlockTests
 
         // Assert
         result.ShouldBe(MqttReasonCode.ProtocolError);
+    }
+
+    /// <summary>
+    /// Proves a Response Topic that is a topic name is accepted in both contexts that allow it and read back
+    /// unchanged, levels and a leading separator included.
+    /// </summary>
+    /// <param name="context">
+    /// The context, as the underlying type of <see cref="PropertyContext"/>.
+    /// </param>
+    [Theory]
+    [InlineData((ushort)PropertyContext.Publish)]
+    [InlineData((ushort)PropertyContext.Will)]
+    public void TryRead_ResponseTopicThatIsATopicName_IsAccepted(ushort context)
+    {
+        // Arrange: the Response Topic "/reply/x".
+        MqttReader reader = new(Hex.Parse("0B 08 00 08 2F 72 65 70 6C 79 2F 78"));
+
+        // Act
+        MqttReasonCode result = PropertyBlock.TryRead(ref reader, (PropertyContext)context, out PropertyBlock block);
+        bool found = block.TryGetBytes(PropertyId.ResponseTopic, out ReadOnlySpan<byte> topic);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        found.ShouldBeTrue();
+        Encoding.UTF8.GetString(topic).ShouldBe("/reply/x");
     }
 
     /// <summary>
