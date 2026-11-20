@@ -80,7 +80,7 @@ internal readonly ref struct ConnectFields
 
     /// <summary>
     /// The Receive Maximum property: how many QoS 1 and 2 publications the client accepts at once. The client
-    /// sends 1,024 (MQTT 5, 3.1.2.11.3). The standard forbids 0; that is not checked here.
+    /// sends 1,024 (MQTT 5, 3.1.2.11.3). The standard forbids 0, so the encoder refuses it.
     /// </summary>
     public ushort ReceiveMaximum { get; init; }
 }
@@ -269,6 +269,9 @@ internal static class ConnectCodec
     /// <exception cref="ArgumentException">
     /// A string or the password cannot be carried: too long, or a string containing U+0000 or an unpaired surrogate.
     /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <see cref="ConnectFields.ReceiveMaximum"/> is 0, which the standard forbids.
+    /// </exception>
     public static int GetSize(in ConnectFields fields)
     {
         int remainingLength = GetRemainingLength(fields);
@@ -293,6 +296,9 @@ internal static class ConnectCodec
     /// <exception cref="ArgumentException">
     /// A string or the password cannot be carried, or the destination is too small. Everything is checked before the
     /// first byte is written, so nothing is written.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <see cref="ConnectFields.ReceiveMaximum"/> is 0, which the standard forbids. Nothing is written.
     /// </exception>
     public static int Write(Span<byte> destination, in ConnectFields fields)
     {
@@ -353,8 +359,13 @@ internal static class ConnectCodec
     /// <exception cref="ArgumentException">
     /// A string or the password cannot be carried.
     /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The Receive Maximum is 0.
+    /// </exception>
     private static int GetRemainingLength(in ConnectFields fields)
     {
+        ArgumentOutOfRangeException.ThrowIfZero(fields.ReceiveMaximum, "ReceiveMaximum");
+
         int length = FixedVariableHeaderSize + PropertiesSize + FieldSize.Utf8String(fields.ClientId);
 
         if (fields.UserName is not null)

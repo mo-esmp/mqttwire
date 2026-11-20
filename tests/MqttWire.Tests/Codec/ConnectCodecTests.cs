@@ -353,4 +353,19 @@ public class ConnectCodecTests
         decoded.CleanSession.ShouldBeTrue();
         decoded.ReceiveMaximum.ShouldBe((ushort)1024);
     }
+
+    /// <summary>
+    /// Proves a Receive Maximum of zero, which the standard forbids, throws from both GetSize and Write before anything is written.
+    /// </summary>
+    [Fact]
+    public void Write_ReceiveMaximumZero_Throws()
+    {
+        // Arrange
+        byte[] destination = new byte[64];
+
+        // Act & Assert
+        Should.Throw<ArgumentOutOfRangeException>(() => ConnectCodec.GetSize(new ConnectFields { ClientId = "c1", ReceiveMaximum = 0 }));
+        Should.Throw<ArgumentOutOfRangeException>(() => ConnectCodec.Write(destination, new ConnectFields { ClientId = "c1", ReceiveMaximum = 0 }));
+        destination.ShouldAllBe(b => b == 0);
+    }
 }
