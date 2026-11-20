@@ -1,4 +1,4 @@
-namespace MqttWire.Codec;
+﻿namespace MqttWire.Codec;
 
 /// <summary>
 /// The MQTT 5 property identifiers (section 2.2.2.2); the value is the identifier byte on the wire.

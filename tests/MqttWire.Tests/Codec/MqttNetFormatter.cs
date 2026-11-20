@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using MQTTnet.Adapter;
 using MQTTnet.Formatter;
 using MQTTnet.Packets;

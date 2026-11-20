@@ -1,4 +1,4 @@
-using MqttWire.Codec;
+﻿using MqttWire.Codec;
 
 namespace MqttWire.Tests.Codec;
 

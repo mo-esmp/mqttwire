@@ -1,4 +1,4 @@
-namespace MqttWire.Codec;
+﻿namespace MqttWire.Codec;
 
 /// <summary>
 /// The MQTT 5 keep-alive packets PINGREQ and PINGRESP (MQTT 5, 3.12 and 3.13); both are a fixed header and nothing

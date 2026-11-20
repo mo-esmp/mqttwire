@@ -1,4 +1,4 @@
-namespace MqttWire.Codec;
+﻿namespace MqttWire.Codec;
 
 /// <summary>
 /// The kind of packet or property set a block belongs to; decides which properties are allowed in it.

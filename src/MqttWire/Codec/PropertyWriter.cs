@@ -1,4 +1,4 @@
-namespace MqttWire.Codec;
+﻿namespace MqttWire.Codec;
 
 /// <summary>
 /// Sizes and writes MQTT 5 properties; every size and write includes the identifier byte. The writers throw

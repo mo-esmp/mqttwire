@@ -1,4 +1,4 @@
-namespace MqttWire.Codec;
+﻿namespace MqttWire.Codec;
 
 /// <summary>
 /// A decoded PUBACK, PUBREC, PUBREL or PUBCOMP packet: views over the bytes it was decoded from, so it is only

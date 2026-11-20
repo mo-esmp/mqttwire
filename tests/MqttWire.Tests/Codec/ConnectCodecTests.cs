@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using MQTTnet.Packets;
 using MqttWire.Codec;
 

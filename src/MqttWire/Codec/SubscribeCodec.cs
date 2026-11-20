@@ -1,4 +1,4 @@
-namespace MqttWire.Codec;
+﻿namespace MqttWire.Codec;
 
 /// <summary>
 /// One subscription of a SUBSCRIBE: a topic filter and its options. The filter is a view of the packet's bytes.

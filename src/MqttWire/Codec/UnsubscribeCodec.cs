@@ -1,4 +1,4 @@
-namespace MqttWire.Codec;
+﻿namespace MqttWire.Codec;
 
 /// <summary>
 /// Walks the topic filters of a validated UNSUBSCRIBE in wire order. The packet was validated whole when it was

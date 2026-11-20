@@ -1,4 +1,4 @@
-namespace MqttWire.Tests.Codec;
+﻿namespace MqttWire.Tests.Codec;
 
 /// <summary>
 /// Byte sequences of whole packets that the tests decode and expect the encoders to write.

@@ -1,4 +1,4 @@
-namespace MqttWire.Codec;
+﻿namespace MqttWire.Codec;
 
 /// <summary>
 /// The rules for topic names and topic filters (MQTT 5, 4.7). Both take UTF-8 bytes. The characters the rules look

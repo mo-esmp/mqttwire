@@ -1,4 +1,4 @@
-namespace MqttWire.Tests;
+﻿namespace MqttWire.Tests;
 
 /// <summary>
 /// Pins the values of the public reason codes to the bytes MQTT 5 gives them (MQTT 5, 2.4).

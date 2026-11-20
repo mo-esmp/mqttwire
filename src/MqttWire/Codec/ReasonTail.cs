@@ -1,4 +1,4 @@
-namespace MqttWire.Codec;
+﻿namespace MqttWire.Codec;
 
 /// <summary>
 /// The tail PUBACK, PUBREC, PUBREL, PUBCOMP and DISCONNECT share after what comes first in their variable header:
