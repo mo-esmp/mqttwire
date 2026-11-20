@@ -98,6 +98,120 @@ public sealed class MqttWriterTests
     }
 
     /// <summary>
+    /// Proves a measured string is written as the same bytes the checking writer writes, for characters of one to
+    /// four bytes and for the empty string.
+    /// </summary>
+    /// <param name="value">
+    /// The string to write.
+    /// </param>
+    [Theory]
+    [InlineData("")]
+    [InlineData("a")]
+    [InlineData("ü")]
+    [InlineData("größe-温度")]
+    [InlineData("a😀b")]
+    public void WriteMeasuredUtf8String_MeasuredString_WritesWhatWriteUtf8StringWrites(string value)
+    {
+        // Arrange
+        int size = FieldSize.Utf8String(value);
+        byte[] expected = new byte[size];
+        byte[] destination = new byte[size];
+        MqttWriter checking = new(expected);
+        checking.WriteUtf8String(value);
+
+        // Act
+        MqttWriter writer = new(destination);
+        writer.WriteMeasuredUtf8String(value);
+
+        // Assert
+        writer.Written.ShouldBe(size);
+        destination.ShouldBe(expected);
+    }
+
+    /// <summary>
+    /// Proves a measured string of the longest allowed length is written with its length prefix.
+    /// </summary>
+    [Fact]
+    public void WriteMeasuredUtf8String_StringOf65535Bytes_WritesItsLengthAndBytes()
+    {
+        // Arrange
+        string value = new('a', 65_535);
+        byte[] destination = new byte[FieldSize.Utf8String(value)];
+
+        // Act
+        MqttWriter writer = new(destination);
+        writer.WriteMeasuredUtf8String(value);
+
+        // Assert
+        writer.Written.ShouldBe(2 + 65_535);
+        destination.AsSpan(0, 2).ToArray().ShouldBe(Hex.Parse("FF FF"));
+        destination.AsSpan(2).ToArray().ShouldAllBe(b => b == (byte)'a');
+    }
+
+    /// <summary>
+    /// Proves a string that was not measured and is over 65,535 bytes throws instead of writing a wrong length,
+    /// and leaves the writer's position where it was.
+    /// </summary>
+    [Fact]
+    public void WriteMeasuredUtf8String_StringOver65535Bytes_ThrowsAndDoesNotAdvance()
+    {
+        // Arrange
+        string value = new('a', 65_536);
+        byte[] destination = new byte[2 + 65_536];
+        int written = -1;
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() =>
+        {
+            MqttWriter writer = new(destination);
+            try
+            {
+                writer.WriteMeasuredUtf8String(value);
+            }
+            finally
+            {
+                written = writer.Written;
+            }
+        });
+        written.ShouldBe(0);
+        destination.AsSpan(0, 2).ToArray().ShouldBe(Hex.Parse("00 00"));
+    }
+
+    /// <summary>
+    /// Proves a destination too small for a measured string throws, with or without room for the length prefix,
+    /// and leaves the writer's position where it was.
+    /// </summary>
+    /// <param name="destinationSize">
+    /// The size of the destination, too small for the 5-byte field.
+    /// </param>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(4)]
+    public void WriteMeasuredUtf8String_DestinationTooSmall_ThrowsAndDoesNotAdvance(int destinationSize)
+    {
+        // Arrange
+        byte[] destination = new byte[destinationSize];
+        int written = -1;
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() =>
+        {
+            MqttWriter writer = new(destination);
+            try
+            {
+                writer.WriteMeasuredUtf8String("abc");
+            }
+            finally
+            {
+                written = writer.Written;
+            }
+        });
+        written.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves writing a string with an unpaired surrogate throws before anything is written.
     /// </summary>
     [Fact]

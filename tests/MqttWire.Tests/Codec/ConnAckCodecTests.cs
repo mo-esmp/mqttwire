@@ -331,6 +331,67 @@ public sealed class ConnAckCodecTests
     }
 
     /// <summary>
+    /// Proves a user property MQTT cannot carry, in its name or its value and after a valid one, throws from the
+    /// size and from the writer before the first byte is written.
+    /// </summary>
+    /// <param name="inName">
+    /// Whether the fault is in the name of the second user property; otherwise it is in its value.
+    /// </param>
+    /// <param name="unpairedSurrogate">
+    /// Whether the fault is an unpaired surrogate; otherwise it is U+0000. The faulty text is built in the test,
+    /// since an unpaired surrogate does not survive as theory data.
+    /// </param>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public void Write_UserPropertyMqttCannotCarry_ThrowsWithoutWriting(bool inName, bool unpairedSurrogate)
+    {
+        // Arrange
+        string faulty = unpairedSurrogate ? "a\uD800" : "a\0";
+        string name = inName ? faulty : "k";
+        string value = inName ? "v" : faulty;
+        MqttWireUserProperty[] userProperties = [new("first", "valid"), new(name, value)];
+        byte[] destination = new byte[64];
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() => ConnAckCodec.GetSize(new ConnAckFields { UserProperties = userProperties }));
+        Should.Throw<ArgumentException>(() => ConnAckCodec.Write(destination, new ConnAckFields { UserProperties = userProperties }));
+        destination.ShouldAllBe(b => b == 0);
+    }
+
+    /// <summary>
+    /// Proves user properties with characters of two, three and four bytes are written with the byte counts the
+    /// size measured, and decode to the same names and values in order.
+    /// </summary>
+    [Fact]
+    public void Write_UserPropertiesWithMultiByteCharacters_RoundTrip()
+    {
+        // Arrange
+        MqttWireUserProperty[] userProperties = [new("schlüssel", "größe"), new("温度", "a😀b"), new(string.Empty, string.Empty)];
+        ConnAckFields fields = new() { UserProperties = userProperties };
+        byte[] destination = new byte[ConnAckCodec.GetSize(fields)];
+
+        // Act
+        int written = ConnAckCodec.Write(destination, fields);
+        MqttReasonCode result = ConnAckCodec.TryDecode(destination, out ConnAckPacket connAck);
+
+        // Assert
+        written.ShouldBe(destination.Length);
+        result.ShouldBe(MqttReasonCode.Success);
+        int count = 0;
+        foreach (Utf8Pair pair in connAck.Properties.UserProperties)
+        {
+            Encoding.UTF8.GetString(pair.Name).ShouldBe(userProperties[count].Name);
+            Encoding.UTF8.GetString(pair.Value).ShouldBe(userProperties[count].Value);
+            count++;
+        }
+
+        count.ShouldBe(3);
+    }
+
+    /// <summary>
     /// Proves user properties too large for the largest remaining length throw from the size and the writer and
     /// write nothing, both just past the limit and past the range of an <see cref="int"/>.
     /// </summary>

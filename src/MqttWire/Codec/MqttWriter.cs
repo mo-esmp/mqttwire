@@ -6,7 +6,8 @@ namespace MqttWire.Codec;
 /// <summary>
 /// Writes MQTT fields forward into a span of bytes, never allocating. Every method checks that the field
 /// fits and throws before it writes anything, so a failed call writes nothing and leaves
-/// <see cref="Written"/> as it was. The caller sizes the destination with <see cref="FieldSize"/>.
+/// <see cref="Written"/> as it was; the one exception is <see cref="WriteMeasuredUtf8String"/>, for strings
+/// the caller has already measured. The caller sizes the destination with <see cref="FieldSize"/>.
 /// </summary>
 // Sequential, the default for a struct, kept on purpose: measured, Auto made every encode about 6 ns slower.
 [StructLayout(LayoutKind.Sequential)]
@@ -118,6 +119,42 @@ internal ref struct MqttWriter
         Span<byte> field = Reserve(size);
         BinaryPrimitives.WriteUInt16BigEndian(field, (ushort)utf8.Length);
         utf8.CopyTo(field[FieldSize.LengthPrefix..]);
+    }
+
+    /// <summary>
+    /// Writes a string that <see cref="FieldSize.Utf8String(string)"/> has already measured, as a two-byte length
+    /// followed by its UTF-8 bytes, without scanning it again: the string is encoded straight into the destination
+    /// and the length is filled in from the number of bytes that took. For a packet writer that has checked every
+    /// string and the size of the destination before its first byte.
+    /// </summary>
+    /// <param name="value">
+    /// The text to write. It must have passed <see cref="FieldSize.Utf8String(string)"/>: U+0000 is not looked
+    /// for here.
+    /// </param>
+    /// <exception cref="ArgumentException">
+    /// Too little room is left or the string is longer than 65,535 bytes in UTF-8; a string that was measured and a
+    /// destination sized from that rule both out. Unlike the other methods, the bytes after the writer's position
+    /// may then have been written; <see cref="Written"/> is unchanged.
+    /// </exception>
+    public void WriteMeasuredUtf8String(string value)
+    {
+        if (_remaining.Length < FieldSize.LengthPrefix)
+        {
+            CodecThrow.DestinationTooSmall("destination");
+        }
+
+        if (!FieldSize.StrictUtf8.TryGetBytes(value, _remaining[FieldSize.LengthPrefix..], out int byteCount))
+        {
+            CodecThrow.DestinationTooSmall("destination");
+        }
+
+        if (byteCount > FieldSize.MaxDataLength)
+        {
+            CodecThrow.Invalid("The string is longer than 65,535 bytes in UTF-8.", nameof(value));
+        }
+
+        BinaryPrimitives.WriteUInt16BigEndian(_remaining, (ushort)byteCount);
+        Advance(FieldSize.LengthPrefix + byteCount);
     }
 
     /// <summary>

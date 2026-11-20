@@ -1,8 +1,9 @@
 ﻿namespace MqttWire.Codec;
 
 /// <summary>
-/// Sizes and writes MQTT 5 properties; every size and write includes the identifier byte. The writers throw
-/// <see cref="ArgumentException"/> for a string MQTT cannot carry or a destination that is too small (caller bugs).
+/// Sizes and writes MQTT 5 properties; every size and write includes the identifier byte. A string MQTT cannot
+/// carry or a destination that is too small throws <see cref="ArgumentException"/> (caller bugs); user properties
+/// are checked when they are measured, not again when they are written.
 /// </summary>
 internal static class PropertyWriter
 {
@@ -144,24 +145,27 @@ internal static class PropertyWriter
     }
 
     /// <summary>
-    /// Writes user properties in order.
+    /// Writes user properties in order. The caller must have measured them with <see cref="UserPropertiesSize"/>,
+    /// which checks every name and value, and sized the destination from that: the strings are not scanned again
+    /// here, each is encoded once, straight into the destination.
     /// </summary>
     /// <param name="writer">
     /// The writer to append to.
     /// </param>
     /// <param name="properties">
-    /// The user properties; none writes nothing.
+    /// The user properties, already measured; none writes nothing.
     /// </param>
     /// <exception cref="ArgumentException">
-    /// A name or value cannot be carried, or the destination is too small.
+    /// The destination is too small, which a destination sized from <see cref="UserPropertiesSize"/> rules out; part
+    /// of the properties may then have been written.
     /// </exception>
     public static void WriteUserProperties(ref MqttWriter writer, ReadOnlySpan<MqttWireUserProperty> properties)
     {
         foreach (ref readonly MqttWireUserProperty property in properties)
         {
             writer.WriteByte((byte)PropertyId.UserProperty);
-            writer.WriteUtf8String(property.Name);
-            writer.WriteUtf8String(property.Value);
+            writer.WriteMeasuredUtf8String(property.Name);
+            writer.WriteMeasuredUtf8String(property.Value);
         }
     }
 }
