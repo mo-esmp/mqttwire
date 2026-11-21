@@ -1,7 +1,8 @@
 ﻿namespace MqttWire.Codec;
 
 /// <summary>
-/// What the client writes into a CONNECT: protocol 5, clean start, no Will, and Receive Maximum as the only property.
+/// What the client writes into a CONNECT: protocol 5, clean start, no Will, a Receive Maximum and, when given, a
+/// Maximum Packet Size.
 /// </summary>
 internal readonly ref struct ConnectFields
 {
@@ -30,4 +31,10 @@ internal readonly ref struct ConnectFields
     /// sends 1,024 (MQTT 5, 3.1.2.11.3). The standard forbids 0, so the encoder refuses it.
     /// </summary>
     public ushort ReceiveMaximum { get; init; }
+
+    /// <summary>
+    /// The Maximum Packet Size property: the largest packet the client accepts, in bytes, or <see langword="null"/>
+    /// to leave the property out (MQTT 5, 3.1.2.11.4). The standard forbids 0, so the encoder refuses it.
+    /// </summary>
+    public uint? MaximumPacketSize { get; init; }
 }

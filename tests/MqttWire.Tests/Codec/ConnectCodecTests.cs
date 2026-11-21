@@ -467,6 +467,100 @@ public sealed class ConnectCodecTests
     }
 
     /// <summary>
+    /// Proves a Maximum Packet Size is written as a four-byte property right after the Receive Maximum.
+    /// </summary>
+    [Fact]
+    public void Write_MaximumPacketSize_WritesItAfterReceiveMaximum()
+    {
+        // Arrange
+        ConnectFields fields = new()
+        {
+            ClientId = "c1",
+            UserName = "u",
+            Password = [0x70],
+            KeepAliveSeconds = 15,
+            ReceiveMaximum = 1024,
+            MaximumPacketSize = 1_048_576,
+        };
+        byte[] destination = new byte[64];
+
+        // Act
+        int size = ConnectCodec.GetSize(fields);
+        int written = ConnectCodec.Write(destination, fields);
+
+        // Assert
+        size.ShouldBe(KnownPackets.ConnectWithMaximumPacketSize.Length);
+        written.ShouldBe(size);
+        destination.AsSpan(0, written).ToArray().ShouldBe(KnownPackets.ConnectWithMaximumPacketSize);
+    }
+
+    /// <summary>
+    /// Proves a CONNECT carrying a Maximum Packet Size decodes with the property readable.
+    /// </summary>
+    [Fact]
+    public void TryDecode_ConnectWithMaximumPacketSize_ExposesIt()
+    {
+        // Arrange
+        byte[] packet = KnownPackets.ConnectWithMaximumPacketSize;
+
+        // Act
+        MqttReasonCode result = ConnectCodec.TryDecode(packet, out ConnectPacket connect);
+
+        // Assert
+        result.ShouldBe(MqttReasonCode.Success);
+        connect.Properties.TryGetInteger(PropertyId.MaximumPacketSize, out uint maximumPacketSize).ShouldBeTrue();
+        maximumPacketSize.ShouldBe(1_048_576u);
+    }
+
+    /// <summary>
+    /// Proves a Maximum Packet Size of zero, which the standard forbids, throws from both GetSize and Write before
+    /// anything is written.
+    /// </summary>
+    [Fact]
+    public void Write_MaximumPacketSizeZero_ThrowsAndWritesNothing()
+    {
+        // Arrange
+        byte[] destination = new byte[64];
+
+        // Act
+        Exception? sizeException = Record.Exception(() => ConnectCodec.GetSize(new ConnectFields { ClientId = "c1", ReceiveMaximum = 1024, MaximumPacketSize = 0 }));
+        Exception? writeException = Record.Exception(() => ConnectCodec.Write(destination, new ConnectFields { ClientId = "c1", ReceiveMaximum = 1024, MaximumPacketSize = 0 }));
+
+        // Assert
+        sizeException.ShouldBeOfType<ArgumentOutOfRangeException>();
+        writeException.ShouldBeOfType<ArgumentOutOfRangeException>();
+        destination.ShouldAllBe(b => b == 0);
+    }
+
+    /// <summary>
+    /// Proves a CONNECT with a Maximum Packet Size that this codec encodes decodes in MQTTnet to the same value.
+    /// </summary>
+    [Fact]
+    public void Write_MaximumPacketSize_MatchesMqttNet()
+    {
+        // Arrange
+        ConnectFields fields = new()
+        {
+            ClientId = "c1",
+            UserName = "u",
+            Password = [0x70],
+            KeepAliveSeconds = 15,
+            ReceiveMaximum = 1024,
+            MaximumPacketSize = 1_048_576,
+        };
+        byte[] destination = new byte[ConnectCodec.GetSize(fields)];
+        ConnectCodec.Write(destination, fields);
+
+        // Act
+        MqttConnectPacket decoded = (MqttConnectPacket)MqttNetFormatter.Decode(destination);
+
+        // Assert
+        decoded.MaximumPacketSize.ShouldBe(1_048_576u);
+        decoded.ReceiveMaximum.ShouldBe((ushort)1024);
+        decoded.ClientId.ShouldBe("c1");
+    }
+
+    /// <summary>
     /// Proves a Receive Maximum of zero, which the standard forbids, throws from both GetSize and Write before anything is written.
     /// </summary>
     [Fact]
