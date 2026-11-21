@@ -352,8 +352,13 @@ The packages are a preview and not published, so the removal needs no deprecatio
 
 ## 7. Order of work
 
-The two repositories are built together, a part at a time. Each step ends with every test
-green in the repository it touches.
+The two repositories were first planned to be built together, a part at a time, in the order of
+the table below. **On 2026-11-21, after step 2, the owner changed the order:** MqttWire is
+finished first (the MqttWire part of step 4, then its preview package), and steps 3, the
+GrainWire part of 4, and 5 follow. The steps keep their content, except that MqttWire's server
+exists by the time of step 3, so step 3 may also rebuild `ScriptedGateway` on it (5.7) instead
+of the two choices its row gives. The [roadmap](../roadmap.md) holds the order and the numbers
+the steps now carry. Each step ends with every test green in the repository it touches.
 
 | Step | Where | What |
 |---|---|---|
@@ -401,6 +406,8 @@ The last commit that still uses MQTTnet gets a git tag when the owner makes it.
 - Unity and .NET Standard 2.1 wait for Unity 7.
 - After step 0 (2026-11-20): the target for a joined connection in GrainWire is **floor + 3 KB**,
   in states 2 and 3 alike, not the floor + 2 KB that was proposed (section 6).
+- After step 2 (2026-11-21): MqttWire is finished, up to its preview package, before GrainWire
+  moves to it (section 7).
 
 Put to the owner as assumptions and not objected to: the wire stays standard MQTT 5; the
 TypeScript client stays on MQTT.js; MQTTnet stays in the tests and the benchmark.

@@ -1062,16 +1062,17 @@ worth looking at (GrainWire's step 0 measures that first; see the companion desi
 
 ## 7. Order of work
 
-MqttWire and GrainWire's move to it are built together, a part at a time, because GrainWire's
-tests are the most demanding user MqttWire has. The companion design gives the full sequence;
-MqttWire's own steps are:
+MqttWire and GrainWire's move to it were first planned to be built together, a part at a time,
+because GrainWire's tests are the most demanding user MqttWire has. **On 2026-11-21, after step
+2, the owner changed that: MqttWire's four steps below are all done first, and GrainWire moves
+to it afterwards.** The [roadmap](../roadmap.md) holds the full order; MqttWire's own steps
+are:
 
 1. **The repository and the codec**, with the codec's tests. Before the QoS exchanges are
    written, the builder reads chapter 4 of the MQTT 5 standard (sections 4.3, 4.4, 4.6, 4.9),
    which the fact checks behind this design could not reach.
 2. **The client**, with its tests and interop with MQTTnet's broker. The reconnecting client
-   comes after it in the same step; GrainWire's move to the client (the companion's step 3)
-   does not wait for it.
+   comes after it in the same step.
 3. **The server**, with its tests, both interops, the benchmark and the sample.
 4. **A preview package.**
 
