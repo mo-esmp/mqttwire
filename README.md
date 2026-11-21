@@ -66,7 +66,7 @@ The client works in Blazor WebAssembly. There the browser supports only part of
 ## Building a local package
 
 ```
-dotnet pack src/MqttWire -c Release -o artifacts/packages -p:Version=0.1.0-dev.1
+dotnet pack src/MqttWire -c Release -o artifacts/packages -p:Version=0.1.0-dev.2
 ```
 
 Use a new `-dev.N` version for each pack, so that a consumer never restores a stale copy from the

@@ -53,7 +53,7 @@ two repositories are built together, a part at a time.
 |---|---|---|
 | 0 | GrainWire | Measure what an idle connection costs today and what the floor is; report to the owner. **Done** on 2026-11-20: the floor is 35% of today, and the owner set the GrainWire target to floor + 3 KB ([the report](https://github.com/mo-esmp/grainwire/blob/main/docs/step-0-idle-memory.md)). |
 | 1 | MqttWire | The repository, the codec and its tests. Planned in [docs/plans/2026-11-20-step-1-codec-plan.md](plans/2026-11-20-step-1-codec-plan.md), tracked in #1. **Done**: merged in #2. |
-| 2 | MqttWire | The client and the reconnecting client. Planned in [docs/plans/2026-11-20-step-2-client-plan.md](plans/2026-11-20-step-2-client-plan.md), tracked in #3; the local package `0.1.0-dev.1` is the hand-over to step 3. |
+| 2 | MqttWire | The client and the reconnecting client. Planned in [docs/plans/2026-11-20-step-2-client-plan.md](plans/2026-11-20-step-2-client-plan.md), tracked in #3; the local package `0.1.0-dev.2` is the hand-over to step 3. |
 | 3 | GrainWire | `GrainWire.Client` moves to MqttWire's client. |
 | 4 | MqttWire, then GrainWire | MqttWire's server, sample and benchmark; then the gateway becomes its host. |
 | 5 | GrainWire | Measure again and write up. |
