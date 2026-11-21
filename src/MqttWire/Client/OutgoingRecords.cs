@@ -43,6 +43,11 @@ internal sealed class OutgoingRecords(int publishLimit)
     public int PublishesInFlight { get; private set; }
 
     /// <summary>
+    /// Gets the number of records in use: the packet identifiers taken by requests not yet acknowledged.
+    /// </summary>
+    public int Count => _records.Count;
+
+    /// <summary>
     /// Gets the phase start of the oldest record, or <see langword="null"/> when there is none.
     /// </summary>
     public long? OldestPhaseStartedAt

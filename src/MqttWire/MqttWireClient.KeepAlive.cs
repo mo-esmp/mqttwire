@@ -1,0 +1,146 @@
+using MqttWire.Codec;
+
+namespace MqttWire;
+
+/// <content>
+/// Keep-alive: one timer per connection that ticks every half interval, sends PINGREQ when nothing was sent, and
+/// ends the connection when a PINGREQ or a request goes unanswered for too long (6.9, decision 8).
+/// </content>
+public sealed partial class MqttWireClient
+{
+    /// <summary>
+    /// Runs one keep-alive tick. The state is always the client that created the timer.
+    /// </summary>
+    private static readonly TimerCallback s_keepAliveTick = static state => ((MqttWireClient)state!).OnKeepAliveTick();
+
+    /// <summary>
+    /// The keep-alive timer, from the accepting CONNACK until the connection is finished; <see langword="null"/>
+    /// before, after, and when the server turned keep-alive off. Under <see cref="_gate"/>.
+    /// </summary>
+    private ITimer? _keepAliveTimer;
+
+    /// <summary>
+    /// The keep-alive interval in force: the CONNACK's Server Keep Alive, or the client's own. Set before the timer
+    /// is created and never changed, so a tick reads it without the lock.
+    /// </summary>
+    private TimeSpan _keepAliveInterval;
+
+    /// <summary>
+    /// The <see cref="TimeProvider.GetTimestamp"/> of the oldest PINGREQ not yet answered, or 0 when none waits.
+    /// Set by a tick before its PINGREQ is sent; cleared by any PINGRESP.
+    /// </summary>
+    private long _pingRequestTimestamp;
+
+    /// <summary>
+    /// Reads the keep-alive interval of the connection from an accepting CONNACK: its Server Keep Alive when it has
+    /// one (MQTT 5, 3.2.2.3.14), else the client's own.
+    /// </summary>
+    /// <param name="properties">
+    /// The CONNACK's validated properties.
+    /// </param>
+    /// <returns>
+    /// The interval; <see cref="TimeSpan.Zero"/> when the server sent a Server Keep Alive of 0, which turns
+    /// keep-alive off (MQTT 5, 3.1.2.10).
+    /// </returns>
+    private TimeSpan ReadKeepAliveInterval(in PropertyBlock properties)
+        => properties.TryGetInteger(PropertyId.ServerKeepAlive, out uint seconds) ? TimeSpan.FromSeconds(seconds) : KeepAlive;
+
+    /// <summary>
+    /// Creates the keep-alive timer, ticking every half interval. Called once, by the read loop under
+    /// <see cref="_gate"/>, as the connection becomes connected.
+    /// </summary>
+    /// <param name="interval">
+    /// The keep-alive interval; <see cref="TimeSpan.Zero"/> creates no timer.
+    /// </param>
+    private void StartKeepAliveLocked(TimeSpan interval)
+    {
+        if (interval == TimeSpan.Zero)
+        {
+            return;
+        }
+
+        _keepAliveInterval = interval;
+        TimeSpan period = interval / 2;
+        _keepAliveTimer = _time.CreateTimer(s_keepAliveTick, this, period, period);
+    }
+
+    /// <summary>
+    /// Takes the keep-alive timer, so that it is disposed once, by the caller. Call under <see cref="_gate"/>.
+    /// </summary>
+    /// <returns>
+    /// The timer, or <see langword="null"/> when there is none or it was already taken.
+    /// </returns>
+    private ITimer? TakeKeepAliveTimerLocked()
+    {
+        ITimer? timer = _keepAliveTimer;
+        _keepAliveTimer = null;
+        return timer;
+    }
+
+    /// <summary>
+    /// Notes a PINGRESP: the PINGREQ waiting, if any, is answered. Called by the read loop.
+    /// </summary>
+    private void OnPingResponse()
+    {
+        long now = _time.GetTimestamp();
+        Volatile.Write(ref _lastPingResponseTimestamp, now);
+        Volatile.Write(ref _pingRequestTimestamp, 0);
+    }
+
+    /// <summary>
+    /// One keep-alive tick. Ends the connection, aborting the link without a DISCONNECT (decision 9), with
+    /// <see cref="MqttClientCloseReason.KeepAliveTimedOut"/> when a PINGREQ has waited a full interval, or with
+    /// <see cref="MqttClientCloseReason.AcknowledgementTimedOut"/> when the oldest request has waited twice the
+    /// interval for its next acknowledgement; otherwise sends PINGREQ when nothing was sent for half the interval.
+    /// Does nothing unless connected, so a tick that comes after the end, as a timer's late callback may, changes
+    /// nothing.
+    /// </summary>
+    /// <remarks>
+    /// Runs on the timer's thread: it never blocks and holds the lock only to read the records. The PINGREQ goes
+    /// through the send lock in turn with every other packet, in a buffer rented from the pool; in steady state the
+    /// tick allocates nothing.
+    /// </remarks>
+    private void OnKeepAliveTick()
+    {
+        long? oldestRecord;
+        lock (_gate)
+        {
+            if (_phase != Phase.Connected)
+            {
+                return;
+            }
+
+            oldestRecord = _records?.OldestPhaseStartedAt;
+        }
+
+        long now = _time.GetTimestamp();
+        TimeSpan interval = _keepAliveInterval;
+        long pingRequest = Volatile.Read(ref _pingRequestTimestamp);
+        if (pingRequest != 0 && _time.GetElapsedTime(pingRequest, now) >= interval)
+        {
+            TryBeginEnd(new MqttClientCloseInfo(MqttClientCloseReason.KeepAliveTimedOut, MqttReasonCode.Success, null, null), EndMode.Abort);
+            return;
+        }
+
+        if (oldestRecord is long oldest && _time.GetElapsedTime(oldest, now) >= interval * 2)
+        {
+            TryBeginEnd(new MqttClientCloseInfo(MqttClientCloseReason.AcknowledgementTimedOut, MqttReasonCode.Success, null, null), EndMode.Abort);
+            return;
+        }
+
+        if (_time.GetElapsedTime(LastSendTimestamp, now) < interval / 2)
+        {
+            return;
+        }
+
+        // Noted before the send, so a PINGRESP that comes at once finds it; an earlier PINGREQ still unanswered
+        // keeps its own time, from which its deadline counts.
+        Interlocked.CompareExchange(ref _pingRequestTimestamp, now, 0);
+        ReadOnlySpan<byte> pingReq = PingCodec.PingReq;
+        byte[] packet = _pool.Rent(pingReq.Length);
+        pingReq.CopyTo(packet);
+
+        // Not awaited: the send lock writes it in turn and returns the buffer. A failed write ends the connection.
+        _ = SendAsync(packet, pingReq.Length, isDisconnect: false);
+    }
+}

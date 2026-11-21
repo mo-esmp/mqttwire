@@ -501,7 +501,8 @@ public sealed class PublishTests
 
     /// <summary>
     /// Proves publishes still waiting for their acknowledgement complete with
-    /// <see cref="MqttRequestStatus.ConnectionLost"/> when the connection ends, and every buffer comes back.
+    /// <see cref="MqttRequestStatus.ConnectionLost"/> when the connection ends, also one already released with
+    /// PUBREL, and every buffer comes back.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -516,6 +517,10 @@ public sealed class PublishTests
         ValueTask<MqttRequestResult> qos2 = harness.Client.PublishAsync("a/b", s_hi, MqttQoS.ExactlyOnce);
         ValueTask<MqttRequestResult> qos2AfterPubRec = harness.Client.PublishAsync("a/b", s_hi, MqttQoS.ExactlyOnce);
         harness.Link.Deliver(Hex.Parse("50 02 00 03"));
+        harness.NextPacket();
+        harness.NextPacket();
+        harness.NextPacket();
+        byte[] pubRel = harness.NextPacket();
 
         // Act
         harness.Link.EndFromPeer();
@@ -524,6 +529,7 @@ public sealed class PublishTests
         MqttRequestResult qos2AfterPubRecResult = await qos2AfterPubRec;
 
         // Assert
+        pubRel.ShouldBe(Hex.Parse("62 02 00 03"));
         qos1Result.Status.ShouldBe(MqttRequestStatus.ConnectionLost);
         qos2Result.Status.ShouldBe(MqttRequestStatus.ConnectionLost);
         qos2AfterPubRecResult.Status.ShouldBe(MqttRequestStatus.ConnectionLost);

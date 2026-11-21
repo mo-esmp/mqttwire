@@ -29,12 +29,21 @@ internal sealed class ClientHarness
     /// <param name="closed">
     /// The list the client's <c>OnClosed</c> adds to.
     /// </param>
-    private ClientHarness(MemoryLinkConnector connector, FakeTimeProvider time, MqttWireClient client, List<MqttClientCloseInfo> closed)
+    /// <param name="timers">
+    /// The clock the client is given: the fake clock, keeping every timer the client creates.
+    /// </param>
+    private ClientHarness(
+        MemoryLinkConnector connector,
+        FakeTimeProvider time,
+        MqttWireClient client,
+        List<MqttClientCloseInfo> closed,
+        CountingTimeProvider timers)
     {
         Connector = connector;
         Time = time;
         Client = client;
         Closed = closed;
+        Timers = timers;
     }
 
     /// <summary>
@@ -56,6 +65,11 @@ internal sealed class ClientHarness
     /// Gets the fake clock the client uses; nothing happens in real time.
     /// </summary>
     public FakeTimeProvider Time { get; }
+
+    /// <summary>
+    /// Gets the clock the client is given, over <see cref="Time"/>, which keeps every timer the client creates.
+    /// </summary>
+    public CountingTimeProvider Timers { get; }
 
     /// <summary>
     /// Gets the client.
@@ -107,6 +121,7 @@ internal sealed class ClientHarness
         List<MqttClientCloseInfo> closed = [];
         MemoryLinkConnector connector = new();
         FakeTimeProvider time = new();
+        CountingTimeProvider timers = new(time);
         MqttWireClient client = new(
             options,
             onMessage,
@@ -116,9 +131,9 @@ internal sealed class ClientHarness
                 onClosed?.Invoke(info);
             },
             connector,
-            time,
+            timers,
             pool ?? ArrayPool<byte>.Shared);
-        return new ClientHarness(connector, time, client, closed);
+        return new ClientHarness(connector, time, client, closed, timers);
     }
 
     /// <summary>

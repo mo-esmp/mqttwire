@@ -64,6 +64,21 @@ internal static class ClientPackets
     public static readonly byte[] PingResp = Hex.Parse("D0 00");
 
     /// <summary>
+    /// PINGREQ, which the client sends to keep the connection alive.
+    /// </summary>
+    public static readonly byte[] PingReq = Hex.Parse("C0 00");
+
+    /// <summary>
+    /// CONNACK with success and Server Keep Alive 5 seconds.
+    /// </summary>
+    public static readonly byte[] ConnAckServerKeepAlive5 = Hex.Parse("20 06 00 00 03 13 00 05");
+
+    /// <summary>
+    /// CONNACK with success and Server Keep Alive 0, which turns keep-alive off.
+    /// </summary>
+    public static readonly byte[] ConnAckServerKeepAlive0 = Hex.Parse("20 06 00 00 03 13 00 00");
+
+    /// <summary>
     /// CONNACK with success and Receive Maximum 2.
     /// </summary>
     public static readonly byte[] ConnAckReceiveMaximum2 = Hex.Parse("20 06 00 00 03 21 00 02");

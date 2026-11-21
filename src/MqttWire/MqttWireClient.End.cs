@@ -160,9 +160,9 @@ public sealed partial class MqttWireClient
     }
 
     /// <summary>
-    /// Finishes the connection once the read loop has stopped: stops the close deadline, completes what is in
-    /// flight, returns the read buffer, releases the link, and then reports the end once: to <c>OnClosed</c> for a
-    /// connection that connected, to the connect otherwise.
+    /// Finishes the connection once the read loop has stopped: stops the close deadline and the keep-alive timer,
+    /// completes what is in flight, returns the read buffer, releases the link, and then reports the end once: to
+    /// <c>OnClosed</c> for a connection that connected, to the connect otherwise.
     /// </summary>
     /// <param name="link">
     /// The link, which has ended.
@@ -170,17 +170,21 @@ public sealed partial class MqttWireClient
     private void FinishConnection(IMqttLink link)
     {
         ITimer? closeTimer;
+        ITimer? keepAliveTimer;
         bool wasConnected;
         MqttClientCloseInfo info;
         lock (_gate)
         {
             closeTimer = _closeTimer;
             _closeTimer = null;
+            keepAliveTimer = TakeKeepAliveTimerLocked();
             wasConnected = _wasConnected;
             info = _closeInfo;
         }
 
+        // A tick already running sees the connection is no longer connected and does nothing.
         closeTimer?.Dispose();
+        keepAliveTimer?.Dispose();
         CompleteInFlightRequests();
         _receive.Clear();
 

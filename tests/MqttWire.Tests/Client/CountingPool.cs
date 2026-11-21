@@ -15,6 +15,11 @@ internal sealed class CountingPool : ArrayPool<byte>
     private int _largestRent;
 
     /// <summary>
+    /// Completes when no buffer is out, or <see langword="null"/> when no one waits; under <see cref="_gate"/>.
+    /// </summary>
+    private TaskCompletionSource? _noneOutstanding;
+
+    /// <summary>
     /// Gets the number of buffers rented and not yet returned.
     /// </summary>
     public int Outstanding
@@ -71,6 +76,27 @@ internal sealed class CountingPool : ArrayPool<byte>
     }
 
     /// <summary>
+    /// Waits until every rented buffer is back, for buffers that writes running on the thread pool return after
+    /// the test has moved on. Waits for no time of its own: it completes on the return that empties the pool.
+    /// </summary>
+    /// <returns>
+    /// A task that completes, never inline, once no buffer is out; at once when none is out now.
+    /// </returns>
+    public Task WhenNoneOutstandingAsync()
+    {
+        lock (_gate)
+        {
+            if (_rented.Count == 0)
+            {
+                return Task.CompletedTask;
+            }
+
+            _noneOutstanding ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            return _noneOutstanding.Task;
+        }
+    }
+
+    /// <summary>
     /// Rents a buffer from the shared pool and records it.
     /// </summary>
     /// <param name="minimumLength">
@@ -110,6 +136,12 @@ internal sealed class CountingPool : ArrayPool<byte>
             if (!_rented.Remove(array))
             {
                 throw new InvalidOperationException("The buffer was not rented from this pool, or was returned twice.");
+            }
+
+            if (_rented.Count == 0 && _noneOutstanding is not null)
+            {
+                _noneOutstanding.TrySetResult();
+                _noneOutstanding = null;
             }
         }
 

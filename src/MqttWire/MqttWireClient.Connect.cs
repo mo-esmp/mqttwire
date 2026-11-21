@@ -266,8 +266,8 @@ public sealed partial class MqttWireClient
             return EndStep.DisconnectAndClose;
         }
 
-        // Task 8 reads Server Keep Alive here.
         OutgoingRecords records = ReadServerLimits(connAck.Properties, out MqttQoS maximumQoS, out uint maximumPacketSize);
+        TimeSpan keepAlive = ReadKeepAliveInterval(connAck.Properties);
         MqttConnectAck ack = new(null, MqttReasonCode.Success, ReadReasonString(connAck.Properties), ReadUserProperties(connAck.Properties), null);
         lock (_gate)
         {
@@ -281,6 +281,9 @@ public sealed partial class MqttWireClient
             _serverMaximumQoS = maximumQoS;
             _serverMaximumPacketSize = maximumPacketSize;
             _phase = Phase.Connected;
+
+            // Created by the read loop, before it can finish the connection, which disposes it.
+            StartKeepAliveLocked(keepAlive);
         }
 
         // Set before the read loop started, and the read loop is the caller.

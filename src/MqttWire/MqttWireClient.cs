@@ -19,6 +19,11 @@ namespace MqttWire;
 /// <para>
 /// A close waits for the server to end the link, at most two seconds; then the link is aborted.
 /// </para>
+/// <para>
+/// One keep-alive timer, from the accepting CONNACK until the connection is finished, ticks every half interval:
+/// it sends PINGREQ when nothing was sent, and aborts the link when a PINGREQ waits a full interval or a request
+/// waits twice the interval for its acknowledgement.
+/// </para>
 /// </remarks>
 public sealed partial class MqttWireClient : IAsyncDisposable
 {
@@ -333,6 +338,21 @@ public sealed partial class MqttWireClient : IAsyncDisposable
     /// Gets the <see cref="TimeProvider.GetTimestamp"/> of the last PINGRESP received, or 0 before the first.
     /// </summary>
     internal long LastPingResponseTimestamp => Volatile.Read(ref _lastPingResponseTimestamp);
+
+    /// <summary>
+    /// Gets the number of requests sent and not yet acknowledged, each holding a packet identifier: 0 before the
+    /// accepting CONNACK and once the end of the connection has completed them.
+    /// </summary>
+    internal int RequestsInFlight
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _records?.Count ?? 0;
+            }
+        }
+    }
 
     /// <summary>
     /// Opens the link, sends CONNECT and waits for the server's CONNACK, at most ten seconds in all.

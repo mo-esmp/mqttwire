@@ -78,8 +78,16 @@ public sealed partial class MqttWireClient
         }
         catch (Exception ex)
         {
-            // Only a bug in the client gets here. Release the link and fail whoever waits, rather than hang them.
+            // Only a bug in the client gets here. Release the link and the keep-alive timer, and fail whoever
+            // waits, rather than hang them.
             link.Abort();
+            ITimer? keepAliveTimer;
+            lock (_gate)
+            {
+                keepAliveTimer = TakeKeepAliveTimerLocked();
+            }
+
+            keepAliveTimer?.Dispose();
             SetClosed();
 
             // Both are set with the link, before the read loop started.
@@ -231,8 +239,7 @@ public sealed partial class MqttWireClient
                     return EndStep.DisconnectAndClose;
                 }
 
-                // Keep-alive (Task 8) reads when the last answer came.
-                Volatile.Write(ref _lastPingResponseTimestamp, _time.GetTimestamp());
+                OnPingResponse();
                 return EndStep.None;
 
             case PacketType.PubAck or PacketType.PubRec or PacketType.PubComp:

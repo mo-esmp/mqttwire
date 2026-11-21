@@ -10,6 +10,11 @@ namespace MqttWire.Tests.Client;
 public sealed class CloseTests
 {
     /// <summary>
+    /// The payload of the publishes these tests send, "hi".
+    /// </summary>
+    private static readonly byte[] s_hi = "hi"u8.ToArray();
+
+    /// <summary>
     /// Packets a server never sends a client, as hex: CONNECT, SUBSCRIBE, UNSUBSCRIBE, PINGREQ, AUTH and a second
     /// CONNACK.
     /// </summary>
@@ -383,5 +388,265 @@ public sealed class CloseTests
         exception.ShouldBeNull();
         harness.Closed.Count.ShouldBe(1);
         pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves an <c>OnClosed</c> that starts <see cref="MqttWireClient.DisposeAsync"/> without waiting for it does
+    /// not deadlock: the dispose completes once the connection is finished, and <c>OnClosed</c> is called once.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task DisposeAsync_FromOnClosed_DoesNotDeadlock()
+    {
+        // Arrange
+        MqttWireClient? client = null;
+        Task? dispose = null;
+        ClientHarness harness = ClientHarness.Create(onClosed: _ =>
+        {
+            if (client is not null)
+            {
+                dispose = client.DisposeAsync().AsTask();
+            }
+        });
+        client = harness.Client;
+        await harness.ConnectAsync(ClientPackets.ConnAckAccepted);
+        harness.NextPacket();
+
+        // Act
+        harness.Link.EndFromPeer();
+        Task started = dispose.ShouldNotBeNull();
+        await started;
+
+        // Assert
+        started.IsCompletedSuccessfully.ShouldBeTrue();
+        harness.Link.TakeWritten().ShouldBeEmpty();
+        harness.Closed.ShouldBe([new MqttClientCloseInfo(MqttClientCloseReason.ConnectionLost, MqttReasonCode.Success, null, null)]);
+    }
+
+    /// <summary>
+    /// Proves an <c>OnMessage</c> that starts <see cref="MqttWireClient.DisposeAsync"/> without waiting for it ends
+    /// the connection once, without deadlock: the second PUBLISH of the same read is not handed on, and
+    /// <c>OnClosed</c> reports <see cref="MqttClientCloseReason.Disposed"/> once, after the last <c>OnMessage</c>.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task OnMessage_CallsDisposeAsync_EndsOnceWithoutDeadlock()
+    {
+        // Arrange
+        MqttWireClient? client = null;
+        Task? dispose = null;
+        List<string> events = [];
+        ClientHarness harness = ClientHarness.Create(
+            onMessage: (in _) =>
+            {
+                events.Add("message");
+                if (client is not null && dispose is null)
+                {
+                    dispose = client.DisposeAsync().AsTask();
+                }
+            },
+            onClosed: _ => events.Add("closed"));
+        client = harness.Client;
+        await harness.ConnectAsync(ClientPackets.ConnAckAccepted);
+        harness.NextPacket();
+
+        // Act
+        harness.Link.Deliver([.. ClientPackets.PublishQoS0, .. ClientPackets.PublishQoS0]);
+        byte[] disconnect = harness.NextPacket();
+        harness.Link.EndFromPeer();
+        Task started = dispose.ShouldNotBeNull();
+        await started;
+
+        // Assert
+        disconnect.ShouldBe(ClientPackets.Disconnect);
+        harness.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
+        events.ShouldBe(["message", "closed"]);
+        harness.Closed.ShouldBe([new MqttClientCloseInfo(MqttClientCloseReason.Disposed, MqttReasonCode.Success, null, null)]);
+    }
+
+    /// <summary>
+    /// Proves a publish still queued behind a held write when the connection ends is never written and completes
+    /// with <see cref="MqttRequestStatus.ConnectionLost"/>, and every buffer comes back once the held write ends.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task PublishAsync_QueuedWhenTheConnectionEnds_IsNotWrittenAndCompletesWithConnectionLost()
+    {
+        // Arrange
+        CountingPool pool = new();
+        ClientHarness harness = ClientHarness.Create(pool: pool);
+        await harness.ConnectAsync(ClientPackets.ConnAckAccepted);
+        harness.NextPacket();
+        harness.Link.HoldWrites();
+        _ = harness.Client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce);
+        ValueTask<MqttRequestResult> queued = harness.Client.PublishAsync("a/b", s_hi, MqttQoS.AtLeastOnce);
+
+        // Act
+        harness.Link.EndFromPeer();
+        MqttRequestResult result = await queued;
+        harness.Link.CompleteHeldWrites();
+        await pool.WhenNoneOutstandingAsync();
+
+        // Assert
+        result.Status.ShouldBe(MqttRequestStatus.ConnectionLost);
+        harness.Link.TakeWritten().ShouldBe(ClientPackets.PublishQoS0);
+        harness.Closed.ShouldBe([new MqttClientCloseInfo(MqttClientCloseReason.ConnectionLost, MqttReasonCode.Success, null, null)]);
+        pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that when the connection ends with 1,600 QoS 1 publishes made from eight threads, while the server
+    /// acknowledges some and sends messages, every request completes exactly once: the 800 acknowledged with
+    /// <see cref="MqttRequestStatus.Completed"/>, the rest with <see cref="MqttRequestStatus.ConnectionLost"/>; no
+    /// identifier stays in use; <c>OnClosed</c> comes once, after the last <c>OnMessage</c>; and the pool
+    /// balances.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task End_ManyThreadsPublishing_EveryRequestCompletesExactlyOnce()
+    {
+        // Arrange
+        const int Threads = 8;
+        const int PerThreadPerRound = 100;
+        CountingPool pool = new();
+        Lock gate = new();
+        int messages = 0;
+        int closedCount = 0;
+        bool messageAfterClosed = false;
+        ClientHarness harness = ClientHarness.Create(
+            pool: pool,
+            onMessage: (in _) =>
+            {
+                lock (gate)
+                {
+                    messageAfterClosed |= closedCount > 0;
+                    messages++;
+                }
+            },
+            onClosed: _ =>
+            {
+                lock (gate)
+                {
+                    closedCount++;
+                }
+            });
+        await harness.ConnectAsync(ClientPackets.ConnAckAccepted);
+        harness.NextPacket();
+
+        // Identifiers 1 to 800, of which the server acknowledges 1 to 600 at once. With at most 1,000 in flight,
+        // no publish meets the limit of 1,024.
+        Task<MqttRequestResult>[][] first = await PublishFromThreadsAsync(harness.Client, Threads, PerThreadPerRound);
+        harness.Link.Deliver([.. PubAcks(1, 600), .. ClientPackets.PublishQoS0]);
+
+        // Act
+        // Identifiers 801 to 1,600 from eight threads, while the server acknowledges 601 to 800 and sends messages.
+        Task server = Task.Factory.StartNew(
+            () =>
+            {
+                for (int id = 601; id <= 800; id += 10)
+                {
+                    harness.Link.Deliver([.. PubAcks(id, 10), .. ClientPackets.PublishQoS0]);
+                }
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        Task<MqttRequestResult>[][] second = await PublishFromThreadsAsync(harness.Client, Threads, PerThreadPerRound);
+        await server;
+        harness.Link.EndFromPeer();
+        MqttRequestResult[] results = await Task.WhenAll(first.Concat(second).SelectMany(static tasks => tasks));
+        await harness.Client.DisposeAsync();
+        await pool.WhenNoneOutstandingAsync();
+
+        // Assert
+        results.Length.ShouldBe(2 * Threads * PerThreadPerRound);
+        results.Count(static result => result.Status == MqttRequestStatus.Completed).ShouldBe(800);
+        results.Count(static result => result.Status == MqttRequestStatus.ConnectionLost).ShouldBe(800);
+        harness.Client.RequestsInFlight.ShouldBe(0);
+        harness.Closed.ShouldBe([new MqttClientCloseInfo(MqttClientCloseReason.ConnectionLost, MqttReasonCode.Success, null, null)]);
+        lock (gate)
+        {
+            closedCount.ShouldBe(1);
+            messages.ShouldBe(21);
+            messageAfterClosed.ShouldBeFalse();
+        }
+
+        pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Publishes at QoS 1 from several threads at once, each starting when all are ready.
+    /// </summary>
+    /// <param name="client">
+    /// The connected client.
+    /// </param>
+    /// <param name="threads">
+    /// How many threads publish.
+    /// </param>
+    /// <param name="perThread">
+    /// How many publishes each thread makes.
+    /// </param>
+    /// <returns>
+    /// Each thread's publishes, in its call order, once every call has returned.
+    /// </returns>
+    private static async Task<Task<MqttRequestResult>[][]> PublishFromThreadsAsync(MqttWireClient client, int threads, int perThread)
+    {
+        using Barrier start = new(threads);
+        Task<Task<MqttRequestResult>[]>[] publishers = new Task<Task<MqttRequestResult>[]>[threads];
+        for (int thread = 0; thread < threads; thread++)
+        {
+            publishers[thread] = Task.Factory.StartNew(
+                () =>
+                {
+                    start.SignalAndWait();
+                    Task<MqttRequestResult>[] publishes = new Task<MqttRequestResult>[perThread];
+                    for (int i = 0; i < perThread; i++)
+                    {
+                        publishes[i] = client.PublishAsync("a/b", s_hi, MqttQoS.AtLeastOnce).AsTask();
+                    }
+
+                    return publishes;
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+        }
+
+        return await Task.WhenAll(publishers);
+    }
+
+    /// <summary>
+    /// Encodes successful PUBACKs for consecutive packet identifiers, one after another.
+    /// </summary>
+    /// <param name="first">
+    /// The first packet identifier.
+    /// </param>
+    /// <param name="count">
+    /// How many PUBACKs.
+    /// </param>
+    /// <returns>
+    /// The PUBACKs, four bytes each.
+    /// </returns>
+    private static byte[] PubAcks(int first, int count)
+    {
+        byte[] bytes = new byte[count * 4];
+        for (int i = 0; i < count; i++)
+        {
+            int id = first + i;
+            bytes[i * 4] = 0x40;
+            bytes[(i * 4) + 1] = 0x02;
+            bytes[(i * 4) + 2] = (byte)(id >> 8);
+            bytes[(i * 4) + 3] = (byte)id;
+        }
+
+        return bytes;
     }
 }
