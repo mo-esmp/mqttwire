@@ -45,10 +45,21 @@ public sealed class MqttWireClientOptions
     /// <summary>
     /// Gets the handler for received messages, or <see langword="null"/> to ignore them.
     /// </summary>
+    /// <remarks>
+    /// It runs on the read loop, so it must not wait synchronously for a request to this client, such as
+    /// <c>PublishAsync(…).GetAwaiter().GetResult()</c> at QoS 1 or 2: no acknowledgement is read while it runs, so
+    /// the wait stalls until the acknowledgement deadline ends the connection. Starting a request without waiting
+    /// for it is fine.
+    /// </remarks>
     public MqttMessageHandler? OnMessage { get; init; }
 
     /// <summary>
     /// Gets the callback for the end of a connection that was reported as connected, or <see langword="null"/>.
     /// </summary>
+    /// <remarks>
+    /// It must not wait synchronously for <see cref="MqttWireClient.DisposeAsync"/>, such as
+    /// <c>DisposeAsync().AsTask().Wait()</c>: the dispose completes only after <c>OnClosed</c> has returned, so the
+    /// wait deadlocks. Starting the dispose without waiting for it is fine.
+    /// </remarks>
     public Action<MqttClientCloseInfo>? OnClosed { get; init; }
 }

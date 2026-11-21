@@ -15,8 +15,19 @@ namespace MqttWire.Client;
 /// </param>
 internal sealed class ReceiveBuffer(ArrayPool<byte> pool, int maxPacketBytes)
 {
+    /// <summary>
+    /// The rented array, or <see langword="null"/> when none is held; it is returned whenever no bytes are buffered.
+    /// </summary>
     private byte[]? _array;
+
+    /// <summary>
+    /// Where the buffered bytes not yet consumed start in <see cref="_array"/>.
+    /// </summary>
     private int _start;
+
+    /// <summary>
+    /// Where the buffered bytes end in <see cref="_array"/>; the free space starts here.
+    /// </summary>
     private int _end;
 
     /// <summary>

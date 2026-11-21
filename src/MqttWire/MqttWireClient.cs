@@ -244,15 +244,15 @@ public sealed partial class MqttWireClient : IAsyncDisposable
             throw new ArgumentException("The client identifier must not be empty.", nameof(options));
         }
 
-        CheckText(options.ClientId, "client identifier");
+        CheckText(options.ClientId, "client identifier", nameof(options));
         if (options.UserName is not null)
         {
-            CheckText(options.UserName, "user name");
+            CheckText(options.UserName, "user name", nameof(options));
         }
 
         if (options.Password is not null)
         {
-            CheckText(options.Password, "password");
+            CheckText(options.Password, "password", nameof(options));
         }
 
         if (options.KeepAlive < TimeSpan.FromSeconds(1) || options.KeepAlive > TimeSpan.FromSeconds(ushort.MaxValue))
@@ -418,9 +418,11 @@ public sealed partial class MqttWireClient : IAsyncDisposable
     /// <returns>
     /// A task that completes when <see cref="ConnectAsync"/> has returned, the read loop has finished,
     /// <c>OnClosed</c>, if due, has returned, and every write handed to the send path before then has ended, so
-    /// every buffer the client held is back in the pool. A write still in flight when the link was aborted is
-    /// waited for; the abort makes it end. It does not throw, unless finishing the connection failed through a bug
-    /// in the client.
+    /// every buffer those writes held is back in the pool. A write still in flight when the link was aborted is
+    /// waited for; the abort makes it end. A <see cref="PublishAsync"/> or keep-alive tick racing the dispose can
+    /// rent a buffer after the dispose's turn on the send lock; that buffer comes back at once, because its send
+    /// finds the connection ended. It does not throw, unless finishing the connection failed through a bug in the
+    /// client.
     /// </returns>
     public async ValueTask DisposeAsync()
     {
@@ -477,7 +479,8 @@ public sealed partial class MqttWireClient : IAsyncDisposable
 
     /// <summary>
     /// Waits until the connect has returned, the read loop has finished the connection, and every write handed to
-    /// the send path before then has ended and returned its buffer.
+    /// the send path before then has ended and returned its buffer. A write handed over after this wait's turn on
+    /// the send lock finds the connection ended and returns its buffer at once.
     /// </summary>
     /// <param name="connectReturned">
     /// Completes when <see cref="ConnectAsync"/> has returned, or <see langword="null"/> when it was never called.
@@ -520,10 +523,13 @@ public sealed partial class MqttWireClient : IAsyncDisposable
     /// <param name="what">
     /// What the text is, for the message.
     /// </param>
+    /// <param name="paramName">
+    /// The caller's parameter that holds the text, for <see cref="ArgumentException.ParamName"/>.
+    /// </param>
     /// <exception cref="ArgumentException">
     /// The text is over 65,535 UTF-8 bytes, contains U+0000 or has an unpaired surrogate.
     /// </exception>
-    private static void CheckText(string value, string what)
+    private static void CheckText(string value, string what, string paramName)
     {
         try
         {
@@ -531,7 +537,7 @@ public sealed partial class MqttWireClient : IAsyncDisposable
         }
         catch (ArgumentException ex)
         {
-            throw new ArgumentException($"The {what} cannot be sent: {ex.Message}", nameof(value), ex);
+            throw new ArgumentException($"The {what} cannot be sent: {ex.Message}", paramName, ex);
         }
     }
 

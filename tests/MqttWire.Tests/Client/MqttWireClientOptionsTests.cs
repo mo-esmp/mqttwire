@@ -115,6 +115,24 @@ public sealed class MqttWireClientOptionsTests
     }
 
     /// <summary>
+    /// Proves text that cannot be sent is refused naming the constructor's parameter, with a message that names
+    /// the property.
+    /// </summary>
+    [Fact]
+    public void Constructor_TextCannotBeSent_NamesTheOptionsParameter()
+    {
+        // Arrange
+        MqttWireClientOptions options = Options(userName: "a\0b");
+
+        // Act
+        ArgumentException exception = Should.Throw<ArgumentException>(() => new MqttWireClient(options));
+
+        // Assert
+        exception.ParamName.ShouldBe("options");
+        exception.Message.ShouldContain("user name");
+    }
+
+    /// <summary>
     /// Proves a client identifier with an unpaired surrogate is refused.
     /// </summary>
     [Fact]
