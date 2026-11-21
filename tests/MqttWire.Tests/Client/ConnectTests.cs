@@ -107,6 +107,55 @@ public sealed class ConnectTests
     }
 
     /// <summary>
+    /// Proves a refusing CONNACK with Session Present set, which MQTT forbids, is a protocol error answered with
+    /// DISCONNECT 0x82, not a refusal reported as <see cref="MqttClientCloseReason.ConnectRefused"/>.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task ConnectAsync_RefusalWithSessionPresent_ReturnsProtocolErrorAndSendsDisconnect82()
+    {
+        // Arrange
+        ClientHarness harness = ClientHarness.Create();
+
+        // Act
+        MqttConnectAck ack = await harness.ConnectAsync(ClientPackets.ConnAckRefusedWithSessionPresent);
+
+        // Assert
+        ack.Failure.ShouldBe(MqttClientCloseReason.ProtocolError);
+        harness.NextPacket().ShouldBe(ClientPackets.Connect);
+        harness.NextPacket().ShouldBe(ClientPackets.DisconnectProtocolError);
+        harness.Client.IsConnected.ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// Proves the buffer that carried the CONNECT, with its user name and password, is cleared before it goes back
+    /// to the pool, after the link has taken the packet.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task ConnectAsync_ConnectWritten_ClearsItsBufferBeforeReturningIt()
+    {
+        // Arrange
+        CountingPool pool = new();
+        byte[]? returnedConnect = null;
+        pool.Returning = array => returnedConnect ??= array.AsSpan(0, ClientPackets.Connect.Length).ToArray();
+        ClientHarness harness = ClientHarness.Create(pool: pool);
+
+        // Act
+        MqttConnectAck ack = await harness.ConnectAsync(ClientPackets.ConnAckAccepted);
+
+        // Assert
+        ack.IsConnected.ShouldBeTrue();
+        harness.NextPacket().ShouldBe(ClientPackets.Connect);
+        returnedConnect.ShouldNotBeNull();
+        returnedConnect.ShouldAllBe(value => value == 0);
+    }
+
+    /// <summary>
     /// Proves a connect with no CONNACK times out after ten seconds, not before, and aborts the link.
     /// </summary>
     /// <returns>

@@ -45,19 +45,18 @@ public sealed partial class MqttWireClient
             return EndStep.DisconnectAndClose;
         }
 
-        if (publish.QoS == MqttQoS.ExactlyOnce)
+        if (publish.QoS == MqttQoS.ExactlyOnce && _incomingQoS2.Contains(publish.PacketIdentifier))
         {
-            if (_incomingQoS2.Contains(publish.PacketIdentifier))
-            {
-                // A repeat before PUBREL, with DUP or without: answered, not handed on again.
-                return RecordReply(PacketType.PubRec, publish.PacketIdentifier, MqttReasonCode.Success);
-            }
+            // A repeat before PUBREL, with DUP or without: answered, not handed on again.
+            return RecordReply(PacketType.PubRec, publish.PacketIdentifier, MqttReasonCode.Success);
+        }
 
-            if (_incomingQoS2.IsFull)
-            {
-                disconnect = MqttReasonCode.ReceiveMaximumExceeded;
-                return EndStep.DisconnectAndClose;
-            }
+        // Every QoS 2 message waiting for its PUBREL holds a place in the Receive Maximum the client announced, and
+        // a new QoS 1 or 2 message needs one more (MQTT-3.3.4-9). The table is exactly that size.
+        if (publish.QoS != MqttQoS.AtMostOnce && _incomingQoS2.IsFull)
+        {
+            disconnect = MqttReasonCode.ReceiveMaximumExceeded;
+            return EndStep.DisconnectAndClose;
         }
 
         if (!TryHandOn(in publish, out MqttClientCloseInfo failure))

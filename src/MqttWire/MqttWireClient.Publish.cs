@@ -46,7 +46,8 @@ public sealed partial class MqttWireClient
     /// <see cref="MqttRequestStatus.NotConnected"/>, <see cref="MqttRequestStatus.QoSNotSupported"/> (above the
     /// server's Maximum QoS), <see cref="MqttRequestStatus.PacketTooLarge"/> (over the server's Maximum Packet
     /// Size), <see cref="MqttRequestStatus.ReceiveMaximumReached"/> (as many QoS 1 and 2 publishes in flight as the
-    /// server's Receive Maximum allows, and never more than 1,024) or
+    /// server's Receive Maximum allows, and never more than 1,024), <see cref="MqttRequestStatus.SendQueueFull"/>
+    /// (1 MiB of publishes already waiting to be written, while the link is slower than the caller) or
     /// <see cref="MqttRequestStatus.NoFreePacketIdentifier"/>. A QoS 1 or 2 publish still in flight when the
     /// connection ends completes with <see cref="MqttRequestStatus.ConnectionLost"/>: the server may or may not
     /// have it, and it is not sent again. The task must be awaited at most once; a caller that does not care about
@@ -156,6 +157,46 @@ public sealed partial class MqttWireClient
     };
 
     /// <summary>
+    /// Checks a publish against the connection and the server's limits. Called under <see cref="_gate"/>; it
+    /// changes nothing.
+    /// </summary>
+    /// <param name="size">
+    /// The encoded size of the PUBLISH.
+    /// </param>
+    /// <param name="qos">
+    /// The quality of service.
+    /// </param>
+    /// <returns>
+    /// <see cref="MqttRequestStatus.Completed"/> when the publish may go on; otherwise why it fails at once:
+    /// <see cref="MqttRequestStatus.NotConnected"/>, <see cref="MqttRequestStatus.QoSNotSupported"/>,
+    /// <see cref="MqttRequestStatus.PacketTooLarge"/> or <see cref="MqttRequestStatus.SendQueueFull"/>.
+    /// </returns>
+    private MqttRequestStatus CheckPublishLocked(long size, MqttQoS qos)
+    {
+        if (_phase != Phase.Connected || _records is null)
+        {
+            return MqttRequestStatus.NotConnected;
+        }
+
+        if (qos > _serverMaximumQoS)
+        {
+            return MqttRequestStatus.QoSNotSupported;
+        }
+
+        if (size > _serverMaximumPacketSize)
+        {
+            return MqttRequestStatus.PacketTooLarge;
+        }
+
+        // Bounds the copies a stalled link can collect. Only publishes add to it, under the lock, so a write that
+        // ends meanwhile only makes the check stricter than it need be.
+        long pending = Volatile.Read(ref _pendingPublishBytes);
+        return pending > 0 && pending + size > ClientLimits.MaxPendingPublishBytes
+            ? MqttRequestStatus.SendQueueFull
+            : MqttRequestStatus.Completed;
+    }
+
+    /// <summary>
     /// Checks a publish against the connection, puts its record in place, encodes it and hands it to the send
     /// lock, in one call so that its place in the send order is the order of the calls.
     /// </summary>
@@ -178,23 +219,17 @@ public sealed partial class MqttWireClient
         ushort packetIdentifier = 0;
         lock (_gate)
         {
-            if (_phase != Phase.Connected || _records is not { } records)
+            MqttRequestStatus refusal = CheckPublishLocked(size, qos);
+            if (refusal != MqttRequestStatus.Completed)
             {
-                return FailPublish(MqttRequestStatus.NotConnected);
-            }
-
-            if (qos > _serverMaximumQoS)
-            {
-                return FailPublish(MqttRequestStatus.QoSNotSupported);
-            }
-
-            if (size > _serverMaximumPacketSize)
-            {
-                return FailPublish(MqttRequestStatus.PacketTooLarge);
+                return FailPublish(refusal);
             }
 
             if (qos != MqttQoS.AtMostOnce)
             {
+                // Not null: CheckPublishLocked found the client connected, and the lock is still held.
+                OutgoingRecords records = _records!;
+
                 // The record is in place, under the lock and while connected, before the packet reaches the send
                 // lock (6.9): an acknowledgement finds it, and the end of the connection completes it.
                 completion = records.RentCompletion();
@@ -211,6 +246,9 @@ public sealed partial class MqttWireClient
 
                 packetIdentifier = record.PacketIdentifier;
             }
+
+            // Given back by the send path when the write ends, whatever the outcome.
+            Interlocked.Add(ref _pendingPublishBytes, size);
         }
 
         // Within the largest packet the server takes, which is never above the largest MQTT allows.
@@ -221,7 +259,7 @@ public sealed partial class MqttWireClient
 
         // Not awaited: the send lock queues the write now, in call order, and returns the buffer once the write
         // has ended. A failed write ends the connection, which completes the record with ConnectionLost.
-        _ = SendAsync(packet, length, isDisconnect: false);
+        _ = SendAsync(packet, length, SendKind.Publish);
         if (completion is null)
         {
             // QoS 0 ends when the message is handed over.

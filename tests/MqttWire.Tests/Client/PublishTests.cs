@@ -1,3 +1,4 @@
+using MqttWire.Client;
 using MqttWire.Tests.Codec;
 
 namespace MqttWire.Tests.Client;
@@ -727,6 +728,80 @@ public sealed class PublishTests
         disconnect.ShouldBe(ClientPackets.DisconnectProtocolError);
         result.Status.ShouldBe(MqttRequestStatus.ConnectionLost);
         harness.Closed.ShouldBe([new MqttClientCloseInfo(MqttClientCloseReason.ProtocolError, MqttReasonCode.ProtocolError, null, null)]);
+    }
+
+    /// <summary>
+    /// Proves publishes stop at the queued-byte limit while the link holds every write: QoS 0 publishes of 4 KiB,
+    /// 4,105 bytes each on the wire, are taken until the next would pass 1 MiB, which fails at once with
+    /// <see cref="MqttRequestStatus.SendQueueFull"/> and rents nothing; once the writes end every buffer is back and
+    /// publishing works again.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task PublishAsync_WritesHeld_StopsAtTheQueuedByteLimit()
+    {
+        // Arrange
+        CountingPool pool = new();
+        ClientHarness harness = await ConnectAsync(pool: pool);
+        harness.Link.HoldWrites();
+        byte[] payload = new byte[4096];
+        int taken = 0;
+        MqttRequestResult refused = default;
+
+        // Act
+        for (int i = 0; i < 1_000; i++)
+        {
+            MqttRequestResult result = await harness.Client.PublishAsync("a/b", payload, MqttQoS.AtMostOnce);
+            if (result.Status != MqttRequestStatus.Completed)
+            {
+                refused = result;
+                break;
+            }
+
+            taken++;
+        }
+
+        int outstandingWhenFull = pool.Outstanding;
+        harness.Link.CompleteHeldWrites();
+        await harness.Link.WhenWrittenAsync(1 + taken);
+        await pool.WhenNoneOutstandingAsync();
+        MqttRequestResult afterwards = await harness.Client.PublishAsync("a/b", payload, MqttQoS.AtMostOnce);
+
+        // Assert
+        taken.ShouldBe(255);
+        ((long)taken * 4_105).ShouldBeLessThanOrEqualTo(ClientLimits.MaxPendingPublishBytes);
+        refused.Status.ShouldBe(MqttRequestStatus.SendQueueFull);
+        outstandingWhenFull.ShouldBe(taken);
+        afterwards.Status.ShouldBe(MqttRequestStatus.Completed);
+        pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves one publish larger than the queued-byte limit is taken when nothing is queued, so a large message
+    /// can still be sent, and that the next publish behind it fails with
+    /// <see cref="MqttRequestStatus.SendQueueFull"/> until it is written.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task PublishAsync_LargerThanTheLimitWithNothingQueued_IsTaken()
+    {
+        // Arrange
+        ClientHarness harness = await ConnectAsync();
+        harness.Link.HoldWrites();
+        byte[] large = new byte[(int)ClientLimits.MaxPendingPublishBytes + 1];
+
+        // Act
+        MqttRequestResult first = await harness.Client.PublishAsync("a/b", large, MqttQoS.AtMostOnce);
+        MqttRequestResult second = await harness.Client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce);
+        harness.Link.CompleteHeldWrites();
+
+        // Assert
+        first.Status.ShouldBe(MqttRequestStatus.Completed);
+        second.Status.ShouldBe(MqttRequestStatus.SendQueueFull);
     }
 
     /// <summary>

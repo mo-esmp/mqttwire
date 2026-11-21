@@ -36,7 +36,7 @@ internal static class ReconnectBackoff
     /// as the nearest end.
     /// </param>
     /// <returns>
-    /// The delay, rounded to whole ticks.
+    /// The delay, rounded to whole ticks and never under one millisecond.
     /// </returns>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="attempt"/> is below 1.
@@ -54,6 +54,11 @@ internal static class ReconnectBackoff
 
         double factor = MinFactor + (FactorRange * Math.Clamp(value: random01, min: 0.0, max: 1.0));
         double ticks = Math.Round(a: baseTicks * factor);
-        return ticks >= max.Ticks ? max : TimeSpan.FromTicks(value: (long)ticks);
+
+        // Never under a millisecond: a shorter Task.Delay can complete synchronously, and a retry loop whose
+        // attempts also fail synchronously would then spin on the caller's thread.
+        return ticks >= max.Ticks
+            ? max
+            : TimeSpan.FromTicks(value: Math.Max((long)ticks, TimeSpan.TicksPerMillisecond));
     }
 }

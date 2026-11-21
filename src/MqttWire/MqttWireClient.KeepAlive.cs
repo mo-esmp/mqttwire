@@ -1,3 +1,4 @@
+using MqttWire.Client;
 using MqttWire.Codec;
 
 namespace MqttWire;
@@ -35,10 +36,16 @@ public sealed partial class MqttWireClient
     private bool _sendsPings;
 
     /// <summary>
-    /// The <see cref="TimeProvider.GetTimestamp"/> of the oldest PINGREQ not yet answered, or 0 when none waits.
-    /// Set by a tick before its PINGREQ is sent; cleared by any PINGRESP.
+    /// The <see cref="TimeProvider.GetTimestamp"/> at which the write of the PINGREQ not yet answered began, or 0
+    /// when none waits. Set by the send path just before the PINGREQ is written; cleared by any PINGRESP.
     /// </summary>
     private long _pingRequestTimestamp;
+
+    /// <summary>
+    /// 1 while a PINGREQ is queued for the send lock or being written, 0 otherwise. A tick queues no second
+    /// PINGREQ while one is queued, so a stalled write ahead of it does not pile pings up behind it.
+    /// </summary>
+    private int _pingQueued;
 
     /// <summary>
     /// Reads the keep-alive interval of the connection from an accepting CONNACK: its Server Keep Alive when it has
@@ -99,7 +106,10 @@ public sealed partial class MqttWireClient
     /// One keep-alive tick. Ends the connection, aborting the link without a DISCONNECT (decision 9), with
     /// <see cref="MqttClientCloseReason.KeepAliveTimedOut"/> when a PINGREQ has waited a full interval, or with
     /// <see cref="MqttClientCloseReason.AcknowledgementTimedOut"/> when the oldest request has waited twice the
-    /// interval for its next acknowledgement; otherwise sends PINGREQ when nothing was sent for half the interval.
+    /// interval for its next acknowledgement; otherwise sends PINGREQ when nothing was sent for half the interval,
+    /// unless a PINGREQ is already queued or awaits its PINGRESP. The PINGRESP deadline counts from when the
+    /// PINGREQ's write begins, so a write stalled ahead of it in the send lock does not end the connection as
+    /// <see cref="MqttClientCloseReason.KeepAliveTimedOut"/>.
     /// With keep-alive turned off by the server only the acknowledgement deadline is checked, against the client's
     /// own interval. Does nothing unless connected, so a tick that comes after the end, as a timer's late callback
     /// may, changes nothing.
@@ -139,19 +149,28 @@ public sealed partial class MqttWireClient
             return;
         }
 
-        if (!sendsPings || _time.GetElapsedTime(LastSendTimestamp, now) < interval / 2)
+        if (!sendsPings || pingRequest != 0 || _time.GetElapsedTime(LastSendTimestamp, now) < interval / 2)
         {
             return;
         }
 
-        // Noted before the send, so a PINGRESP that comes at once finds it; an earlier PINGREQ still unanswered
-        // keeps its own time, from which its deadline counts.
-        Interlocked.CompareExchange(ref _pingRequestTimestamp, now, 0);
         ReadOnlySpan<byte> pingReq = PingCodec.PingReq;
+        if (!FitsServerMaximumPacketSize(pingReq.Length))
+        {
+            EndOverServerMaximumPacketSize();
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _pingQueued, 1, 0) != 0)
+        {
+            // One is already waiting for the send lock; the send path clears this once its write has ended.
+            return;
+        }
+
         byte[] packet = _pool.Rent(pingReq.Length);
         pingReq.CopyTo(packet);
 
         // Not awaited: the send lock writes it in turn and returns the buffer. A failed write ends the connection.
-        _ = SendAsync(packet, pingReq.Length, isDisconnect: false);
+        _ = SendAsync(packet, pingReq.Length, SendKind.PingRequest);
     }
 }

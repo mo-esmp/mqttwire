@@ -16,6 +16,19 @@ internal static class ClientLimits
     public const int MaxPublishesInFlight = 1024;
 
     /// <summary>
+    /// The most PUBLISH bytes queued for the send lock and not yet written, 1 MiB. A publish that would go over it
+    /// fails with <c>SendQueueFull</c>, except that one publish is always taken when nothing is queued, so a packet
+    /// larger than this can still be sent.
+    /// </summary>
+    public const long MaxPendingPublishBytes = 1_048_576;
+
+    /// <summary>
+    /// The most idle request completions kept for reuse. A caller that holds completed results before reading them
+    /// can return many at once; those above this are left to the garbage collector.
+    /// </summary>
+    public const int MaxIdleCompletions = 32;
+
+    /// <summary>
     /// The size of the first read buffer, in bytes.
     /// </summary>
     public const int FirstReadBufferBytes = 4096;

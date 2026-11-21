@@ -23,7 +23,8 @@ internal sealed class OutgoingRecords(int publishLimit)
     private readonly Stack<OutgoingRecord> _recordPool = [];
 
     /// <summary>
-    /// Completions whose result was read and wait for reuse; guarded by <see cref="_completionGate"/>.
+    /// Completions whose result was read and wait for reuse, at most <see cref="ClientLimits.MaxIdleCompletions"/>;
+    /// guarded by <see cref="_completionGate"/>.
     /// </summary>
     private readonly Stack<RequestCompletion> _completionPool = [];
 
@@ -90,7 +91,9 @@ internal sealed class OutgoingRecords(int publishLimit)
     }
 
     /// <summary>
-    /// Returns a completion to the pool. Called by the completion itself when its result has been read.
+    /// Returns a completion to the pool. Called by the completion itself when its result has been read. A pool that
+    /// already holds <see cref="ClientLimits.MaxIdleCompletions"/> drops it for the garbage collector, so a caller
+    /// that reads many results late does not leave the pool that large.
     /// </summary>
     /// <param name="completion">
     /// The completion to keep for reuse.
@@ -99,7 +102,24 @@ internal sealed class OutgoingRecords(int publishLimit)
     {
         lock (_completionGate)
         {
-            _completionPool.Push(item: completion);
+            if (_completionPool.Count < ClientLimits.MaxIdleCompletions)
+            {
+                _completionPool.Push(item: completion);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the number of idle completions kept for reuse.
+    /// </summary>
+    internal int IdleCompletions
+    {
+        get
+        {
+            lock (_completionGate)
+            {
+                return _completionPool.Count;
+            }
         }
     }
 

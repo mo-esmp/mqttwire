@@ -1,5 +1,6 @@
 ﻿using System.Net.WebSockets;
 using MqttWire.Client;
+using MqttWire.Codec;
 using MqttWire.Link;
 
 namespace MqttWire;
@@ -141,10 +142,12 @@ public sealed partial class MqttWireClient
     /// </returns>
     private async ValueTask CloseLinkAsync(IMqttLink link, MqttReasonCode? disconnect)
     {
-        if (disconnect is { } reasonCode)
+        // A DISCONNECT over the server's Maximum Packet Size may not be sent (MQTT-3.2.2-15); the close alone ends it.
+        if (disconnect is { } reasonCode
+            && FitsServerMaximumPacketSize(DisconnectCodec.GetSize(reasonCode, null)))
         {
             byte[] packet = RentDisconnect(reasonCode: reasonCode, length: out int length);
-            if (!await SendAsync(packet: packet, length: length, isDisconnect: true)
+            if (!await SendAsync(packet: packet, length: length, kind: SendKind.Disconnect)
                     .ConfigureAwait(continueOnCapturedContext: false))
             {
                 // The write failed and aborted the link; there is nothing left to close.

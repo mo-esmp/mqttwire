@@ -101,4 +101,21 @@ public sealed class ReconnectBackoffTests
         // Assert
         delay.ShouldBe(max);
     }
+
+    /// <summary>
+    /// Proves no delay is shorter than one millisecond: the smallest initial delay with the lowest random part, a
+    /// factor of 0.8, gives one millisecond, not 0.8.
+    /// </summary>
+    [Fact]
+    public void GetDelay_SmallestInitialDelayLowestFactor_IsOneMillisecond()
+    {
+        // Arrange
+        TimeSpan initial = TimeSpan.FromMilliseconds(1);
+
+        // Act
+        TimeSpan delay = ReconnectBackoff.GetDelay(1, initial, s_max, 0.0);
+
+        // Assert
+        delay.ShouldBe(TimeSpan.FromMilliseconds(1));
+    }
 }

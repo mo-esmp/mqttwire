@@ -297,4 +297,35 @@ public sealed class OutgoingRecordsTests
             records.TryAdd(RecordKind.Subscribe, 0, records.RentCompletion(), out _, out _).ShouldBeTrue();
         }
     }
+
+    /// <summary>
+    /// Proves completions whose results are read long after they completed are not all kept: 256 completed and
+    /// then read leave only <see cref="ClientLimits.MaxIdleCompletions"/> idle for reuse.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task ReturnCompletion_ManyResultsReadLate_KeepsAtMostTheIdleLimit()
+    {
+        // Arrange
+        OutgoingRecords records = new(1);
+        List<ValueTask<MqttRequestResult>> results = [];
+        for (int i = 0; i < 256; i++)
+        {
+            RequestCompletion completion = records.RentCompletion();
+            ValueTask<MqttRequestResult> result = completion.Task;
+            completion.Complete(new MqttRequestResult(MqttRequestStatus.Completed, MqttReasonCode.Success));
+            results.Add(result);
+        }
+
+        // Act
+        foreach (ValueTask<MqttRequestResult> result in results)
+        {
+            await result;
+        }
+
+        // Assert
+        records.IdleCompletions.ShouldBe(ClientLimits.MaxIdleCompletions);
+    }
 }

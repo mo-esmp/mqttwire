@@ -206,7 +206,7 @@ public sealed partial class MqttWireClient
 
         // Not awaited: the send lock queues the write now, in call order, and returns the buffer once the write has
         // ended. A failed write ends the connection, which completes the record with ConnectionLost.
-        _ = SendAsync(packet, length, isDisconnect: false);
+        _ = SendAsync(packet, length, SendKind.Other);
         return completion;
     }
 

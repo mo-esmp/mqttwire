@@ -150,7 +150,7 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
     /// <see langword="null"/>.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <see cref="MqttWireReconnectOptions.InitialDelay"/> is not greater than zero, or
+    /// <see cref="MqttWireReconnectOptions.InitialDelay"/> is less than one millisecond, or
     /// <see cref="MqttWireReconnectOptions.MaxDelay"/> is less than it or more than 4,294,967,294 milliseconds.
     /// </exception>
     public MqttWireReconnectingClient(MqttWireReconnectOptions options)
@@ -197,9 +197,9 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
             throw new ArgumentNullException(nameof(options), "The ClientOptions callback is required.");
         }
 
-        if (options.InitialDelay <= TimeSpan.Zero)
+        if (options.InitialDelay < TimeSpan.FromMilliseconds(1))
         {
-            throw new ArgumentOutOfRangeException(nameof(options), options.InitialDelay, "The initial delay must be greater than zero.");
+            throw new ArgumentOutOfRangeException(nameof(options), options.InitialDelay, "The initial delay must be at least one millisecond.");
         }
 
         if (options.MaxDelay < options.InitialDelay || options.MaxDelay > s_maxSupportedDelay)

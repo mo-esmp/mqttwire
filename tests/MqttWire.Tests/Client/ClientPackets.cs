@@ -192,4 +192,19 @@ internal static class ClientPackets
     /// DISCONNECT with 0x94, topic alias invalid.
     /// </summary>
     public static readonly byte[] DisconnectTopicAliasInvalid = Hex.Parse("E0 01 94");
+
+    /// <summary>
+    /// CONNACK refusing with 0x87, not authorized, and Session Present set, which a refusal may not have.
+    /// </summary>
+    public static readonly byte[] ConnAckRefusedWithSessionPresent = Hex.Parse("20 03 01 87 00");
+
+    /// <summary>
+    /// CONNACK with success and Maximum Packet Size 3, too small for a PUBACK.
+    /// </summary>
+    public static readonly byte[] ConnAckMaximumPacketSize3 = Hex.Parse("20 08 00 00 05 27 00 00 00 03");
+
+    /// <summary>
+    /// CONNACK with success and Maximum Packet Size 1, too small for a PINGREQ or a DISCONNECT.
+    /// </summary>
+    public static readonly byte[] ConnAckMaximumPacketSize1 = Hex.Parse("20 08 00 00 05 27 00 00 00 01");
 }

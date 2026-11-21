@@ -13,8 +13,16 @@ namespace MqttWire.Link;
 internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
 {
     /// <summary>
-    /// Waits with a zero-byte receive, which completes when data is available and consumes nothing. It uses the
-    /// pooling builder, so a wait that suspends, as every idle wait does, allocates nothing in steady state.
+    /// Whether the zero-byte receive of <see cref="WaitForDataAsync"/> reported a text message. An empty text
+    /// message is consumed whole by that receive, so the next read would see only what follows it; the next
+    /// <see cref="ReadAsync"/> closes with 1003 instead.
+    /// </summary>
+    private bool _textReceived;
+
+    /// <summary>
+    /// Waits with a zero-byte receive, which completes when data is available and consumes nothing but the type of
+    /// the message it reports, which is remembered when it is text. It uses the pooling builder, so a wait that
+    /// suspends, as every idle wait does, allocates nothing in steady state.
     /// </summary>
     /// <param name="cancellationToken">
     /// Cancels the wait.
@@ -25,8 +33,15 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
     /// </returns>
     [AsyncMethodBuilder(builderType: typeof(PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask WaitForDataAsync(CancellationToken cancellationToken)
-        => await webSocket.ReceiveAsync(buffer: Memory<byte>.Empty, cancellationToken: cancellationToken)
-            .ConfigureAwait(continueOnCapturedContext: false);
+    {
+        ValueWebSocketReceiveResult result =
+            await webSocket.ReceiveAsync(buffer: Memory<byte>.Empty, cancellationToken: cancellationToken)
+                .ConfigureAwait(continueOnCapturedContext: false);
+        if (result.MessageType == WebSocketMessageType.Text)
+        {
+            _textReceived = true;
+        }
+    }
 
     /// <summary>
     /// Reads the next bytes, skipping empty frames. It uses the pooling builder, so a read that suspends allocates
@@ -48,6 +63,14 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
     [AsyncMethodBuilder(builderType: typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken)
     {
+        if (_textReceived)
+        {
+            await webSocket.CloseOutputAsync(closeStatus: WebSocketCloseStatus.InvalidMessageType,
+                    statusDescription: null, cancellationToken: cancellationToken)
+                .ConfigureAwait(continueOnCapturedContext: false);
+            return 0;
+        }
+
         while (true)
         {
             if (webSocket.State is WebSocketState.CloseReceived or WebSocketState.Closed)

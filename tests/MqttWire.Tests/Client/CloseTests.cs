@@ -61,6 +61,33 @@ public sealed class CloseTests
     }
 
     /// <summary>
+    /// Proves a DISCONNECT the server's Maximum Packet Size of 1 does not allow is not sent: disposing the client
+    /// closes the link with 1000 and writes nothing.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task DisposeAsync_DisconnectOverServerMaximumPacketSize_ClosesWithoutIt()
+    {
+        // Arrange
+        ClientHarness harness = ClientHarness.Create();
+        await harness.ConnectAsync(ClientPackets.ConnAckMaximumPacketSize1);
+        harness.NextPacket();
+
+        // Act
+        ValueTask dispose = harness.Client.DisposeAsync();
+        WebSocketCloseStatus? closedWith = harness.Link.ClosedWith;
+        harness.Link.EndFromPeer();
+        await dispose;
+
+        // Assert
+        harness.Link.TakeWritten().ShouldBeEmpty();
+        closedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
+        harness.Closed.ShouldBe([new MqttClientCloseInfo(MqttClientCloseReason.Disposed, MqttReasonCode.Success, null, null)]);
+    }
+
+    /// <summary>
     /// Proves a close the peer never takes, here a DISCONNECT write that never completes, is ended by aborting the
     /// link after two seconds, not before.
     /// </summary>

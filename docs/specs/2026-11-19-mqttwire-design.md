@@ -274,8 +274,8 @@ ValueTask<MqttRequestResult> done = client.PublishAsync("some/topic", payload, M
   request's kind, so a successful publish or unsubscribe (reason code `0x00`) reads as QoS 0. The
   statuses are:
   `Completed` (the exchange ended; the reason code is the server's); `NotConnected`,
-  `ReceiveMaximumReached`, `PacketTooLarge`, `QoSNotSupported` and `NoFreePacketIdentifier`
-  (the request failed at once and was not sent); and `ConnectionLost` (the connection ended
+  `ReceiveMaximumReached`, `PacketTooLarge`, `QoSNotSupported`, `NoFreePacketIdentifier` and
+  `SendQueueFull` (the request failed at once and was not sent); and `ConnectionLost` (the connection ended
   first, so the server may or may not have received the request). A bare QoS could not say
   "refused" or "connection lost".
 - `PublishAsync` hands the message over in the order of the calls. It encodes the whole packet
@@ -283,7 +283,10 @@ ValueTask<MqttRequestResult> done = client.PublishAsync("some/topic", payload, M
   completes when the exchange ends (at once for QoS 0), with the server's reason code; a caller
   that does not care about the acknowledgement does not await it.
 - A publish that has no room in the server's receive window, or is larger than the server's
-  maximum packet size, fails at once and is not sent.
+  maximum packet size, fails at once and is not sent. So does a publish while 1 MiB of earlier
+  publishes waits to be written, because the link is slower than the caller: it fails with
+  `SendQueueFull`. One publish is always taken when nothing waits, so a larger message can
+  still be sent.
 - `MaxIncomingPacketBytes` is the largest packet the client accepts (default 1 MiB, from 4,096
   to 268,435,460). The client announces it in CONNECT (6.9).
 - `OnMessage` and `OnClosed` are called one at a time, in order. `OnClosed` is called once.
@@ -796,9 +799,9 @@ not announced either: whether a filter is granted is the host's answer in SUBACK
 
 | Property | Treatment |
 |---|---|
-| Session Present | Must be 0; otherwise the connection is closed (the client asked for a clean start). |
+| Session Present | Must be 0, on an accepting CONNACK and on a refusal alike; otherwise the connection is closed with DISCONNECT `0x82` (the client asked for a clean start, and a refusal may not claim a session). |
 | Reason String, User Property | Given to the caller in the connect result. |
-| Server Keep Alive, Receive Maximum, Maximum Packet Size | Honoured. |
+| Server Keep Alive, Receive Maximum, Maximum Packet Size | Honoured. Maximum Packet Size limits every packet sent after the CONNACK, acknowledgements, PINGREQ and DISCONNECT included: an acknowledgement or PINGREQ over it ends the connection without it, and a DISCONNECT over it is left out of the close. |
 | Maximum QoS | Honoured: a publish above it fails at once. |
 | Everything else | Ignored. |
 
@@ -856,11 +859,16 @@ The inside of `MqttWireClient`.
   which is answered with PUBCOMP; a PUBLISH that repeats a remembered identifier is not handed
   on again, whatever its DUP flag says. A PUBREL for an identifier the client does not remember
   is answered with PUBCOMP `0x92`. A PUBLISH with a Topic Alias ends the connection with
-  DISCONNECT `0x94`. More than 1,024 unreleased QoS 2 identifiers end it with `0x93`.
+  DISCONNECT `0x94`. The client announces a receive maximum of 1,024: a new QoS 1 or 2
+  PUBLISH while 1,024 QoS 2 identifiers wait for their PUBREL ends the connection with `0x93`
+  before it is handed on; a repeat of a remembered identifier takes no new place.
 - **Keep-alive:** one timer per client, ticking every half interval. On a tick the client sends
   a PINGREQ if nothing was sent for half the interval, so the time between packets never
-  exceeds the keep-alive, as MQTT requires. It ends the connection if a PINGREQ has waited a
-  full interval for its PINGRESP, or if the oldest record is older than twice the interval
+  exceeds the keep-alive, as MQTT requires. One PINGREQ waits at a time: no second is queued
+  while one waits for the send lock or for its PINGRESP. It ends the connection if a PINGREQ has
+  waited a full interval for its PINGRESP, counted from when its write began, so a write stalled
+  ahead of it is not taken for a silent server; or if the oldest record is older than twice the
+  interval
   (above). The interval is the Server Keep Alive from the CONNACK when there is one, else the
   client's `KeepAlive`. A Server Keep Alive of 0 stops the PINGREQs and the ping deadline, but
   the acknowledgement deadline stays, at twice the client's own `KeepAlive`.

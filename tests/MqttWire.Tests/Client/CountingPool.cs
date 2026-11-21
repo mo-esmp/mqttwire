@@ -25,6 +25,12 @@ internal sealed class CountingPool : ArrayPool<byte>
     private TaskCompletionSource? _noneOutstanding;
 
     /// <summary>
+    /// Gets or sets a callback that sees each buffer as it comes back, before it is taken off the rented set, so a
+    /// test can check what the client left in it; or <see langword="null"/>.
+    /// </summary>
+    public Action<byte[]>? Returning { get; set; }
+
+    /// <summary>
     /// Gets the number of buffers rented and not yet returned.
     /// </summary>
     public int Outstanding
@@ -153,6 +159,7 @@ internal sealed class CountingPool : ArrayPool<byte>
     /// </exception>
     public override void Return(byte[] array, bool clearArray = false)
     {
+        Returning?.Invoke(array);
         lock (_gate)
         {
             if (!_rented.Remove(array))

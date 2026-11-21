@@ -18,9 +18,9 @@ public sealed class MqttWireReconnectOptions
     public required Func<CancellationToken, ValueTask<MqttWireClientOptions>> ClientOptions { get; init; }
 
     /// <summary>
-    /// Gets the delay before the first retry; each later retry doubles it, up to <see cref="MaxDelay"/>. Greater
-    /// than zero. A random part of ±20 % is added to each delay, so that many clients do not come back in the same
-    /// instant.
+    /// Gets the delay before the first retry; each later retry doubles it, up to <see cref="MaxDelay"/>. At least
+    /// one millisecond. A random part of ±20 % is added to each delay, so that many clients do not come back in the
+    /// same instant, and no delay is shorter than one millisecond after it.
     /// </summary>
     public TimeSpan InitialDelay { get; init; } = TimeSpan.FromMilliseconds(500);
 

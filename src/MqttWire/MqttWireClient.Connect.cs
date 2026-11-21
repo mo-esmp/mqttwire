@@ -136,7 +136,7 @@ public sealed partial class MqttWireClient
         {
             _ = ReadLoopAsync(link);
             byte[] connect = RentConnect(out int length);
-            await SendAsync(connect, length, isDisconnect: false).ConfigureAwait(false);
+            await SendAsync(connect, length, SendKind.Connect).ConfigureAwait(false);
             return await result.Task.ConfigureAwait(false);
         }
         finally
@@ -253,13 +253,19 @@ public sealed partial class MqttWireClient
             return EndStep.DisconnectAndClose;
         }
 
+        // The client asked for a clean start, so the server cannot have a session (MQTT 5, 3.2.2.1.1), and a refusal
+        // must not claim one either (MQTT-3.2.2-6): either way the CONNACK is malformed, not a refusal to retry.
+        if (connAck.SessionPresent)
+        {
+            return EndStep.DisconnectAndClose;
+        }
+
         if (connAck.ReasonCode >= MqttReasonCode.UnspecifiedError)
         {
             return HandleConnAckRefusal(connAck);
         }
 
-        // The client asked for a clean start, so the server cannot have a session (MQTT 5, 3.2.2.1.1).
-        if (connAck.SessionPresent || connAck.ReasonCode != MqttReasonCode.Success)
+        if (connAck.ReasonCode != MqttReasonCode.Success)
         {
             return EndStep.DisconnectAndClose;
         }

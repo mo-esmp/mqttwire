@@ -192,6 +192,90 @@ public sealed class ReceiveTests
     }
 
     /// <summary>
+    /// Proves a new QoS 1 PUBLISH while 1,024 QoS 2 messages wait for PUBREL ends the connection with DISCONNECT
+    /// 0x93 before it is handed on: every place in the announced Receive Maximum is taken.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Read_QoS1WhileReceiveMaximumIsFull_SendsDisconnect93()
+    {
+        // Arrange
+        List<Received> received = [];
+        ClientHarness harness = await ConnectAsync(received);
+        for (int id = 1; id <= ClientLimits.MaxIncomingQoS2; id++)
+        {
+            harness.Link.Deliver(PublishQoS2(id));
+            harness.NextPacket();
+        }
+
+        // Act
+        harness.Link.Deliver(PublishQoS1(ClientLimits.MaxIncomingQoS2 + 1));
+        byte[] disconnect = harness.NextPacket();
+        harness.Link.EndFromPeer();
+
+        // Assert
+        received.Count.ShouldBe(ClientLimits.MaxIncomingQoS2);
+        disconnect.ShouldBe(ClientPackets.DisconnectReceiveMaximumExceeded);
+        harness.Closed.ShouldBe([new MqttClientCloseInfo(MqttClientCloseReason.ProtocolError, MqttReasonCode.ReceiveMaximumExceeded, null, null)]);
+    }
+
+    /// <summary>
+    /// Proves a repeated QoS 2 PUBLISH while the Receive Maximum is full is still answered with PUBREC and not
+    /// handed on again: a repeat takes no new place.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Read_RepeatedQoS2WhileReceiveMaximumIsFull_AnswersPubRec()
+    {
+        // Arrange
+        List<Received> received = [];
+        ClientHarness harness = await ConnectAsync(received);
+        for (int id = 1; id <= ClientLimits.MaxIncomingQoS2; id++)
+        {
+            harness.Link.Deliver(PublishQoS2(id));
+            harness.NextPacket();
+        }
+
+        // Act
+        harness.Link.Deliver(PublishQoS2(1));
+
+        // Assert
+        harness.NextPacket().ShouldBe(ClientPackets.PubRec1);
+        received.Count.ShouldBe(ClientLimits.MaxIncomingQoS2);
+        harness.Client.IsConnected.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// Proves a PUBACK the server's Maximum Packet Size of 3 does not allow is not sent: the connection ends as
+    /// <see cref="MqttClientCloseReason.ProtocolError"/> with 0x95, packet too large, and the link is aborted
+    /// without a DISCONNECT.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Read_PubAckOverServerMaximumPacketSize_EndsWithoutSendingIt()
+    {
+        // Arrange
+        ClientHarness harness = ClientHarness.Create();
+        await harness.ConnectAsync(ClientPackets.ConnAckMaximumPacketSize3);
+        harness.NextPacket();
+
+        // Act
+        harness.Link.Deliver(ClientPackets.PublishQoS1);
+
+        // Assert
+        harness.Link.TakeWritten().ShouldBeEmpty();
+        harness.Client.IsConnected.ShouldBeFalse();
+        harness.Link.IsAborted.ShouldBeTrue();
+        harness.Closed.ShouldBe([new MqttClientCloseInfo(MqttClientCloseReason.ProtocolError, MqttReasonCode.PacketTooLarge, null, null)]);
+    }
+
+    /// <summary>
     /// Proves a PUBLISH cut at any byte, however the link splits it, is handed on as the same message.
     /// </summary>
     [Fact]
@@ -383,6 +467,17 @@ public sealed class ReceiveTests
         overflow.ShouldBeFalse();
         table.Count.ShouldBe(ClientLimits.MaxIncomingQoS2);
     }
+
+    /// <summary>
+    /// Builds a QoS 1 PUBLISH to "a/b" with payload "hi" and the given packet identifier.
+    /// </summary>
+    /// <param name="id">
+    /// The packet identifier.
+    /// </param>
+    /// <returns>
+    /// The packet.
+    /// </returns>
+    private static byte[] PublishQoS1(int id) => [0x32, 0x0A, 0x00, 0x03, 0x61, 0x2F, 0x62, (byte)(id >> 8), (byte)id, 0x00, 0x68, 0x69];
 
     /// <summary>
     /// Builds a PUBLISH at QoS 2 with topic "a/b", payload "hi" and the given identifier.

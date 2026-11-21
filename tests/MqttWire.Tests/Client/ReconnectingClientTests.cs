@@ -1,5 +1,6 @@
 using System.Net.WebSockets;
 using System.Text;
+using Microsoft.Extensions.Time.Testing;
 using MqttWire.Codec;
 using MqttWire.Tests.Link;
 
@@ -182,7 +183,8 @@ public sealed class ReconnectingClientTests
 
     /// <summary>
     /// Proves a connection that ends before it has stayed up for <c>MaxDelay</c> does not put the delay back to
-    /// 500 ms: three connections that each end at once are retried after 500 ms, one second and two seconds.
+    /// 500 ms: a connection that ends at once is retried after 500 ms, and the next, held for one millisecond less
+    /// than <c>MaxDelay</c>, after one second.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -205,13 +207,7 @@ public sealed class ReconnectingClientTests
         second.EndFromPeer();
         await harness.Log.WhenAsync("disconnected", 2);
         await harness.AdvanceAsync(TimeSpan.FromSeconds(1));
-        MemoryLink third = await harness.LinkAsync(3);
-        third.Deliver(ClientPackets.ConnAckAccepted);
-        await harness.Log.WhenAsync("connected again", 2);
-        third.EndFromPeer();
-        await harness.Log.WhenAsync("disconnected", 3);
-        await harness.AdvanceAsync(TimeSpan.FromSeconds(2));
-        await harness.Connector.WhenAttemptsAsync(4);
+        await harness.Connector.WhenAttemptsAsync(3);
 
         // Assert
         harness.AttemptTimes().ShouldBe(
@@ -219,13 +215,10 @@ public sealed class ReconnectingClientTests
             TimeSpan.Zero,
             s_initial,
             TimeSpan.FromMilliseconds(16_499),
-            TimeSpan.FromMilliseconds(18_499),
         ]);
         harness.Log.Events.ShouldBe(
         [
             "connected first",
-            "disconnected ConnectionLost",
-            "connected again",
             "disconnected ConnectionLost",
             "connected again",
             "disconnected ConnectionLost",
@@ -1153,6 +1146,63 @@ public sealed class ReconnectingClientTests
 
         // Assert
         exception.ShouldBeOfType<ArgumentOutOfRangeException>();
+    }
+
+    /// <summary>
+    /// Proves an initial delay under one millisecond is refused with <see cref="ArgumentOutOfRangeException"/>.
+    /// </summary>
+    [Fact]
+    public void Constructor_InitialDelayUnderOneMillisecond_ThrowsArgumentOutOfRange()
+    {
+        // Arrange
+        MqttWireReconnectOptions options = new()
+        {
+            ClientOptions = static _ => ValueTask.FromResult(ReconnectHarness.DefaultOptions()),
+            InitialDelay = TimeSpan.FromTicks(TimeSpan.TicksPerMillisecond - 1),
+            MaxDelay = TimeSpan.FromMilliseconds(1),
+        };
+
+        // Act
+        Exception? exception = Record.Exception(() => new MqttWireReconnectingClient(options));
+
+        // Assert
+        exception.ShouldBeOfType<ArgumentOutOfRangeException>();
+    }
+
+    /// <summary>
+    /// Proves options that fail at once, at the smallest delay and the lowest random part, are not retried on the
+    /// caller's thread: the start returns after one attempt, and the retry waits for a timer of one millisecond.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task StartAsync_OptionsFailAtOnceAtTheSmallestDelay_RetriesOnATimer()
+    {
+        // Arrange
+        TimerRecordingClock clock = new(new FakeTimeProvider());
+        int calls = 0;
+        MqttWireReconnectOptions options = new()
+        {
+            ClientOptions = _ =>
+            {
+                Interlocked.Increment(ref calls);
+                throw new InvalidOperationException("No options.");
+            },
+            InitialDelay = TimeSpan.FromMilliseconds(1),
+            MaxDelay = TimeSpan.FromMilliseconds(1),
+            OnCallbackError = static _ => { },
+        };
+        await using MqttWireReconnectingClient client = new(options, new MemoryLinkConnector(), clock, static () => 0.0);
+
+        // Act
+        Task<MqttConnectAck> start = client.StartAsync();
+        int callsWhenStartReturned = Volatile.Read(ref calls);
+        await clock.WhenTimerAsync(TimeSpan.FromMilliseconds(1));
+
+        // Assert
+        callsWhenStartReturned.ShouldBe(1);
+        start.IsCompleted.ShouldBeFalse();
     }
 
     /// <summary>

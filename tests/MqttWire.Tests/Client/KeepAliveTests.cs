@@ -395,6 +395,63 @@ public sealed class KeepAliveTests
     }
 
     /// <summary>
+    /// Proves a write stalled in the send lock does not end the connection as
+    /// <see cref="MqttClientCloseReason.KeepAliveTimedOut"/>: with a 10 s keep-alive and a publish held, three
+    /// half-intervals queue one PINGREQ and no second, the client stays connected, and once the writes end that one
+    /// PINGREQ follows the publish.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Tick_WriteStalledAheadOfPingReq_NoTimeoutAndOnePingReq()
+    {
+        // Arrange
+        ClientHarness harness = await ConnectAsync(TimeSpan.FromSeconds(10));
+        harness.Link.HoldWrites();
+        await harness.Client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce);
+
+        // Act
+        harness.Time.Advance(TimeSpan.FromSeconds(5));
+        harness.Time.Advance(TimeSpan.FromSeconds(5));
+        harness.Time.Advance(TimeSpan.FromSeconds(5));
+        bool connectedWhileStalled = harness.Client.IsConnected;
+        harness.Link.CompleteHeldWrites();
+        await harness.Link.WhenWrittenAsync(3);
+
+        // Assert
+        connectedWhileStalled.ShouldBeTrue();
+        harness.NextPacket().ShouldBe(ClientPackets.PublishQoS0);
+        harness.NextPacket().ShouldBe(ClientPackets.PingReq);
+        harness.Link.TakeWritten().ShouldBeEmpty();
+        harness.Closed.ShouldBeEmpty();
+    }
+
+    /// <summary>
+    /// Proves a PINGREQ the server's Maximum Packet Size of 1 does not allow is not sent: the tick that would send
+    /// it ends the connection as <see cref="MqttClientCloseReason.ProtocolError"/> with 0x95, packet too large, and
+    /// aborts the link.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Tick_PingReqOverServerMaximumPacketSize_EndsWithoutSendingIt()
+    {
+        // Arrange
+        ClientHarness harness = await ConnectAsync(TimeSpan.FromSeconds(10), ClientPackets.ConnAckMaximumPacketSize1);
+
+        // Act
+        harness.Time.Advance(TimeSpan.FromSeconds(5));
+
+        // Assert
+        harness.Link.TakeWritten().ShouldBeEmpty();
+        harness.Client.IsConnected.ShouldBeFalse();
+        harness.Link.IsAborted.ShouldBeTrue();
+        harness.Closed.ShouldBe([new MqttClientCloseInfo(MqttClientCloseReason.ProtocolError, MqttReasonCode.PacketTooLarge, null, null)]);
+    }
+
+    /// <summary>
     /// Creates a client with a keep-alive and connects it, taking the CONNECT it wrote.
     /// </summary>
     /// <param name="keepAlive">

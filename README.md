@@ -39,7 +39,9 @@ ValueTask<MqttRequestResult> done = client.PublishAsync("some/topic", payload, M
 - `PublishAsync`, `SubscribeAsync` and `UnsubscribeAsync` return an `MqttRequestResult`: a
   status and the server's reason code. `Completed` means the exchange ended; check `IsSuccess`
   for the reason code. `NotConnected`, `ReceiveMaximumReached`, `PacketTooLarge`,
-  `QoSNotSupported` and `NoFreePacketIdentifier` mean the request was not sent.
+  `QoSNotSupported`, `NoFreePacketIdentifier` and `SendQueueFull` mean the request was not sent.
+  `SendQueueFull` means 1 MiB of publishes already waits for a slow link; trying again later may
+  succeed.
   `ConnectionLost` means the connection ended first, so the server may or may not have received
   it. `PublishAsync` has copied the payload before it returns, and a caller that does not care
   about the acknowledgement does not await the result.

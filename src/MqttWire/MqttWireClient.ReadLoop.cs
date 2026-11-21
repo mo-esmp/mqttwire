@@ -323,9 +323,17 @@ public sealed partial class MqttWireClient
     private ValueTask<bool> SendReplyAsync()
     {
         Reply reply = _reply;
-        byte[] packet = _pool.Rent(AckCodec.GetSize(reply.ReasonCode, null));
+        int size = AckCodec.GetSize(reply.ReasonCode, null);
+        if (!FitsServerMaximumPacketSize(size))
+        {
+            // MQTT cannot go on without this acknowledgement, and the server may not be sent it (MQTT-3.2.2-15).
+            EndOverServerMaximumPacketSize();
+            return new ValueTask<bool>(false);
+        }
+
+        byte[] packet = _pool.Rent(size);
         int length = AckCodec.Write(packet, reply.Type, reply.PacketIdentifier, reply.ReasonCode, null);
-        return SendAsync(packet, length, isDisconnect: false);
+        return SendAsync(packet, length, SendKind.Other);
     }
 
     /// <summary>

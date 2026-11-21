@@ -151,6 +151,36 @@ public sealed class WebSocketLinkTests
     }
 
     /// <summary>
+    /// Proves an empty text message that the zero-byte wait takes whole still ends the link: the read after the
+    /// wait returns zero and the peer sees close status 1003, though binary data follows the text message.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task ReadAsync_EmptyTextMessageSeenByTheWait_ClosesWith1003AndReturnsZero()
+    {
+        // Arrange
+        (WebSocket client, WebSocket server) = WebSocketPair.Create();
+        using WebSocket clientSocket = client;
+        using WebSocket serverSocket = server;
+        WebSocketLink link = new(clientSocket);
+        await serverSocket.SendAsync(Array.Empty<byte>(), WebSocketMessageType.Text, true, CancellationToken.None);
+        await SendBinaryAsync(serverSocket, [0xC0, 0x00]);
+        byte[] buffer = new byte[16];
+
+        // Act
+        await link.WaitForDataAsync(CancellationToken.None);
+        int read = await link.ReadAsync(buffer, CancellationToken.None);
+        WebSocketReceiveResult closeResult = await serverSocket.ReceiveAsync(buffer, CancellationToken.None);
+
+        // Assert
+        read.ShouldBe(0);
+        closeResult.MessageType.ShouldBe(WebSocketMessageType.Close);
+        closeResult.CloseStatus.ShouldBe(WebSocketCloseStatus.InvalidMessageType);
+    }
+
+    /// <summary>
     /// Proves a close from the peer ends the read with zero.
     /// </summary>
     /// <returns>

@@ -147,9 +147,17 @@ public sealed partial class MqttWireClient : IAsyncDisposable
 
     /// <summary>
     /// The largest packet the server accepts, from the CONNACK's Maximum Packet Size, or
-    /// <see cref="uint.MaxValue"/> when it sets none; set with <see cref="_records"/>.
+    /// <see cref="uint.MaxValue"/> when it sets none or no CONNACK has accepted the connection yet; set with
+    /// <see cref="_records"/>. It limits every packet sent after the CONNACK, acknowledgements, PINGREQ and
+    /// DISCONNECT included (MQTT 5, 3.2.2.3.6).
     /// </summary>
-    private uint _serverMaximumPacketSize;
+    private uint _serverMaximumPacketSize = uint.MaxValue;
+
+    /// <summary>
+    /// The bytes of the PUBLISH packets queued for the send lock or being written. A publish adds its size under
+    /// <see cref="_gate"/> before its packet is rented; the send path takes it off when the write ends.
+    /// </summary>
+    private long _pendingPublishBytes;
 
     /// <summary>
     /// The acknowledgement the read loop sends after the packet it has just handled; read-loop state only.

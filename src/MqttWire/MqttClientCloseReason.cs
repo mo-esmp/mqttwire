@@ -47,7 +47,8 @@ public enum MqttClientCloseReason : byte
     ConnectRefused,
 
     /// <summary>
-    /// The server sent a packet the client cannot accept; the client ended the connection.
+    /// The server sent a packet the client cannot accept, or set a Maximum Packet Size too small for a packet the
+    /// connection needs, such as an acknowledgement; the client ended the connection.
     /// </summary>
     ProtocolError,
 

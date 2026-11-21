@@ -39,4 +39,10 @@ public enum MqttRequestStatus : byte
     /// All 65,535 packet identifiers are in use; nothing was sent.
     /// </summary>
     NoFreePacketIdentifier,
+
+    /// <summary>
+    /// The publishes already queued and not yet written reach the client's limit of 1 MiB, because the link is
+    /// slower than the caller; nothing was sent. Trying again once earlier writes have ended may succeed.
+    /// </summary>
+    SendQueueFull,
 }
