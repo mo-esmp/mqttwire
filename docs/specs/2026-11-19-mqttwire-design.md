@@ -405,7 +405,11 @@ Neither the server connection nor the client calls `WebSocket` directly. Each us
 internal abstraction with five operations: wait until data is available, read into a buffer,
 write a buffer, close with a status, abort. One implementation wraps a `WebSocket`. Its
 operations return `ValueTask`, so an operation that completes at once allocates nothing, and on
-the server it must not add a noticeable object per connection.
+the server it must not add a noticeable object per connection. The wait, the read and the client's
+read loop use the pooling method builder, so an idle connection waking for data allocates
+nothing in steady state either. The client's writes are allocation-free when the send lock is
+uncontended and the write completes synchronously; a write that completes asynchronously
+(always in the browser) allocates its state machine.
 
 This keeps own WebSocket framing possible later, and it lets tests drive a connection over an
 in-memory link, byte by byte, and decide exactly when a write completes. It stays internal: a

@@ -9,7 +9,8 @@ namespace MqttWire.Microbench;
 /// client is connected in <see cref="SetupAsync"/>, so only the publish or the receive is timed. The receives and
 /// the QoS 0 publish run synchronously on the benchmark's thread; awaiting a PUBACK includes the asynchronous
 /// continuation of the request's completion, which runs on the thread pool. The Allocated column is reported for
-/// information; that the hot paths allocate nothing is asserted by the test project, not here. The class is not
+/// information; that the hot paths allocate nothing when they complete synchronously is asserted by the test
+/// project, not here; <see cref="WebSocketClientBenchmarks"/> measures a read loop that waits. The class is not
 /// sealed because BenchmarkDotNet generates a class that derives from it.
 /// </summary>
 [MemoryDiagnoser]

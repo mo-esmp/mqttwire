@@ -62,6 +62,10 @@ public sealed partial class MqttWireClient
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="qos"/> is above 2. Nothing is sent and no packet identifier is used.
     /// </exception>
+    /// <remarks>
+    /// A QoS 0 publish is allocation-free when the send lock is uncontended and the write completes synchronously;
+    /// a write that completes asynchronously (always in the browser) allocates its state machine.
+    /// </remarks>
     public ValueTask<MqttRequestResult> PublishAsync(string topic, ReadOnlyMemory<byte> payload, MqttQoS qos)
     {
         ArgumentNullException.ThrowIfNull(topic);

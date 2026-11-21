@@ -27,6 +27,11 @@ public sealed partial class MqttWireClient
     /// because the end had begun, or the write failed; a failed write ends the connection with
     /// <see cref="MqttClientCloseReason.WriteFailed"/> and aborts the link.
     /// </returns>
+    /// <remarks>
+    /// Allocation-free when the send lock is uncontended and the write completes synchronously; a write that
+    /// completes asynchronously (always in the browser) allocates its state machine, as does a wait for a contended
+    /// send lock. Most callers discard the returned task, so a pooling builder would not help here.
+    /// </remarks>
     internal async ValueTask<bool> SendAsync(byte[] packet, int length, bool isDisconnect)
     {
         await _sendLock.WaitAsync().ConfigureAwait(false);

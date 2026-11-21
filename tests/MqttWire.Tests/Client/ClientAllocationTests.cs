@@ -13,7 +13,9 @@ namespace MqttWire.Tests.Client;
 /// inline, its writes complete at once, so the send lock is never contended (a contended
 /// <see cref="SemaphoreSlim.WaitAsync()"/> allocates by design), and no request completion is awaited. Everything
 /// the measured work touches is taken before the first reading, the link too (<see cref="ClientHarness.Link"/>
-/// copies the connector's list on every call). The tests run alone, not in parallel with others.
+/// copies the connector's list on every call). The tests run alone, not in parallel with others. A write that
+/// completes asynchronously allocates its state machine and is not covered here; a read loop that waits and wakes
+/// over a real WebSocket is measured by <c>WebSocketClientBenchmarks</c> in the microbenchmarks.
 /// </summary>
 [Collection(nameof(ClientAllocationTests))]
 [CollectionDefinition(nameof(ClientAllocationTests), DisableParallelization = true)]

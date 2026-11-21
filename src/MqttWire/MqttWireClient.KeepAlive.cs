@@ -107,7 +107,8 @@ public sealed partial class MqttWireClient
     /// <remarks>
     /// Runs on the timer's thread: it never blocks and holds the lock only to read the records. The PINGREQ goes
     /// through the send lock in turn with every other packet, in a buffer rented from the pool; in steady state the
-    /// tick allocates nothing.
+    /// tick allocates nothing when the send lock is uncontended and the write completes synchronously. A write that
+    /// completes asynchronously (always in the browser) allocates its state machine.
     /// </remarks>
     private void OnKeepAliveTick()
     {
