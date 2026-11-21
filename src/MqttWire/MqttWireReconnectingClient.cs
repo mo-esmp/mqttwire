@@ -299,14 +299,16 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
     /// <paramref name="topicFilter"/> is <see langword="null"/>.
     /// </exception>
     /// <exception cref="ArgumentException">
-    /// When connected: <paramref name="topicFilter"/> is not a valid topic filter; nothing is sent.
+    /// <paramref name="topicFilter"/> is not a valid topic filter, or cannot be encoded: it is empty, misplaces a
+    /// wildcard, holds U+0000, has an unpaired surrogate, or is over 65,535 UTF-8 bytes. Thrown whether connected
+    /// or not; nothing is sent.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="qos"/> is above 2.
     /// </exception>
     /// <exception cref="OperationCanceledException">
-    /// <paramref name="cancellationToken"/> was cancelled before the call, or while the SUBACK was awaited; the
-    /// subscription is then not remembered.
+    /// <paramref name="cancellationToken"/> was cancelled before the call (when connected, the task returned
+    /// fails with it), or while the SUBACK was awaited; the subscription is then not remembered.
     /// </exception>
     public ValueTask<MqttRequestResult> SubscribeAsync(string topicFilter, MqttQoS qos, CancellationToken cancellationToken = default)
     {
@@ -317,9 +319,11 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
             throw new ArgumentOutOfRangeException(nameof(qos), qos, "The QoS must be 0, 1 or 2.");
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
         if (_current is not MqttWireClient client)
         {
+            // Checked here too, so that a caller's bug does not depend on the network.
+            TopicChecks.ThrowIfInvalidTopicFilter(topicFilter, ArrayPool<byte>.Shared);
+            cancellationToken.ThrowIfCancellationRequested();
             return NotConnected();
         }
 
@@ -345,7 +349,9 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
     /// <paramref name="topicFilter"/> is <see langword="null"/>.
     /// </exception>
     /// <exception cref="ArgumentException">
-    /// When connected: <paramref name="topicFilter"/> is not a valid topic filter; nothing is sent.
+    /// <paramref name="topicFilter"/> is not a valid topic filter, or cannot be encoded, as
+    /// <see cref="SubscribeAsync"/> checks it. Thrown whether connected or not; nothing is sent and nothing is
+    /// forgotten.
     /// </exception>
     /// <exception cref="OperationCanceledException">
     /// <paramref name="cancellationToken"/> was cancelled before the call (nothing is forgotten), or while the
@@ -354,6 +360,7 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
     public ValueTask<MqttRequestResult> UnsubscribeAsync(string topicFilter, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(topicFilter);
+        TopicChecks.ThrowIfInvalidTopicFilter(topicFilter, ArrayPool<byte>.Shared);
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
@@ -385,7 +392,8 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
     /// <paramref name="topic"/> is <see langword="null"/>.
     /// </exception>
     /// <exception cref="ArgumentException">
-    /// When connected: <paramref name="topic"/> is not a topic that can be sent; nothing is sent.
+    /// <paramref name="topic"/> is empty, holds <c>+</c>, <c>#</c> or U+0000, has an unpaired surrogate, or is over
+    /// 65,535 UTF-8 bytes. Thrown whether connected or not; nothing is sent.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="qos"/> is above 2.
@@ -399,7 +407,14 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
             throw new ArgumentOutOfRangeException(nameof(qos), qos, "The QoS must be 0, 1 or 2.");
         }
 
-        return _current is MqttWireClient client ? client.PublishAsync(topic, payload, qos) : NotConnected();
+        if (_current is MqttWireClient client)
+        {
+            return client.PublishAsync(topic, payload, qos);
+        }
+
+        // Checked here too, so that a caller's bug does not depend on the network.
+        TopicChecks.ThrowIfInvalidTopicName(topic, ArrayPool<byte>.Shared);
+        return NotConnected();
     }
 
     /// <summary>

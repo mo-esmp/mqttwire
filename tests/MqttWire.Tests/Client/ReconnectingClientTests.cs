@@ -23,6 +23,37 @@ public sealed class ReconnectingClientTests
     private static readonly TimeSpan s_initial = TimeSpan.FromMilliseconds(500);
 
     /// <summary>
+    /// Topics a caller cannot publish to: empty, a single-level wildcard, a multi-level wildcard, U+0000, an
+    /// unpaired surrogate, 65,536 UTF-8 bytes, and a wildcard in a topic too long to encode on the stack.
+    /// </summary>
+    private static readonly string[] s_topicsThatCannotBeSent =
+    [
+        string.Empty,
+        "a/+",
+        "a/#",
+        "a\0b",
+        "a\uD800",
+        new('a', 65_536),
+        new string('a', 300) + "/+",
+    ];
+
+    /// <summary>
+    /// Topic filters a caller cannot subscribe to: empty, a misplaced multi-level wildcard, a misplaced
+    /// single-level wildcard, U+0000, an unpaired surrogate, 65,536 UTF-8 bytes, and a misplaced wildcard in a
+    /// filter too long to encode on the stack.
+    /// </summary>
+    private static readonly string[] s_filtersThatCannotBeSent =
+    [
+        string.Empty,
+        "a/#/b",
+        "a+",
+        "a\0",
+        "a\uD800",
+        new('a', 65_536),
+        new string('a', 300) + "+",
+    ];
+
+    /// <summary>
     /// Proves the first attempt is made at once, and that <see cref="MqttWireReconnectingClient.StartAsync"/>
     /// completes with the server's CONNACK once <c>OnConnected</c> has been called for the first connection.
     /// </summary>
@@ -444,6 +475,102 @@ public sealed class ReconnectingClientTests
         second.Deliver(ClientPackets.ConnAckAccepted);
         await harness.Log.WhenAsync("connected again");
         ReconnectHarness.Packets(second.TakeWritten()).ShouldBe([ClientPackets.Connect]);
+        await harness.StopAsync();
+    }
+
+    /// <summary>
+    /// Proves a topic that cannot be published to throws <see cref="ArgumentException"/> for the parameter
+    /// <c>topic</c> whatever the network does: before the start, during a back-off and while connected.
+    /// </summary>
+    /// <param name="index">
+    /// The index of the topic in <see cref="s_topicsThatCannotBeSent"/>.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    public async Task PublishAsync_TopicCannotBeSent_ThrowsConnectedOrNot(int index)
+    {
+        // Arrange
+        ReconnectHarness harness = ReconnectHarness.Create();
+        string topic = s_topicsThatCannotBeSent[index];
+        harness.Links.FailNext(new WebSocketException("unreachable"));
+
+        // Act
+        Exception? beforeStart = Record.Exception(() => { _ = harness.Client.PublishAsync(topic, s_hi, MqttQoS.AtLeastOnce); });
+        Task<MqttConnectAck> start = harness.Client.StartAsync();
+        await harness.Clock.WhenTimerAsync(s_initial);
+        Exception? duringBackoff = Record.Exception(() => { _ = harness.Client.PublishAsync(topic, s_hi, MqttQoS.AtLeastOnce); });
+        harness.Time.Advance(s_initial);
+        MemoryLink link = await harness.LinkAsync(2);
+        link.Deliver(ClientPackets.ConnAckAccepted);
+        await start.WaitAsync(ReconnectHarness.Timeout);
+        Exception? connected = Record.Exception(() => { _ = harness.Client.PublishAsync(topic, s_hi, MqttQoS.AtLeastOnce); });
+
+        // Assert
+        beforeStart.ShouldBeOfType<ArgumentException>().ParamName.ShouldBe("topic");
+        duringBackoff.ShouldBeOfType<ArgumentException>().ParamName.ShouldBe("topic");
+        connected.ShouldBeOfType<ArgumentException>().ParamName.ShouldBe("topic");
+        ReconnectHarness.Packets(link.TakeWritten()).ShouldBe([ClientPackets.Connect]);
+        await harness.StopAsync();
+    }
+
+    /// <summary>
+    /// Proves a topic filter that cannot be sent throws <see cref="ArgumentException"/> for the parameter
+    /// <c>topicFilter</c> from both subscribe and unsubscribe whatever the network does: before the start, during a
+    /// back-off and while connected.
+    /// </summary>
+    /// <param name="index">
+    /// The index of the filter in <see cref="s_filtersThatCannotBeSent"/>.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    public async Task SubscribeAsync_FilterCannotBeSent_ThrowsConnectedOrNot(int index)
+    {
+        // Arrange
+        ReconnectHarness harness = ReconnectHarness.Create();
+        string filter = s_filtersThatCannotBeSent[index];
+        harness.Links.FailNext(new WebSocketException("unreachable"));
+        List<Exception?> exceptions = [];
+
+        // Act
+        exceptions.Add(Record.Exception(() => { _ = harness.Client.SubscribeAsync(filter, MqttQoS.AtLeastOnce); }));
+        exceptions.Add(Record.Exception(() => { _ = harness.Client.UnsubscribeAsync(filter); }));
+        Task<MqttConnectAck> start = harness.Client.StartAsync();
+        await harness.Clock.WhenTimerAsync(s_initial);
+        exceptions.Add(Record.Exception(() => { _ = harness.Client.SubscribeAsync(filter, MqttQoS.AtLeastOnce); }));
+        exceptions.Add(Record.Exception(() => { _ = harness.Client.UnsubscribeAsync(filter); }));
+        harness.Time.Advance(s_initial);
+        MemoryLink link = await harness.LinkAsync(2);
+        link.Deliver(ClientPackets.ConnAckAccepted);
+        await start.WaitAsync(ReconnectHarness.Timeout);
+        exceptions.Add(Record.Exception(() => { _ = harness.Client.SubscribeAsync(filter, MqttQoS.AtLeastOnce); }));
+        exceptions.Add(Record.Exception(() => { _ = harness.Client.UnsubscribeAsync(filter); }));
+
+        // Assert
+        exceptions.Count.ShouldBe(6);
+        foreach (Exception? exception in exceptions)
+        {
+            exception.ShouldBeOfType<ArgumentException>().ParamName.ShouldBe("topicFilter");
+        }
+
+        ReconnectHarness.Packets(link.TakeWritten()).ShouldBe([ClientPackets.Connect]);
         await harness.StopAsync();
     }
 

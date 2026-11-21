@@ -34,6 +34,11 @@ public sealed class MqttWireReconnectOptions
     /// Gets the callback for each connection made, after the remembered subscriptions were made again, or
     /// <see langword="null"/>.
     /// </summary>
+    /// <remarks>
+    /// It must not wait synchronously for a request to the reconnecting client, such as
+    /// <c>PublishAsync(…).GetAwaiter().GetResult()</c>: the callbacks run one at a time, so no message is
+    /// delivered, and no acknowledgement read, while it runs, and the wait may never end.
+    /// </remarks>
     public Action<MqttConnectedInfo>? OnConnected { get; init; }
 
     /// <summary>
@@ -48,6 +53,11 @@ public sealed class MqttWireReconnectOptions
     /// connection, with the topic filter and the outcome, or <see langword="null"/>. The subscription is no longer
     /// remembered.
     /// </summary>
+    /// <remarks>
+    /// It must not wait synchronously for a request to the reconnecting client, such as
+    /// <c>PublishAsync(…).GetAwaiter().GetResult()</c>: the callbacks run one at a time, so no message is
+    /// delivered, and no acknowledgement read, while it runs, and the wait may never end.
+    /// </remarks>
     public Action<string, MqttRequestResult>? OnSubscriptionRefused { get; init; }
 
     /// <summary>
@@ -64,6 +74,11 @@ public sealed class MqttWireReconnectOptions
     /// <see cref="MqttClientCloseReason.MessageHandlerThrew"/> with the exception, and the reconnecting client
     /// connects again.
     /// </summary>
+    /// <remarks>
+    /// It must not wait synchronously for a request to the reconnecting client, such as
+    /// <c>PublishAsync(…).GetAwaiter().GetResult()</c>: the callbacks run one at a time, so no message is
+    /// delivered, and no acknowledgement read, while it runs, and the wait may never end.
+    /// </remarks>
     public MqttMessageHandler? OnMessage { get; init; }
 
     /// <summary>

@@ -91,30 +91,6 @@ public sealed partial class MqttWireClient
     }
 
     /// <summary>
-    /// Measures a topic filter as UTF-8 and checks that MQTT can carry it as a string.
-    /// </summary>
-    /// <param name="topicFilter">
-    /// The topic filter.
-    /// </param>
-    /// <returns>
-    /// The number of UTF-8 bytes, without the length prefix.
-    /// </returns>
-    /// <exception cref="ArgumentException">
-    /// The filter is over 65,535 UTF-8 bytes, contains U+0000 or has an unpaired surrogate.
-    /// </exception>
-    private static int MeasureFilter(string topicFilter)
-    {
-        try
-        {
-            return FieldSize.Utf8String(topicFilter) - FieldSize.LengthPrefix;
-        }
-        catch (ArgumentException ex)
-        {
-            throw new ArgumentException($"The topic filter cannot be sent: {ex.Message}", nameof(topicFilter), ex);
-        }
-    }
-
-    /// <summary>
     /// Checks and encodes a topic filter, then sends it in a SUBSCRIBE or UNSUBSCRIBE and waits for the answer.
     /// </summary>
     /// <param name="topicFilter">
@@ -137,16 +113,13 @@ public sealed partial class MqttWireClient
     /// </exception>
     private ValueTask<MqttRequestResult> RequestAsync(string topicFilter, MqttQoS qos, RecordKind kind, CancellationToken cancellationToken)
     {
-        int filterLength = MeasureFilter(topicFilter);
-        byte[]? rentedFilter = filterLength <= StackTopicBytes ? null : _pool.Rent(filterLength);
-        Span<byte> utf8Filter = rentedFilter is null ? stackalloc byte[StackTopicBytes] : rentedFilter;
+        int filterLength = TopicChecks.MeasureTopicFilter(topicFilter);
+        byte[]? rentedFilter = filterLength <= TopicChecks.StackTopicBytes ? null : _pool.Rent(filterLength);
+        Span<byte> utf8Filter = rentedFilter is null ? stackalloc byte[TopicChecks.StackTopicBytes] : rentedFilter;
         try
         {
             utf8Filter = utf8Filter[..FieldSize.StrictUtf8.GetBytes(topicFilter, utf8Filter)];
-            if (!Topics.IsValidFilter(utf8Filter))
-            {
-                throw new ArgumentException("The topic filter cannot be sent: it is not a valid topic filter.", nameof(topicFilter));
-            }
+            TopicChecks.CheckTopicFilter(utf8Filter);
 
             // After the checks, before anything is written or any identifier is used.
             if (cancellationToken.IsCancellationRequested)

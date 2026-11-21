@@ -10,12 +10,6 @@ namespace MqttWire;
 public sealed partial class MqttWireClient
 {
     /// <summary>
-    /// The longest topic, in UTF-8 bytes, that is encoded on the stack; a longer one is encoded into a rented
-    /// buffer.
-    /// </summary>
-    private const int StackTopicBytes = 256;
-
-    /// <summary>
     /// The size of a PUBLISH's packet identifier, present at QoS 1 and 2.
     /// </summary>
     private const int PacketIdentifierBytes = 2;
@@ -77,16 +71,13 @@ public sealed partial class MqttWireClient
             throw new ArgumentOutOfRangeException(nameof(qos), qos, "The QoS must be 0, 1 or 2.");
         }
 
-        int topicLength = MeasureTopic(topic);
-        byte[]? rentedTopic = topicLength <= StackTopicBytes ? null : _pool.Rent(topicLength);
-        Span<byte> utf8Topic = rentedTopic is null ? stackalloc byte[StackTopicBytes] : rentedTopic;
+        int topicLength = TopicChecks.MeasureTopicName(topic);
+        byte[]? rentedTopic = topicLength <= TopicChecks.StackTopicBytes ? null : _pool.Rent(topicLength);
+        Span<byte> utf8Topic = rentedTopic is null ? stackalloc byte[TopicChecks.StackTopicBytes] : rentedTopic;
         try
         {
             utf8Topic = utf8Topic[..FieldSize.StrictUtf8.GetBytes(topic, utf8Topic)];
-            if (!Topics.IsValidName(utf8Topic))
-            {
-                throw new ArgumentException("The topic cannot be sent: it is empty or holds the wildcard + or #.", nameof(topic));
-            }
+            TopicChecks.CheckTopicName(utf8Topic);
 
             return Publish(utf8Topic, payload.Span, qos);
         }
@@ -96,30 +87,6 @@ public sealed partial class MqttWireClient
             {
                 _pool.Return(rentedTopic);
             }
-        }
-    }
-
-    /// <summary>
-    /// Measures a topic as UTF-8 and checks that MQTT can carry it as a string.
-    /// </summary>
-    /// <param name="topic">
-    /// The topic.
-    /// </param>
-    /// <returns>
-    /// The number of UTF-8 bytes, without the length prefix.
-    /// </returns>
-    /// <exception cref="ArgumentException">
-    /// The topic is over 65,535 UTF-8 bytes, contains U+0000 or has an unpaired surrogate.
-    /// </exception>
-    private static int MeasureTopic(string topic)
-    {
-        try
-        {
-            return FieldSize.Utf8String(topic) - FieldSize.LengthPrefix;
-        }
-        catch (ArgumentException ex)
-        {
-            throw new ArgumentException($"The topic cannot be sent: {ex.Message}", nameof(topic), ex);
         }
     }
 
