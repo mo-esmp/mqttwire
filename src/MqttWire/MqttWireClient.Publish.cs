@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using MqttWire.Client;
 using MqttWire.Codec;
 
@@ -66,7 +66,7 @@ public sealed partial class MqttWireClient
     /// A QoS 0 publish is allocation-free when the send lock is uncontended and the write completes synchronously;
     /// a write that completes asynchronously (always in the browser) allocates its state machine.
     /// </remarks>
-    public ValueTask<MqttRequestResult> PublishAsync(string topic, ReadOnlyMemory<byte> payload, MqttQoS qos)
+    public async ValueTask<MqttRequestResult> PublishAsync(string topic, ReadOnlyMemory<byte> payload, MqttQoS qos)
     {
         ArgumentNullException.ThrowIfNull(topic);
         if (qos > MqttQoS.ExactlyOnce)
@@ -77,13 +77,14 @@ public sealed partial class MqttWireClient
 
         int topicLength = TopicChecks.MeasureTopicName(topic);
         byte[]? rentedTopic = topicLength <= TopicChecks.StackTopicBytes ? null : _pool.Rent(topicLength);
-        Span<byte> utf8Topic = rentedTopic is null ? stackalloc byte[TopicChecks.StackTopicBytes] : rentedTopic;
+        Span<byte> utf8Topic = rentedTopic ?? stackalloc byte[TopicChecks.StackTopicBytes];
+
         try
         {
             utf8Topic = utf8Topic[..FieldSize.StrictUtf8.GetBytes(topic, utf8Topic)];
             TopicChecks.CheckTopicName(utf8Topic);
 
-            return Publish(utf8Topic, payload.Span, qos);
+            return await Publish(utf8Topic, payload.Span, qos).ConfigureAwait(false);
         }
         finally
         {
@@ -113,8 +114,8 @@ public sealed partial class MqttWireClient
     private static long MeasurePublish(int topicLength, int payloadLength, MqttQoS qos)
     {
         long remaining = FieldSize.LengthPrefix + topicLength
-            + (qos == MqttQoS.AtMostOnce ? 0 : PacketIdentifierBytes)
-            + NoPropertiesBytes + (long)payloadLength;
+                                                + (qos == MqttQoS.AtMostOnce ? 0 : PacketIdentifierBytes)
+                                                + NoPropertiesBytes + (long)payloadLength;
         return remaining > VariableByteInteger.MaxValue
             ? long.MaxValue
             : PacketHeader.GetLength((int)remaining) + remaining;
@@ -177,7 +178,7 @@ public sealed partial class MqttWireClient
         ushort packetIdentifier = 0;
         lock (_gate)
         {
-            if (_phase != Phase.Connected || _records is not OutgoingRecords records)
+            if (_phase != Phase.Connected || _records is not { } records)
             {
                 return FailPublish(MqttRequestStatus.NotConnected);
             }
@@ -197,8 +198,11 @@ public sealed partial class MqttWireClient
                 // The record is in place, under the lock and while connected, before the packet reaches the send
                 // lock (6.9): an acknowledgement finds it, and the end of the connection completes it.
                 completion = records.RentCompletion();
-                RecordKind kind = qos == MqttQoS.AtLeastOnce ? RecordKind.PublishQoS1 : RecordKind.PublishQoS2AwaitingPubRec;
-                if (!records.TryAdd(kind, _time.GetTimestamp(), completion, out OutgoingRecord? record, out MqttRequestStatus failure))
+                RecordKind kind = qos == MqttQoS.AtLeastOnce
+                    ? RecordKind.PublishQoS1
+                    : RecordKind.PublishQoS2AwaitingPubRec;
+                if (!records.TryAdd(kind, _time.GetTimestamp(), completion, out OutgoingRecord? record,
+                        out MqttRequestStatus failure))
                 {
                     // Never handed out, so it goes straight back for the next publish.
                     records.ReturnCompletion(completion);
@@ -221,7 +225,8 @@ public sealed partial class MqttWireClient
         if (completion is null)
         {
             // QoS 0 ends when the message is handed over.
-            return new ValueTask<MqttRequestResult>(new MqttRequestResult(MqttRequestStatus.Completed, MqttReasonCode.Success));
+            return new ValueTask<MqttRequestResult>(new MqttRequestResult(MqttRequestStatus.Completed,
+                MqttReasonCode.Success));
         }
 
         return completion.Task;
@@ -256,7 +261,7 @@ public sealed partial class MqttWireClient
         lock (_gate)
         {
             // There are no records before an accepting CONNACK, so no acknowledgement can be due.
-            if (_records is not OutgoingRecords records)
+            if (_records is not { } records)
             {
                 disconnect = MqttReasonCode.ProtocolError;
                 return EndStep.DisconnectAndClose;
@@ -278,7 +283,7 @@ public sealed partial class MqttWireClient
             if (ack.Type == PacketType.PubRec && (byte)ack.ReasonCode < FirstFailureCode)
             {
                 // Released with PUBREL; the identifier and the publish slot stay in use until PUBCOMP (MQTT 4.3.3).
-                records.Advance(record, RecordKind.PublishQoS2AwaitingPubComp, _time.GetTimestamp());
+                OutgoingRecords.Advance(record, RecordKind.PublishQoS2AwaitingPubComp, _time.GetTimestamp());
                 return RecordReply(PacketType.PubRel, ack.PacketIdentifier, MqttReasonCode.Success);
             }
 

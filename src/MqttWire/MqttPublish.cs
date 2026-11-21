@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Text;
 
 namespace MqttWire;
@@ -58,5 +58,5 @@ public readonly ref struct MqttPublish
     /// <returns>
     /// The topic.
     /// </returns>
-    public string GetTopic() => Encoding.UTF8.GetString(Topic);
+    public string GetTopic() => Encoding.UTF8.GetString(bytes: Topic);
 }

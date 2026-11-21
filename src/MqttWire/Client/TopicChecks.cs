@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using MqttWire.Codec;
 
 namespace MqttWire.Client;
@@ -32,11 +32,12 @@ internal static class TopicChecks
     {
         try
         {
-            return FieldSize.Utf8String(topic) - FieldSize.LengthPrefix;
+            return FieldSize.Utf8String(value: topic) - FieldSize.LengthPrefix;
         }
         catch (ArgumentException ex)
         {
-            throw new ArgumentException($"The topic cannot be sent: {ex.Message}", nameof(topic), ex);
+            throw new ArgumentException(message: $"The topic cannot be sent: {ex.Message}", paramName: nameof(topic),
+                innerException: ex);
         }
     }
 
@@ -51,9 +52,10 @@ internal static class TopicChecks
     /// </exception>
     public static void CheckTopicName(ReadOnlySpan<byte> topic)
     {
-        if (!Topics.IsValidName(topic))
+        if (!Topics.IsValidName(utf8: topic))
         {
-            throw new ArgumentException("The topic cannot be sent: it is empty or holds the wildcard + or #.", nameof(topic));
+            throw new ArgumentException(message: "The topic cannot be sent: it is empty or holds the wildcard + or #.",
+                paramName: nameof(topic));
         }
     }
 
@@ -73,11 +75,12 @@ internal static class TopicChecks
     {
         try
         {
-            return FieldSize.Utf8String(topicFilter) - FieldSize.LengthPrefix;
+            return FieldSize.Utf8String(value: topicFilter) - FieldSize.LengthPrefix;
         }
         catch (ArgumentException ex)
         {
-            throw new ArgumentException($"The topic filter cannot be sent: {ex.Message}", nameof(topicFilter), ex);
+            throw new ArgumentException(message: $"The topic filter cannot be sent: {ex.Message}",
+                paramName: nameof(topicFilter), innerException: ex);
         }
     }
 
@@ -92,9 +95,10 @@ internal static class TopicChecks
     /// </exception>
     public static void CheckTopicFilter(ReadOnlySpan<byte> topicFilter)
     {
-        if (!Topics.IsValidFilter(topicFilter))
+        if (!Topics.IsValidFilter(utf8: topicFilter))
         {
-            throw new ArgumentException("The topic filter cannot be sent: it is not a valid topic filter.", nameof(topicFilter));
+            throw new ArgumentException(message: "The topic filter cannot be sent: it is not a valid topic filter.",
+                paramName: nameof(topicFilter));
         }
     }
 
@@ -114,18 +118,19 @@ internal static class TopicChecks
     /// </exception>
     public static void ThrowIfInvalidTopicName(string topic, ArrayPool<byte> pool)
     {
-        int length = MeasureTopicName(topic);
-        byte[]? rented = length <= StackTopicBytes ? null : pool.Rent(length);
-        Span<byte> utf8 = rented is null ? stackalloc byte[StackTopicBytes] : rented;
+        int length = MeasureTopicName(topic: topic);
+        byte[]? rented = length <= StackTopicBytes ? null : pool.Rent(minimumLength: length);
+        Span<byte> utf8 = rented ?? stackalloc byte[StackTopicBytes];
+
         try
         {
-            CheckTopicName(utf8[..FieldSize.StrictUtf8.GetBytes(topic, utf8)]);
+            CheckTopicName(topic: utf8[..FieldSize.StrictUtf8.GetBytes(chars: topic, bytes: utf8)]);
         }
         finally
         {
             if (rented is not null)
             {
-                pool.Return(rented);
+                pool.Return(array: rented);
             }
         }
     }
@@ -146,18 +151,19 @@ internal static class TopicChecks
     /// </exception>
     public static void ThrowIfInvalidTopicFilter(string topicFilter, ArrayPool<byte> pool)
     {
-        int length = MeasureTopicFilter(topicFilter);
-        byte[]? rented = length <= StackTopicBytes ? null : pool.Rent(length);
-        Span<byte> utf8 = rented is null ? stackalloc byte[StackTopicBytes] : rented;
+        int length = MeasureTopicFilter(topicFilter: topicFilter);
+        byte[]? rented = length <= StackTopicBytes ? null : pool.Rent(minimumLength: length);
+        Span<byte> utf8 = rented ?? stackalloc byte[StackTopicBytes];
+
         try
         {
-            CheckTopicFilter(utf8[..FieldSize.StrictUtf8.GetBytes(topicFilter, utf8)]);
+            CheckTopicFilter(topicFilter: utf8[..FieldSize.StrictUtf8.GetBytes(chars: topicFilter, bytes: utf8)]);
         }
         finally
         {
             if (rented is not null)
             {
-                pool.Return(rented);
+                pool.Return(array: rented);
             }
         }
     }

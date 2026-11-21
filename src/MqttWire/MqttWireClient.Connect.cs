@@ -1,4 +1,4 @@
-using MqttWire.Client;
+﻿using MqttWire.Client;
 using MqttWire.Codec;
 using MqttWire.Link;
 
@@ -13,7 +13,8 @@ public sealed partial class MqttWireClient
     /// Ends a connect that is still waiting when its deadline or the caller's token fires. The state is always the
     /// client that registered it.
     /// </summary>
-    private static readonly Action<object?> s_connectCanceled = static state => ((MqttWireClient)state!).OnConnectCanceled();
+    private static readonly Action<object?> s_connectCanceled =
+        static state => ((MqttWireClient)state!).OnConnectCanceled();
 
     /// <summary>
     /// Takes the link for this connection, unless the client was disposed while it opened.
@@ -63,10 +64,12 @@ public sealed partial class MqttWireClient
     /// <exception cref="OperationCanceledException">
     /// The caller's token was cancelled before the connect was decided.
     /// </exception>
-    private async Task<MqttConnectAck> ConnectCoreAsync(CancellationToken disposing, CancellationToken cancellationToken)
+    private async Task<MqttConnectAck> ConnectCoreAsync(CancellationToken disposing,
+        CancellationToken cancellationToken)
     {
         using CancellationTokenSource deadline = new(ClientLimits.ConnectTimeout, _time);
-        using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token, disposing);
+        using CancellationTokenSource linked =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token, disposing);
         LinkConnectResult opened;
         try
         {
@@ -77,7 +80,8 @@ public sealed partial class MqttWireClient
             SetClosed();
             ThrowIfDisposed();
             cancellationToken.ThrowIfCancellationRequested();
-            return new MqttConnectAck(MqttClientCloseReason.ConnectTimedOut, MqttReasonCode.UnspecifiedError, null, null, null);
+            return new MqttConnectAck(MqttClientCloseReason.ConnectTimedOut, MqttReasonCode.UnspecifiedError, null,
+                null, null);
         }
         catch
         {
@@ -85,11 +89,12 @@ public sealed partial class MqttWireClient
             throw;
         }
 
-        if (opened.Link is not IMqttLink link)
+        if (opened.Link is not { } link)
         {
             SetClosed();
             ThrowIfDisposed();
-            return new MqttConnectAck(MqttClientCloseReason.Unreachable, MqttReasonCode.UnspecifiedError, null, null, opened.Error);
+            return new MqttConnectAck(MqttClientCloseReason.Unreachable, MqttReasonCode.UnspecifiedError, null, null,
+                opened.Error);
         }
 
         MqttConnectAck ack = await HandshakeAsync(link, linked.Token).ConfigureAwait(false);
@@ -202,7 +207,9 @@ public sealed partial class MqttWireClient
         lock (_gate)
         {
             if (_phase != Phase.Connecting
-                || !TryRecordEndLocked(new MqttClientCloseInfo(MqttClientCloseReason.ConnectTimedOut, MqttReasonCode.Success, null, null), EndMode.Abort))
+                || !TryRecordEndLocked(
+                    new MqttClientCloseInfo(MqttClientCloseReason.ConnectTimedOut, MqttReasonCode.Success, null, null),
+                    EndMode.Abort))
             {
                 return;
             }
@@ -254,8 +261,10 @@ public sealed partial class MqttWireClient
                 connAck.ReasonCode,
                 reasonString,
                 ReadUserProperties(connAck.Properties),
-                null);
-            return TryBeginEnd(new MqttClientCloseInfo(MqttClientCloseReason.ConnectRefused, connAck.ReasonCode, reasonString, null), EndMode.Close)
+                exception: null);
+            return TryBeginEnd(
+                new MqttClientCloseInfo(MqttClientCloseReason.ConnectRefused, connAck.ReasonCode, reasonString, null),
+                EndMode.Close)
                 ? EndStep.Close
                 : EndStep.None;
         }
@@ -266,9 +275,11 @@ public sealed partial class MqttWireClient
             return EndStep.DisconnectAndClose;
         }
 
-        OutgoingRecords records = ReadServerLimits(connAck.Properties, out MqttQoS maximumQoS, out uint maximumPacketSize);
+        OutgoingRecords records =
+            ReadServerLimits(connAck.Properties, out MqttQoS maximumQoS, out uint maximumPacketSize);
         TimeSpan keepAlive = ReadKeepAliveInterval(connAck.Properties);
-        MqttConnectAck ack = new(null, MqttReasonCode.Success, ReadReasonString(connAck.Properties), ReadUserProperties(connAck.Properties), null);
+        MqttConnectAck ack = new(failure: null, MqttReasonCode.Success, ReadReasonString(connAck.Properties),
+            ReadUserProperties(connAck.Properties), exception: null);
         lock (_gate)
         {
             if (_phase != Phase.Connecting)
@@ -308,13 +319,15 @@ public sealed partial class MqttWireClient
     /// The connection's outgoing records, limited to the server's Receive Maximum and never more than 1,024
     /// publishes in flight.
     /// </returns>
-    private static OutgoingRecords ReadServerLimits(in PropertyBlock properties, out MqttQoS maximumQoS, out uint maximumPacketSize)
+    private static OutgoingRecords ReadServerLimits(in PropertyBlock properties, out MqttQoS maximumQoS,
+        out uint maximumPacketSize)
     {
         int publishLimit = properties.TryGetInteger(PropertyId.ReceiveMaximum, out uint receiveMaximum)
             ? (int)Math.Min(receiveMaximum, ClientLimits.MaxPublishesInFlight)
             : ClientLimits.MaxPublishesInFlight;
         maximumQoS = properties.TryGetInteger(PropertyId.MaximumQoS, out uint qos) ? (MqttQoS)qos : MqttQoS.ExactlyOnce;
-        maximumPacketSize = properties.TryGetInteger(PropertyId.MaximumPacketSize, out uint size) ? size : uint.MaxValue;
+        maximumPacketSize =
+            properties.TryGetInteger(PropertyId.MaximumPacketSize, out uint size) ? size : uint.MaxValue;
         return new OutgoingRecords(publishLimit);
     }
 
@@ -336,7 +349,7 @@ public sealed partial class MqttWireClient
         }
 
         TaskCompletionSource<MqttConnectAck>? result = _connectResult;
-        if (result is null || result.Task.IsCompleted)
+        if (result?.Task.IsCompleted != false)
         {
             return;
         }
@@ -355,7 +368,8 @@ public sealed partial class MqttWireClient
                 break;
             default:
                 // The link ended, or a read or the CONNECT's write failed, before any CONNACK.
-                result.TrySetResult(new MqttConnectAck(MqttClientCloseReason.Unreachable, MqttReasonCode.UnspecifiedError, null, null, info.Exception));
+                result.TrySetResult(new MqttConnectAck(MqttClientCloseReason.Unreachable,
+                    MqttReasonCode.UnspecifiedError, null, null, info.Exception));
                 break;
         }
     }

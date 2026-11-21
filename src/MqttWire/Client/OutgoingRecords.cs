@@ -1,4 +1,4 @@
-using System.Diagnostics.CodeAnalysis;
+﻿using System.Diagnostics.CodeAnalysis;
 
 namespace MqttWire.Client;
 
@@ -80,13 +80,13 @@ internal sealed class OutgoingRecords(int publishLimit)
     {
         lock (_completionGate)
         {
-            if (_completionPool.TryPop(out RequestCompletion? completion))
+            if (_completionPool.TryPop(result: out RequestCompletion? completion))
             {
                 return completion;
             }
         }
 
-        return new RequestCompletion(this);
+        return new RequestCompletion(owner: this);
     }
 
     /// <summary>
@@ -99,7 +99,7 @@ internal sealed class OutgoingRecords(int publishLimit)
     {
         lock (_completionGate)
         {
-            _completionPool.Push(completion);
+            _completionPool.Push(item: completion);
         }
     }
 
@@ -129,7 +129,7 @@ internal sealed class OutgoingRecords(int publishLimit)
         RecordKind kind,
         long now,
         RequestCompletion completion,
-        [NotNullWhen(true)] out OutgoingRecord? record,
+        [NotNullWhen(returnValue: true)] out OutgoingRecord? record,
         out MqttRequestStatus failure)
     {
         record = null;
@@ -151,11 +151,10 @@ internal sealed class OutgoingRecords(int publishLimit)
         do
         {
             identifier = identifier == ushort.MaxValue ? (ushort)1 : (ushort)(identifier + 1);
-        }
-        while (_records.ContainsKey(identifier));
+        } while (_records.ContainsKey(key: identifier));
 
         _lastIdentifier = identifier;
-        if (!_recordPool.TryPop(out record))
+        if (!_recordPool.TryPop(result: out record))
         {
             record = new OutgoingRecord();
         }
@@ -164,7 +163,7 @@ internal sealed class OutgoingRecords(int publishLimit)
         record.Kind = kind;
         record.PhaseStartedAt = now;
         record.Completion = completion;
-        _records.Add(identifier, record);
+        _records.Add(key: identifier, value: record);
         if (isPublish)
         {
             PublishesInFlight++;
@@ -185,8 +184,47 @@ internal sealed class OutgoingRecords(int publishLimit)
     /// <returns>
     /// <see langword="false"/> when no request is waiting under that identifier.
     /// </returns>
-    public bool TryGet(ushort packetIdentifier, [NotNullWhen(true)] out OutgoingRecord? record)
-        => _records.TryGetValue(packetIdentifier, out record);
+    public bool TryGet(ushort packetIdentifier, [NotNullWhen(returnValue: true)] out OutgoingRecord? record)
+        => _records.TryGetValue(key: packetIdentifier, value: out record);
+
+    /// <summary>
+    /// Removes a record, frees its identifier and publish slot, and keeps the record for reuse. The caller
+    /// reads the record's completion before calling this and must not touch the record afterwards. Removing a
+    /// record that is not in the table does nothing, also when its identifier now belongs to another record.
+    /// </summary>
+    /// <param name="record">
+    /// A record of this table.
+    /// </param>
+    public void Remove(OutgoingRecord record)
+    {
+        // A stale record that was removed before must not take a newer record with the same identifier along.
+        if (!_records.TryGetValue(key: record.PacketIdentifier, value: out OutgoingRecord? current)
+            || !ReferenceEquals(objA: current, objB: record))
+        {
+            return;
+        }
+
+        _records.Remove(key: record.PacketIdentifier);
+        Release(record: record);
+    }
+
+    /// <summary>
+    /// Hands every record to a callback, then empties the table. Used once, when the connection ends. The
+    /// callback must not change the table.
+    /// </summary>
+    /// <param name="each">
+    /// Called for each record before it is recycled.
+    /// </param>
+    public void DrainAll(Action<OutgoingRecord> each)
+    {
+        foreach (OutgoingRecord record in _records.Values)
+        {
+            each(obj: record);
+            Release(record: record);
+        }
+
+        _records.Clear();
+    }
 
     /// <summary>
     /// Moves a record to its next phase, for example from waiting for PUBREC to waiting for PUBCOMP. The
@@ -201,49 +239,10 @@ internal sealed class OutgoingRecords(int publishLimit)
     /// <param name="now">
     /// The current <see cref="TimeProvider.GetTimestamp"/> value.
     /// </param>
-#pragma warning disable S2325 // Kept an instance method: the client advances records through the table that owns them.
-    public void Advance(OutgoingRecord record, RecordKind next, long now)
+    public static void Advance(OutgoingRecord record, RecordKind next, long now)
     {
         record.Kind = next;
         record.PhaseStartedAt = now;
-    }
-#pragma warning restore S2325
-
-    /// <summary>
-    /// Removes a record, frees its identifier and publish slot, and keeps the record for reuse. The caller
-    /// reads the record's completion before calling this and must not touch the record afterwards. Removing a
-    /// record that is not in the table does nothing, also when its identifier now belongs to another record.
-    /// </summary>
-    /// <param name="record">
-    /// A record of this table.
-    /// </param>
-    public void Remove(OutgoingRecord record)
-    {
-        // A stale record that was removed before must not take a newer record with the same identifier along.
-        if (_records.TryGetValue(record.PacketIdentifier, out OutgoingRecord? current)
-            && ReferenceEquals(current, record))
-        {
-            _records.Remove(record.PacketIdentifier);
-            Release(record);
-        }
-    }
-
-    /// <summary>
-    /// Hands every record to a callback, then empties the table. Used once, when the connection ends. The
-    /// callback must not change the table.
-    /// </summary>
-    /// <param name="each">
-    /// Called for each record before it is recycled.
-    /// </param>
-    public void DrainAll(Action<OutgoingRecord> each)
-    {
-        foreach (OutgoingRecord record in _records.Values)
-        {
-            each(record);
-            Release(record);
-        }
-
-        _records.Clear();
     }
 
     /// <summary>
@@ -260,6 +259,6 @@ internal sealed class OutgoingRecords(int publishLimit)
         }
 
         record.Completion = null!; // The record is idle in the pool; TryAdd sets it again before it is handed out.
-        _recordPool.Push(record);
+        _recordPool.Push(item: record);
     }
 }

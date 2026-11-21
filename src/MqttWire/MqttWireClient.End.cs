@@ -1,4 +1,4 @@
-using System.Net.WebSockets;
+﻿using System.Net.WebSockets;
 using MqttWire.Client;
 using MqttWire.Link;
 
@@ -19,7 +19,9 @@ public sealed partial class MqttWireClient
     /// so draining allocates no delegate.
     /// </summary>
     private static readonly Action<OutgoingRecord> s_completeConnectionLost =
-        static record => record.Completion.Complete(new MqttRequestResult(MqttRequestStatus.ConnectionLost, MqttReasonCode.UnspecifiedError));
+        static record =>
+            record.Completion.Complete(result: new MqttRequestResult(Status: MqttRequestStatus.ConnectionLost,
+                ReasonCode: MqttReasonCode.UnspecifiedError));
 
     /// <summary>
     /// How the one who records the end treats the link.
@@ -48,7 +50,7 @@ public sealed partial class MqttWireClient
             // Records are added only while connected, so every one was in place before the end was recorded, and
             // none is added after. Completing under the lock runs no caller code: completions continue
             // asynchronously (decision 6). Each completion is read before its record is recycled.
-            _records?.DrainAll(s_completeConnectionLost);
+            _records?.DrainAll(each: s_completeConnectionLost);
         }
     }
 
@@ -75,7 +77,7 @@ public sealed partial class MqttWireClient
         IMqttLink? link;
         lock (_gate)
         {
-            if (!TryRecordEndLocked(info, mode))
+            if (!TryRecordEndLocked(info: info, mode: mode))
             {
                 return false;
             }
@@ -117,7 +119,8 @@ public sealed partial class MqttWireClient
         _closeInfo = info;
         if (mode == EndMode.Close && _link is not null)
         {
-            _closeTimer = _time.CreateTimer(s_closeTimedOut, this, ClientLimits.CloseTimeout, Timeout.InfiniteTimeSpan);
+            _closeTimer = _time.CreateTimer(callback: s_closeTimedOut, state: this, dueTime: ClientLimits.CloseTimeout,
+                period: Timeout.InfiniteTimeSpan);
         }
 
         return true;
@@ -138,10 +141,11 @@ public sealed partial class MqttWireClient
     /// </returns>
     private async ValueTask CloseLinkAsync(IMqttLink link, MqttReasonCode? disconnect)
     {
-        if (disconnect is MqttReasonCode reasonCode)
+        if (disconnect is { } reasonCode)
         {
-            byte[] packet = RentDisconnect(reasonCode, out int length);
-            if (!await SendAsync(packet, length, isDisconnect: true).ConfigureAwait(false))
+            byte[] packet = RentDisconnect(reasonCode: reasonCode, length: out int length);
+            if (!await SendAsync(packet: packet, length: length, isDisconnect: true)
+                    .ConfigureAwait(continueOnCapturedContext: false))
             {
                 // The write failed and aborted the link; there is nothing left to close.
                 return;
@@ -150,7 +154,8 @@ public sealed partial class MqttWireClient
 
         try
         {
-            await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None).ConfigureAwait(false);
+            await link.CloseAsync(status: WebSocketCloseStatus.NormalClosure, cancellationToken: CancellationToken.None)
+                .ConfigureAwait(continueOnCapturedContext: false);
         }
         catch (Exception)
         {
@@ -193,7 +198,7 @@ public sealed partial class MqttWireClient
 
         if (wasConnected)
         {
-            InvokeOnClosed(info);
+            InvokeOnClosed(info: info);
         }
         else
         {
@@ -216,7 +221,7 @@ public sealed partial class MqttWireClient
     {
         try
         {
-            _onClosed?.Invoke(info);
+            _onClosed?.Invoke(obj: info);
         }
 #pragma warning disable RCS1075 // An empty catch of Exception is the point here.
         catch (Exception)

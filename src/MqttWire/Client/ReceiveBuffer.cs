@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using MqttWire.Codec;
 
 namespace MqttWire.Client;
@@ -43,8 +43,8 @@ internal sealed class ReceiveBuffer(ArrayPool<byte> pool, int maxPacketBytes)
     /// </returns>
     public Memory<byte> GetReadMemory()
     {
-        _array ??= pool.Rent(ClientLimits.FirstReadBufferBytes);
-        return _array.AsMemory(_end);
+        _array ??= pool.Rent(minimumLength: ClientLimits.FirstReadBufferBytes);
+        return _array.AsMemory(start: _end);
     }
 
     /// <summary>
@@ -71,8 +71,8 @@ internal sealed class ReceiveBuffer(ArrayPool<byte> pool, int maxPacketBytes)
     /// </returns>
     public FrameStatus TryFrame(out PacketHeader header)
     {
-        ReadOnlySpan<byte> data = _array.AsSpan(_start, Count);
-        OperationStatus status = PacketHeader.TryRead(data, out header);
+        ReadOnlySpan<byte> data = _array.AsSpan(start: _start, length: Count);
+        OperationStatus status = PacketHeader.TryRead(buffer: data, header: out header);
         if (status == OperationStatus.InvalidData)
         {
             return FrameStatus.Malformed;
@@ -96,7 +96,7 @@ internal sealed class ReceiveBuffer(ArrayPool<byte> pool, int maxPacketBytes)
         // A whole header means bytes are buffered, so an array is held.
         if (header.TotalLength > _array!.Length)
         {
-            Grow(header.TotalLength);
+            Grow(packetLength: header.TotalLength);
         }
 
         return FrameStatus.NeedMoreData;
@@ -111,7 +111,8 @@ internal sealed class ReceiveBuffer(ArrayPool<byte> pool, int maxPacketBytes)
     /// <returns>
     /// The packet, fixed header included: a view valid until the next call that changes the buffer.
     /// </returns>
-    public ReadOnlySpan<byte> GetPacket(in PacketHeader header) => _array.AsSpan(_start, header.TotalLength);
+    public ReadOnlySpan<byte> GetPacket(in PacketHeader header) =>
+        _array.AsSpan(start: _start, length: header.TotalLength);
 
     /// <summary>
     /// Drops a handled packet from the start of the buffered bytes.
@@ -133,12 +134,14 @@ internal sealed class ReceiveBuffer(ArrayPool<byte> pool, int maxPacketBytes)
             return;
         }
 
-        if (_start > 0)
+        if (_start <= 0)
         {
-            _array.AsSpan(_start, Count).CopyTo(_array);
-            _end = Count;
-            _start = 0;
+            return;
         }
+
+        _array.AsSpan(start: _start, length: Count).CopyTo(destination: _array);
+        _end = Count;
+        _start = 0;
     }
 
     /// <summary>
@@ -153,7 +156,7 @@ internal sealed class ReceiveBuffer(ArrayPool<byte> pool, int maxPacketBytes)
         _end = 0;
         if (array is not null)
         {
-            pool.Return(array);
+            pool.Return(array: array);
         }
     }
 
@@ -165,14 +168,15 @@ internal sealed class ReceiveBuffer(ArrayPool<byte> pool, int maxPacketBytes)
     /// </param>
     private void Grow(int packetLength)
     {
-        byte[] bigger = pool.Rent(packetLength);
+        byte[] bigger = pool.Rent(minimumLength: packetLength);
         int count = Count;
-        _array.AsSpan(_start, count).CopyTo(bigger);
+        _array.AsSpan(start: _start, length: count).CopyTo(destination: bigger);
+
         // Only TryFrame grows, and only with bytes buffered, so an array is held.
         byte[] old = _array!;
         _array = bigger;
         _start = 0;
         _end = count;
-        pool.Return(old);
+        pool.Return(array: old);
     }
 }

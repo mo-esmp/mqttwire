@@ -1,4 +1,4 @@
-using System.Net.WebSockets;
+﻿using System.Net.WebSockets;
 
 namespace MqttWire.Link;
 
@@ -47,13 +47,14 @@ internal sealed class ClientWebSocketConnector : IMqttLinkConnector
     /// disposed; nothing is dialled. The returned link does not dispose the socket: the client ends every link with
     /// <see cref="IMqttLink.Abort"/>, which disposes it.
     /// </remarks>
-    public async ValueTask<LinkConnectResult> ConnectAsync(MqttWireClientOptions options, CancellationToken cancellationToken)
+    public async ValueTask<LinkConnectResult> ConnectAsync(MqttWireClientOptions options,
+        CancellationToken cancellationToken)
     {
         ClientWebSocket socket = new();
         try
         {
-            options.ConfigureWebSocket?.Invoke(socket.Options);
-            socket.Options.AddSubProtocol(SubProtocol);
+            options.ConfigureWebSocket?.Invoke(obj: socket.Options);
+            socket.Options.AddSubProtocol(subProtocol: SubProtocol);
 
             // The browser manages its own WebSocket keep-alive and does not let it be set.
             if (!OperatingSystem.IsBrowser())
@@ -69,12 +70,13 @@ internal sealed class ClientWebSocketConnector : IMqttLinkConnector
 
         try
         {
-            await socket.ConnectAsync(options.Uri, cancellationToken).ConfigureAwait(false);
+            await socket.ConnectAsync(uri: options.Uri, cancellationToken: cancellationToken)
+                .ConfigureAwait(continueOnCapturedContext: false);
         }
         catch (WebSocketException ex)
         {
             socket.Dispose();
-            return new LinkConnectResult(null, ex);
+            return new LinkConnectResult(Link: null, Error: ex);
         }
         catch
         {
@@ -82,15 +84,17 @@ internal sealed class ClientWebSocketConnector : IMqttLinkConnector
             throw;
         }
 
-        if (string.Equals(socket.SubProtocol, SubProtocol, StringComparison.Ordinal))
+        if (string.Equals(a: socket.SubProtocol, b: SubProtocol, comparisonType: StringComparison.Ordinal))
         {
-            return new LinkConnectResult(new WebSocketLink(socket), null);
+            return new LinkConnectResult(Link: new WebSocketLink(webSocket: socket), Error: null);
         }
 
-        await RefuseAsync(socket, cancellationToken).ConfigureAwait(false);
+        await RefuseAsync(socket: socket, cancellationToken: cancellationToken)
+            .ConfigureAwait(continueOnCapturedContext: false);
         return new LinkConnectResult(
-            null,
-            new WebSocketException(WebSocketError.UnsupportedProtocol, "The server did not answer with the mqtt sub-protocol."));
+            Link: null,
+            Error: new WebSocketException(error: WebSocketError.UnsupportedProtocol,
+                message: "The server did not answer with the mqtt sub-protocol."));
     }
 
     /// <summary>
@@ -112,8 +116,10 @@ internal sealed class ClientWebSocketConnector : IMqttLinkConnector
     {
         try
         {
-            await socket.CloseOutputAsync(WebSocketCloseStatus.ProtocolError, "The mqtt sub-protocol is required.", cancellationToken)
-                .ConfigureAwait(false);
+            await socket.CloseOutputAsync(closeStatus: WebSocketCloseStatus.ProtocolError,
+                    statusDescription: "The mqtt sub-protocol is required.",
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(continueOnCapturedContext: false);
         }
         catch (WebSocketException)
         {

@@ -1,4 +1,4 @@
-namespace MqttWire.Client;
+﻿namespace MqttWire.Client;
 
 /// <summary>
 /// The packet identifiers of QoS 2 messages the client has handed on and the server has not yet released with
@@ -32,7 +32,8 @@ internal sealed class IncomingQoS2
     /// <see langword="true"/> when it was added and not removed.
     /// </returns>
     public bool Contains(ushort packetIdentifier)
-        => _identifiers is not null && Array.IndexOf(_identifiers, packetIdentifier, 0, Count) >= 0;
+        => _identifiers is not null &&
+           Array.IndexOf(array: _identifiers, value: packetIdentifier, startIndex: 0, count: Count) >= 0;
 
     /// <summary>
     /// Remembers an identifier.
@@ -46,7 +47,7 @@ internal sealed class IncomingQoS2
     /// </returns>
     public bool TryAdd(ushort packetIdentifier)
     {
-        if (IsFull || Contains(packetIdentifier))
+        if (IsFull || Contains(packetIdentifier: packetIdentifier))
         {
             return false;
         }
@@ -72,7 +73,7 @@ internal sealed class IncomingQoS2
             return false;
         }
 
-        int index = Array.IndexOf(_identifiers, packetIdentifier, 0, Count);
+        int index = Array.IndexOf(array: _identifiers, value: packetIdentifier, startIndex: 0, count: Count);
         if (index < 0)
         {
             return false;

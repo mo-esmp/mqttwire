@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using System.Text;
 using MqttWire.Client;
 using MqttWire.Codec;
@@ -176,8 +176,8 @@ public sealed partial class MqttWireClient : IAsyncDisposable
     public MqttWireClient(MqttWireClientOptions options)
         : this(
             options,
-            options?.OnMessage,
-            options?.OnClosed,
+            options.OnMessage,
+            options.OnClosed,
             ClientWebSocketConnector.Instance,
             TimeProvider.System,
             ArrayPool<byte>.Shared)
@@ -234,7 +234,8 @@ public sealed partial class MqttWireClient : IAsyncDisposable
         }
 
         if (!options.Uri.IsAbsoluteUri || (!string.Equals(options.Uri.Scheme, Uri.UriSchemeWs, StringComparison.Ordinal)
-                && !string.Equals(options.Uri.Scheme, Uri.UriSchemeWss, StringComparison.Ordinal)))
+                                           && !string.Equals(options.Uri.Scheme, Uri.UriSchemeWss,
+                                               StringComparison.Ordinal)))
         {
             throw new ArgumentException("The URI must be an absolute ws or wss URI.", nameof(options));
         }
@@ -257,12 +258,15 @@ public sealed partial class MqttWireClient : IAsyncDisposable
 
         if (options.KeepAlive < TimeSpan.FromSeconds(1) || options.KeepAlive > TimeSpan.FromSeconds(ushort.MaxValue))
         {
-            throw new ArgumentOutOfRangeException(nameof(options), options.KeepAlive, "The keep-alive must be from 1 to 65,535 seconds.");
+            throw new ArgumentOutOfRangeException(nameof(options), options.KeepAlive,
+                "The keep-alive must be from 1 to 65,535 seconds.");
         }
 
-        if (options.MaxIncomingPacketBytes is < ClientLimits.MinIncomingPacketBytes or > ClientLimits.MaxIncomingPacketBytes)
+        if (options.MaxIncomingPacketBytes is < ClientLimits.MinIncomingPacketBytes
+            or > ClientLimits.MaxIncomingPacketBytes)
         {
-            throw new ArgumentOutOfRangeException(nameof(options), options.MaxIncomingPacketBytes, "The maximum incoming packet size must be from 4,096 to 268,435,460 bytes.");
+            throw new ArgumentOutOfRangeException(nameof(options), options.MaxIncomingPacketBytes,
+                "The maximum incoming packet size must be from 4,096 to 268,435,460 bytes.");
         }
 
         Options = options;
@@ -444,7 +448,9 @@ public sealed partial class MqttWireClient : IAsyncDisposable
             else
             {
                 EndMode mode = phase == Phase.Connected ? EndMode.Close : EndMode.Abort;
-                if (TryRecordEndLocked(new MqttClientCloseInfo(MqttClientCloseReason.Disposed, MqttReasonCode.Success, null, null), mode))
+                if (TryRecordEndLocked(
+                        new MqttClientCloseInfo(MqttClientCloseReason.Disposed, MqttReasonCode.Success, null, null),
+                        mode))
                 {
                     close = mode == EndMode.Close;
                     abort = mode == EndMode.Abort;
@@ -551,7 +557,9 @@ public sealed partial class MqttWireClient : IAsyncDisposable
     /// The reason string, or <see langword="null"/> when there is none.
     /// </returns>
     private static string? ReadReasonString(in PropertyBlock properties)
-        => properties.TryGetBytes(PropertyId.ReasonString, out ReadOnlySpan<byte> value) ? Encoding.UTF8.GetString(value) : null;
+        => properties.TryGetBytes(PropertyId.ReasonString, out ReadOnlySpan<byte> value)
+            ? Encoding.UTF8.GetString(value)
+            : null;
 
     /// <summary>
     /// Reads the User Property properties, in wire order.

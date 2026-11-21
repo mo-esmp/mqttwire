@@ -1,4 +1,4 @@
-namespace MqttWire.Client;
+﻿namespace MqttWire.Client;
 
 /// <summary>
 /// The fixed limits of the client.
@@ -39,10 +39,10 @@ internal static class ClientLimits
     /// <summary>
     /// How long a connect may wait for the CONNACK.
     /// </summary>
-    public static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(10);
+    public static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(seconds: 10);
 
     /// <summary>
     /// How long a close may take before the link is aborted.
     /// </summary>
-    public static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(2);
+    public static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(seconds: 2);
 }

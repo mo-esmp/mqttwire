@@ -1,4 +1,4 @@
-namespace MqttWire.Client;
+﻿namespace MqttWire.Client;
 
 /// <summary>
 /// The reconnecting client's delays between attempts: doubling from the initial delay up to the maximum, with a
@@ -43,17 +43,17 @@ internal static class ReconnectBackoff
     /// </exception>
     public static TimeSpan GetDelay(int attempt, TimeSpan initial, TimeSpan max, double random01)
     {
-        ArgumentOutOfRangeException.ThrowIfLessThan(attempt, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(value: attempt, other: 1);
 
         // initial × 2^doublings is over max exactly when initial is over max ÷ 2^doublings (rounded down), which
         // cannot overflow; a long holds at most 63 doublings of one tick.
         int doublings = attempt - 1;
         long baseTicks = doublings >= 63 || initial.Ticks > max.Ticks >> doublings
             ? max.Ticks
-            : Math.Min(initial.Ticks << doublings, max.Ticks);
+            : Math.Min(val1: initial.Ticks << doublings, val2: max.Ticks);
 
-        double factor = MinFactor + (FactorRange * Math.Clamp(random01, 0.0, 1.0));
-        double ticks = Math.Round(baseTicks * factor);
-        return ticks >= max.Ticks ? max : TimeSpan.FromTicks((long)ticks);
+        double factor = MinFactor + (FactorRange * Math.Clamp(value: random01, min: 0.0, max: 1.0));
+        double ticks = Math.Round(a: baseTicks * factor);
+        return ticks >= max.Ticks ? max : TimeSpan.FromTicks(value: (long)ticks);
     }
 }
