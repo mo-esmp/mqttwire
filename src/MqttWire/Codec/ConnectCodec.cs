@@ -55,7 +55,6 @@ internal static class ConnectCodec
     /// </summary>
     private const byte UserNameFlag = 0b1000_0000;
 
-
     /// <summary>
     /// The size of the variable header up to the properties: protocol name, level, flags and keep-alive.
     /// </summary>

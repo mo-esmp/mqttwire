@@ -136,6 +136,34 @@ public sealed class ConnectTests
     }
 
     /// <summary>
+    /// Proves a link that never opens is given up after ten seconds, not before, and the connect times out.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task ConnectAsync_LinkNeverOpens_ReturnsConnectTimedOut()
+    {
+        // Arrange
+        ClientHarness harness = ClientHarness.Create();
+        harness.Connector.HoldConnects();
+        Task<MqttConnectAck> connect = harness.Client.ConnectAsync();
+
+        // Act
+        harness.Time.Advance(TimeSpan.FromSeconds(10) - TimeSpan.FromTicks(1));
+        int pendingEarly = harness.Connector.PendingConnects;
+        harness.Time.Advance(TimeSpan.FromTicks(1));
+        MqttConnectAck ack = await connect;
+
+        // Assert
+        pendingEarly.ShouldBe(1);
+        ack.Failure.ShouldBe(MqttClientCloseReason.ConnectTimedOut);
+        harness.Connector.PendingConnects.ShouldBe(0);
+        harness.Connector.Links.ShouldBeEmpty();
+        harness.Client.IsConnected.ShouldBeFalse();
+    }
+
+    /// <summary>
     /// Proves a server that cannot be reached is reported as unreachable, with the network error.
     /// </summary>
     /// <returns>

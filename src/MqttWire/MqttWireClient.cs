@@ -116,6 +116,17 @@ public sealed class MqttWireClient : IAsyncDisposable
     private TaskCompletionSource? _ended;
 
     /// <summary>
+    /// Cancelled by <see cref="DisposeAsync"/> to stop a connect that is still opening the link; set once, when
+    /// the connect starts. It holds no timer, so it needs no disposing.
+    /// </summary>
+    private CancellationTokenSource? _connectCanceledByDispose;
+
+    /// <summary>
+    /// Completes when <see cref="ConnectAsync"/> has returned or thrown; set once, when the connect starts.
+    /// </summary>
+    private TaskCompletionSource? _connectReturned;
+
+    /// <summary>
     /// The refusing CONNACK's report, built by the read loop for the connect to return.
     /// </summary>
     private MqttConnectAck? _refusal;
@@ -380,6 +391,8 @@ public sealed class MqttWireClient : IAsyncDisposable
     /// </remarks>
     public async Task<MqttConnectAck> ConnectAsync(CancellationToken cancellationToken = default)
     {
+        CancellationTokenSource disposing = new();
+        TaskCompletionSource returned = new(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -389,50 +402,31 @@ public sealed class MqttWireClient : IAsyncDisposable
             }
 
             _phase = Phase.Connecting;
+            _connectCanceledByDispose = disposing;
+            _connectReturned = returned;
         }
 
-        using CancellationTokenSource deadline = new(ClientLimits.ConnectTimeout, _time);
-        using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
-        LinkConnectResult opened;
         try
         {
-            opened = await _connector.ConnectAsync(Options, linked.Token).ConfigureAwait(false);
+            return await ConnectCoreAsync(disposing.Token, cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (linked.IsCancellationRequested)
+        finally
         {
-            SetClosed();
-            cancellationToken.ThrowIfCancellationRequested();
-            return new MqttConnectAck(MqttClientCloseReason.ConnectTimedOut, MqttReasonCode.UnspecifiedError, null, null, null);
+            returned.TrySetResult();
         }
-        catch
-        {
-            SetClosed();
-            throw;
-        }
-
-        if (opened.Link is not IMqttLink link)
-        {
-            SetClosed();
-            return new MqttConnectAck(MqttClientCloseReason.Unreachable, MqttReasonCode.UnspecifiedError, null, null, opened.Error);
-        }
-
-        MqttConnectAck ack = await HandshakeAsync(link, linked.Token).ConfigureAwait(false);
-        if (ack.Failure == MqttClientCloseReason.ConnectTimedOut)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-        }
-
-        return ack;
     }
 
     /// <summary>
     /// Ends the connection and waits until it has ended. When connected: sends DISCONNECT 0x00, closes the link
-    /// with 1000 and waits for the server to end it, at most two seconds, then aborts it. While connecting: aborts
-    /// the link. Calling it again, or after the connection ended, only waits for that end.
+    /// with 1000 and waits for the server to end it, at most two seconds, then aborts it. While connecting: cancels
+    /// the opening of the link or aborts the link, and waits for <see cref="ConnectAsync"/> to throw
+    /// <see cref="ObjectDisposedException"/>. Calling it again, or after the connection ended, only waits for that
+    /// end.
     /// </summary>
     /// <returns>
-    /// A task that completes when the read loop has finished, every buffer it held is back in the pool, and
-    /// <c>OnClosed</c>, if due, has returned. It does not throw.
+    /// A task that completes when <see cref="ConnectAsync"/> has returned, the read loop has finished, every buffer
+    /// it held is back in the pool, and <c>OnClosed</c>, if due, has returned. It does not throw, unless finishing
+    /// the connection failed through a bug in the client.
     /// </returns>
     public async ValueTask DisposeAsync()
     {
@@ -440,10 +434,13 @@ public sealed class MqttWireClient : IAsyncDisposable
         bool abort = false;
         IMqttLink? link;
         TaskCompletionSource? ended;
+        TaskCompletionSource? connectReturned;
+        CancellationTokenSource? connectCanceledByDispose;
         lock (_gate)
         {
             _disposed = true;
             Phase phase = _phase;
+            connectCanceledByDispose = phase == Phase.Connecting ? _connectCanceledByDispose : null;
             if (phase == Phase.New)
             {
                 _phase = Phase.Closed;
@@ -460,6 +457,13 @@ public sealed class MqttWireClient : IAsyncDisposable
 
             link = _link;
             ended = _ended;
+            connectReturned = _connectReturned;
+        }
+
+        // Stops a link that is still opening; the connect then throws ObjectDisposedException.
+        if (connectCanceledByDispose is not null)
+        {
+            await connectCanceledByDispose.CancelAsync().ConfigureAwait(false);
         }
 
         if (link is not null)
@@ -472,6 +476,11 @@ public sealed class MqttWireClient : IAsyncDisposable
             {
                 link.Abort();
             }
+        }
+
+        if (connectReturned is not null)
+        {
+            await connectReturned.Task.ConfigureAwait(false);
         }
 
         if (ended is not null)
@@ -629,6 +638,62 @@ public sealed class MqttWireClient : IAsyncDisposable
     }
 
     /// <summary>
+    /// Opens the link and runs the handshake over it, within the connect deadline.
+    /// </summary>
+    /// <param name="disposing">
+    /// Cancelled when the client is disposed during the connect.
+    /// </param>
+    /// <param name="cancellationToken">
+    /// The caller's token.
+    /// </param>
+    /// <returns>
+    /// The outcome of the connect, as <see cref="ConnectAsync"/> reports it.
+    /// </returns>
+    /// <exception cref="ObjectDisposedException">
+    /// The client was disposed during the connect, whatever the link did meanwhile.
+    /// </exception>
+    /// <exception cref="OperationCanceledException">
+    /// The caller's token was cancelled before the connect was decided.
+    /// </exception>
+    private async Task<MqttConnectAck> ConnectCoreAsync(CancellationToken disposing, CancellationToken cancellationToken)
+    {
+        using CancellationTokenSource deadline = new(ClientLimits.ConnectTimeout, _time);
+        using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token, disposing);
+        LinkConnectResult opened;
+        try
+        {
+            opened = await _connector.ConnectAsync(Options, linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (linked.IsCancellationRequested)
+        {
+            SetClosed();
+            ThrowIfDisposed();
+            cancellationToken.ThrowIfCancellationRequested();
+            return new MqttConnectAck(MqttClientCloseReason.ConnectTimedOut, MqttReasonCode.UnspecifiedError, null, null, null);
+        }
+        catch
+        {
+            SetClosed();
+            throw;
+        }
+
+        if (opened.Link is not IMqttLink link)
+        {
+            SetClosed();
+            ThrowIfDisposed();
+            return new MqttConnectAck(MqttClientCloseReason.Unreachable, MqttReasonCode.UnspecifiedError, null, null, opened.Error);
+        }
+
+        MqttConnectAck ack = await HandshakeAsync(link, linked.Token).ConfigureAwait(false);
+        if (ack.Failure == MqttClientCloseReason.ConnectTimedOut)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        return ack;
+    }
+
+    /// <summary>
     /// Starts the read loop over the open link, sends CONNECT and waits for the read loop to decide the connect.
     /// </summary>
     /// <param name="link">
@@ -665,6 +730,20 @@ public sealed class MqttWireClient : IAsyncDisposable
         {
             // Unregister rather than Dispose: it does not wait for a callback running on another thread.
             registration.Unregister();
+        }
+    }
+
+    /// <summary>
+    /// Throws when <see cref="DisposeAsync"/> has been called.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">
+    /// The client was disposed.
+    /// </exception>
+    private void ThrowIfDisposed()
+    {
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
         }
     }
 
@@ -860,26 +939,41 @@ public sealed class MqttWireClient : IAsyncDisposable
     /// The link.
     /// </param>
     /// <returns>
-    /// A task that completes when the connection is finished. It does not throw.
+    /// A task that completes when the connection is finished. It does not throw: should finishing fail, which only
+    /// a bug in the client can cause, the connect and <see cref="DisposeAsync"/> fail with that exception instead
+    /// of waiting for ever.
     /// </returns>
     private async Task ReadLoopAsync(IMqttLink link)
     {
         try
         {
-            bool reading = true;
-            while (reading)
+            try
             {
-                await link.WaitForDataAsync(CancellationToken.None).ConfigureAwait(false);
-                reading = await ReadAndHandleAsync(link).ConfigureAwait(false);
+                bool reading = true;
+                while (reading)
+                {
+                    await link.WaitForDataAsync(CancellationToken.None).ConfigureAwait(false);
+                    reading = await ReadAndHandleAsync(link).ConfigureAwait(false);
+                }
             }
+            catch (Exception ex)
+            {
+                // A failed read, or the link aborted: the first reason recorded wins.
+                TryBeginEnd(new MqttClientCloseInfo(MqttClientCloseReason.ConnectionLost, MqttReasonCode.Success, null, ex), EndMode.Abort);
+            }
+
+            FinishConnection(link);
         }
         catch (Exception ex)
         {
-            // A failed read, or the link aborted: the first reason recorded wins.
-            TryBeginEnd(new MqttClientCloseInfo(MqttClientCloseReason.ConnectionLost, MqttReasonCode.Success, null, ex), EndMode.Abort);
-        }
+            // Only a bug in the client gets here. Release the link and fail whoever waits, rather than hang them.
+            link.Abort();
+            SetClosed();
 
-        FinishConnection(link);
+            // Both are set with the link, before the read loop started.
+            _connectResult!.TrySetException(ex);
+            _ended!.TrySetException(ex);
+        }
     }
 
     /// <summary>

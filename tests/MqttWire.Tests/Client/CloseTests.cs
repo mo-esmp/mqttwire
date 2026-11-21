@@ -248,6 +248,68 @@ public sealed class CloseTests
     }
 
     /// <summary>
+    /// Proves disposing while the link is still opening cancels the opening, waits for the connect to end, and
+    /// makes the connect throw <see cref="ObjectDisposedException"/>.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task DisposeAsync_WhileTheLinkOpens_CancelsItAndTheConnectThrowsObjectDisposed()
+    {
+        // Arrange
+        ClientHarness harness = ClientHarness.Create();
+        harness.Connector.HoldConnects();
+        Task<MqttConnectAck> connect = harness.Client.ConnectAsync();
+        int pendingBefore = harness.Connector.PendingConnects;
+
+        // Act
+        await harness.Client.DisposeAsync();
+        bool connectEnded = connect.IsCompleted;
+        Exception? exception = await Record.ExceptionAsync(() => connect);
+
+        // Assert
+        pendingBefore.ShouldBe(1);
+        connectEnded.ShouldBeTrue();
+        exception.ShouldBeOfType<ObjectDisposedException>();
+        harness.Connector.PendingConnects.ShouldBe(0);
+        harness.Connector.Links.ShouldBeEmpty();
+        harness.Client.IsConnected.ShouldBeFalse();
+        harness.Closed.ShouldBeEmpty();
+    }
+
+    /// <summary>
+    /// Proves disposing while the client waits for CONNACK aborts the link, sends nothing more, waits for the
+    /// connect to end, and makes the connect throw <see cref="ObjectDisposedException"/>.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task DisposeAsync_WhileWaitingForConnAck_AbortsAndTheConnectThrowsObjectDisposed()
+    {
+        // Arrange
+        CountingPool pool = new();
+        ClientHarness harness = ClientHarness.Create(pool: pool);
+        Task<MqttConnectAck> connect = harness.Client.ConnectAsync();
+        harness.NextPacket();
+
+        // Act
+        await harness.Client.DisposeAsync();
+        bool connectEnded = connect.IsCompleted;
+        Exception? exception = await Record.ExceptionAsync(() => connect);
+
+        // Assert
+        connectEnded.ShouldBeTrue();
+        exception.ShouldBeOfType<ObjectDisposedException>();
+        harness.Link.IsAborted.ShouldBeTrue();
+        harness.Link.TakeWritten().ShouldBeEmpty();
+        harness.Client.IsConnected.ShouldBeFalse();
+        harness.Closed.ShouldBeEmpty();
+        pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves a PINGRESP is accepted after connecting and its arrival time is noted, without ending anything.
     /// </summary>
     /// <returns>
