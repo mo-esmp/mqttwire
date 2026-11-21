@@ -630,6 +630,28 @@ public sealed class PublishTests
     }
 
     /// <summary>
+    /// Proves a PUBREC with a failure code, here 0x80 unspecified error, for an identifier not in use is ignored:
+    /// a failed PUBREC ends its exchange, so no PUBREL is written, and the connection goes on.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Read_FailedPubRecForUnknownIdentifier_IsIgnored()
+    {
+        // Arrange
+        ClientHarness harness = await ConnectAsync();
+
+        // Act
+        harness.Link.Deliver(Hex.Parse("50 03 00 07 80"));
+
+        // Assert
+        harness.Client.IsConnected.ShouldBeTrue();
+        harness.Link.TakeWritten().ShouldBeEmpty();
+        harness.Closed.ShouldBeEmpty();
+    }
+
+    /// <summary>
     /// Proves two PUBRECs that arrive in one read are answered with their PUBRELs in the order they arrived.
     /// </summary>
     /// <returns>

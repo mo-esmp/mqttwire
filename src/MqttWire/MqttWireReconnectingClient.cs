@@ -21,8 +21,10 @@ namespace MqttWire;
 /// </para>
 /// <para>
 /// The first attempt is made at once. After a failed attempt the cycle waits <c>InitialDelay</c>, doubling with each
-/// further failure up to <c>MaxDelay</c>, each with a random part of ±20 %; after a connection that was reported
-/// with <c>OnConnected</c> ends, the first retry waits <c>InitialDelay</c> again.
+/// further failure up to <c>MaxDelay</c>, each with a random part of ±20 %. After a connection that was reported
+/// with <c>OnConnected</c> ends, the first retry waits <c>InitialDelay</c> again only if the connection stayed up
+/// for at least <c>MaxDelay</c>; one that ended sooner counts as a failure, so a server that drops every
+/// connection at once is not retried every <c>InitialDelay</c>.
 /// </para>
 /// </remarks>
 public sealed class MqttWireReconnectingClient : IAsyncDisposable
@@ -224,10 +226,16 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
         Failed,
 
         /// <summary>
-        /// A connection was reported with <c>OnConnected</c> and has ended, with <c>OnDisconnected</c> called. The
-        /// back-off starts again.
+        /// A connection was reported with <c>OnConnected</c>, stayed up for at least <c>MaxDelay</c>, and has ended,
+        /// with <c>OnDisconnected</c> called. The back-off starts again.
         /// </summary>
         Disconnected,
+
+        /// <summary>
+        /// A connection was reported with <c>OnConnected</c> and ended, with <c>OnDisconnected</c> called, before it
+        /// had stayed up for <c>MaxDelay</c>. The back-off grows, as after a failure.
+        /// </summary>
+        DisconnectedEarly,
 
         /// <summary>
         /// The server refused in a way the same CONNECT would meet again. The cycle stops for good.
@@ -747,9 +755,9 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
                     return;
                 }
 
+                connectedBefore |= end is AttemptEnd.Disconnected or AttemptEnd.DisconnectedEarly;
                 if (end == AttemptEnd.Disconnected)
                 {
-                    connectedBefore = true;
                     retry = 1;
                 }
                 else if (retry < int.MaxValue)
@@ -793,7 +801,9 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
     /// Stops the attempt.
     /// </param>
     /// <returns>
-    /// How the attempt ended, with the refusal when it is <see cref="AttemptEnd.Stopped"/>.
+    /// How the attempt ended, with the refusal when it is <see cref="AttemptEnd.Stopped"/>. A reported connection
+    /// ends as <see cref="AttemptEnd.Disconnected"/> when it stayed up for at least <c>MaxDelay</c>, and as
+    /// <see cref="AttemptEnd.DisconnectedEarly"/> otherwise.
     /// </returns>
     /// <exception cref="OperationCanceledException">
     /// <paramref name="stop"/> was cancelled. A connection that was reported is first reported as ended.
@@ -843,10 +853,16 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
             }
 
             PublishConnection(client, granted);
+            long connectedAt = _time.GetTimestamp();
             Invoke(_options.OnConnected, new MqttConnectedInfo(isReconnect, ack));
             CompleteStart(ack);
             await EndConnectionAsync(client, closed, stop).ConfigureAwait(false);
-            return (AttemptEnd.Disconnected, null);
+
+            // A connection that ends at once, such as one a second client with the same identifier takes over, must
+            // not reset the back-off, or two such clients would reconnect every InitialDelay for ever.
+            return _time.GetElapsedTime(connectedAt) >= _options.MaxDelay
+                ? (AttemptEnd.Disconnected, null)
+                : (AttemptEnd.DisconnectedEarly, null);
         }
         finally
         {

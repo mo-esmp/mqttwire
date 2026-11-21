@@ -327,7 +327,10 @@ ValueTask<MqttRequestResult> done = client.PublishAsync("groups/42", payload, Mq
   survives" holds here too.
 - **Back-off:** attempt *n* waits `min(MaxDelay, InitialDelay × 2^(n−1))` times a random
   factor in [0.8, 1.2], capped at `MaxDelay`, so that many clients do not come back in the same
-  instant. A successful connection puts the delay back to the start.
+  instant. A connection that stays up for at least `MaxDelay` puts the delay back to the start;
+  one that ends sooner counts as a failed attempt, so a server that drops every connection at
+  once (two clients with the same identifier taking each other over, for example) is not retried
+  every `InitialDelay` for ever.
 - **Fresh options for every attempt.** The `ClientOptions` callback is called before each one.
   An exception from that callback, or from creating the client, counts as a failed attempt and
   is retried.
@@ -836,8 +839,9 @@ The inside of `MqttWireClient`.
     65535 to 1;
   - an identifier is in use until its exchange ends: SUBACK, UNSUBACK, PUBACK, or for QoS 2 the
     PUBCOMP that follows PUBREC and PUBREL, or a PUBREC with a failure code;
-  - an acknowledgement for an identifier that is not in use is ignored; an unknown PUBREC is
-    answered with a PUBREL carrying `0x92`;
+  - an acknowledgement for an identifier that is not in use is ignored; an unknown PUBREC with a
+    code below `0x80` is answered with a PUBREL carrying `0x92`, and one with a failure code is
+    ignored, because a failed PUBREC ends its exchange and no PUBREL may follow it;
   - a packet whose write fails never frees its identifier on its own: a failed write is the end
     of the connection, and all records go with it;
   - there may be at most as many publishes in flight as the server's "receive maximum", and

@@ -235,8 +235,8 @@ public sealed partial class MqttWireClient
     /// <summary>
     /// Handles a PUBACK, PUBREC or PUBCOMP from the server. The acknowledgement a publish waits for completes it
     /// with the server's reason code; a PUBREC under 0x80 is answered with PUBREL and the publish waits for
-    /// PUBCOMP. For an identifier not in use, a PUBACK or PUBCOMP is ignored and a PUBREC is answered with PUBREL
-    /// 0x92.
+    /// PUBCOMP. For an identifier not in use, a PUBACK, a PUBCOMP and a PUBREC of 0x80 or more are ignored, and a
+    /// PUBREC under 0x80 is answered with PUBREL 0x92.
     /// </summary>
     /// <param name="packet">
     /// The whole packet.
@@ -269,7 +269,8 @@ public sealed partial class MqttWireClient
 
             if (!records.TryGet(ack.PacketIdentifier, out OutgoingRecord? record))
             {
-                return ack.Type == PacketType.PubRec
+                // A PUBREC with a failure code ends its exchange, so no PUBREL may follow it (MQTT 5, 4.3.3).
+                return ack.Type == PacketType.PubRec && (byte)ack.ReasonCode < FirstFailureCode
                     ? RecordReply(PacketType.PubRel, ack.PacketIdentifier, MqttReasonCode.PacketIdentifierNotFound)
                     : EndStep.None;
             }

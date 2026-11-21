@@ -23,6 +23,25 @@ public sealed class ReconnectingClientTests
     private static readonly TimeSpan s_initial = TimeSpan.FromMilliseconds(500);
 
     /// <summary>
+    /// The longest delay, 15 seconds, which is also how long a connection must stay up to reset the back-off.
+    /// </summary>
+    private static readonly TimeSpan s_maxDelay = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// Builds options with a keep-alive of 60 seconds, so a connection held for <see cref="s_maxDelay"/> sends no
+    /// PINGREQ and needs no PINGRESP.
+    /// </summary>
+    private static readonly Func<int, CancellationToken, ValueTask<MqttWireClientOptions>> s_noPingWithinMaxDelay =
+        static (_, _) => ValueTask.FromResult(new MqttWireClientOptions
+        {
+            Uri = new Uri("ws://test/mqtt"),
+            ClientId = "c1",
+            UserName = "u",
+            Password = "p",
+            KeepAlive = TimeSpan.FromSeconds(60),
+        });
+
+    /// <summary>
     /// Topics a caller cannot publish to: empty, a single-level wildcard, a multi-level wildcard, U+0000, an
     /// unpaired surrogate, 65,536 UTF-8 bytes, and a wildcard in a topic too long to encode on the stack.
     /// </summary>
@@ -115,7 +134,7 @@ public sealed class ReconnectingClientTests
 
     /// <summary>
     /// Proves a lost connection is reported, then tried again after 500 ms; a failed attempt doubles the delay to
-    /// one second; and a successful connection puts it back to 500 ms.
+    /// one second; and a connection that stays up for <c>MaxDelay</c>, 15 seconds, puts it back to 500 ms.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -124,7 +143,7 @@ public sealed class ReconnectingClientTests
     public async Task ConnectionLost_ReconnectsAtTheDocumentedDelays()
     {
         // Arrange
-        ReconnectHarness harness = ReconnectHarness.Create();
+        ReconnectHarness harness = ReconnectHarness.Create(clientOptions: s_noPingWithinMaxDelay);
         MemoryLink first = await harness.StartConnectedAsync();
         harness.Links.FailNext(new WebSocketException("unreachable"));
 
@@ -137,6 +156,7 @@ public sealed class ReconnectingClientTests
         MemoryLink third = await harness.LinkAsync(3);
         third.Deliver(ClientPackets.ConnAckAccepted);
         await harness.Log.WhenAsync("connected again");
+        harness.Time.Advance(s_maxDelay);
         third.EndFromPeer();
         await harness.Log.WhenAsync("disconnected", 2);
         await harness.AdvanceAsync(s_initial);
@@ -148,11 +168,64 @@ public sealed class ReconnectingClientTests
             TimeSpan.Zero,
             s_initial,
             TimeSpan.FromMilliseconds(1_500),
-            TimeSpan.FromMilliseconds(2_000),
+            TimeSpan.FromMilliseconds(17_000),
         ]);
         harness.Log.Events.ShouldBe(
         [
             "connected first",
+            "disconnected ConnectionLost",
+            "connected again",
+            "disconnected ConnectionLost",
+        ]);
+        await harness.StopAsync();
+    }
+
+    /// <summary>
+    /// Proves a connection that ends before it has stayed up for <c>MaxDelay</c> does not put the delay back to
+    /// 500 ms: three connections that each end at once are retried after 500 ms, one second and two seconds.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task ConnectionEndsAtOnce_BackoffKeepsGrowing()
+    {
+        // Arrange
+        ReconnectHarness harness = ReconnectHarness.Create(clientOptions: s_noPingWithinMaxDelay);
+        MemoryLink first = await harness.StartConnectedAsync();
+
+        // Act
+        first.EndFromPeer();
+        await harness.Log.WhenAsync("disconnected");
+        await harness.AdvanceAsync(s_initial);
+        MemoryLink second = await harness.LinkAsync(2);
+        second.Deliver(ClientPackets.ConnAckAccepted);
+        await harness.Log.WhenAsync("connected again");
+        harness.Time.Advance(s_maxDelay - TimeSpan.FromMilliseconds(1));
+        second.EndFromPeer();
+        await harness.Log.WhenAsync("disconnected", 2);
+        await harness.AdvanceAsync(TimeSpan.FromSeconds(1));
+        MemoryLink third = await harness.LinkAsync(3);
+        third.Deliver(ClientPackets.ConnAckAccepted);
+        await harness.Log.WhenAsync("connected again", 2);
+        third.EndFromPeer();
+        await harness.Log.WhenAsync("disconnected", 3);
+        await harness.AdvanceAsync(TimeSpan.FromSeconds(2));
+        await harness.Connector.WhenAttemptsAsync(4);
+
+        // Assert
+        harness.AttemptTimes().ShouldBe(
+        [
+            TimeSpan.Zero,
+            s_initial,
+            TimeSpan.FromMilliseconds(16_499),
+            TimeSpan.FromMilliseconds(18_499),
+        ]);
+        harness.Log.Events.ShouldBe(
+        [
+            "connected first",
+            "disconnected ConnectionLost",
+            "connected again",
             "disconnected ConnectionLost",
             "connected again",
             "disconnected ConnectionLost",
@@ -182,7 +255,8 @@ public sealed class ReconnectingClientTests
         second.Deliver(ClientPackets.ConnAckAccepted);
         await harness.Log.WhenAsync("connected again");
         second.EndFromPeer();
-        await harness.AdvanceAsync(s_initial);
+        // The second connection ended at once, so the back-off grew to one second.
+        await harness.AdvanceAsync(TimeSpan.FromSeconds(1));
         MemoryLink third = await harness.LinkAsync(3);
         third.Deliver(ClientPackets.ConnAckAccepted);
         await harness.Log.WhenAsync("connected again", 2);
@@ -264,7 +338,8 @@ public sealed class ReconnectingClientTests
         second.Deliver(ReconnectHarness.SubAck(2, 0x00));
         await harness.Log.WhenAsync("connected again");
         second.EndFromPeer();
-        await harness.AdvanceAsync(s_initial);
+        // The second connection ended at once, so the back-off grew to one second.
+        await harness.AdvanceAsync(TimeSpan.FromSeconds(1));
         MemoryLink third = await harness.LinkAsync(3);
         third.Deliver(ClientPackets.ConnAckAccepted);
         await third.WhenWrittenAsync(2);
@@ -756,7 +831,8 @@ public sealed class ReconnectingClientTests
         await harness.Log.WhenAsync("message");
         second.EndFromPeer();
         await harness.Log.WhenAsync("disconnected", 2);
-        await harness.AdvanceAsync(s_initial);
+        // The second connection ended at once, so the back-off grew to one second.
+        await harness.AdvanceAsync(TimeSpan.FromSeconds(1));
         MemoryLink third = await harness.LinkAsync(3);
         third.Deliver(ClientPackets.ConnAckAccepted);
         await harness.Log.WhenAsync("connected again", 2);

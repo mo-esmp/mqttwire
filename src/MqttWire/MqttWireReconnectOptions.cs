@@ -26,7 +26,9 @@ public sealed class MqttWireReconnectOptions
 
     /// <summary>
     /// Gets the longest delay between two attempts, random part included. At least <see cref="InitialDelay"/>,
-    /// and at most 4,294,967,294 milliseconds (about 49 days), the longest delay a timer supports.
+    /// and at most 4,294,967,294 milliseconds (about 49 days), the longest delay a timer supports. It is also how
+    /// long a connection must stay up for the next retry to wait only <see cref="InitialDelay"/> again; a connection
+    /// that ends sooner counts as a failed attempt, and the delay keeps growing.
     /// </summary>
     public TimeSpan MaxDelay { get; init; } = TimeSpan.FromSeconds(15);
 
