@@ -333,7 +333,9 @@ ValueTask<MqttRequestResult> done = client.PublishAsync("groups/42", payload, Mq
   called. A subscription the server refuses this time is dropped from what is remembered and
   reported through `OnSubscriptionRefused`. A connection lost while it subscribes again counts
   as a failed attempt: `OnConnected` is not called. `UnsubscribeAsync` forgets the filter even
-  while disconnected.
+  while disconnected. A filter unsubscribed while the new connection subscribes to it again is
+  unsubscribed on that connection before `OnConnected`, and a subscribe whose SUBACK comes
+  after an unsubscribe of the same filter is not remembered.
 - **It stops when retrying cannot help.** A refusal that the same CONNECT would meet again
   (unsupported protocol version, client id not valid, bad user name or password, not
   authorized, banned) ends the wrapper: `OnStopped` is called once with the reason, and

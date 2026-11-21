@@ -322,6 +322,123 @@ public sealed class ReconnectingClientTests
     }
 
     /// <summary>
+    /// Proves a filter unsubscribed while the new connection waits for its re-subscribe's SUBACK is unsubscribed on
+    /// that connection before <c>OnConnected</c>, so the server does not keep it for the whole connection.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Reconnect_UnsubscribedDuringResubscribe_UnsubscribesBeforeOnConnected()
+    {
+        // Arrange
+        ReconnectHarness harness = ReconnectHarness.Create();
+        MemoryLink first = await harness.StartConnectedAsync();
+        await harness.SubscribeAsync(first, "a/+", MqttQoS.AtLeastOnce, 1);
+        first.EndFromPeer();
+        await harness.AdvanceAsync(s_initial);
+        MemoryLink second = await harness.LinkAsync(2);
+        second.Deliver(ClientPackets.ConnAckAccepted);
+        await second.WhenWrittenAsync(2);
+
+        // Act
+        MqttRequestResult unsubscribed = await harness.Client.UnsubscribeAsync("a/+");
+        second.Deliver(ReconnectHarness.SubAck(1, 0x01));
+        await harness.Log.WhenAsync("connected again");
+        await second.WhenWrittenAsync(3).WaitAsync(ReconnectHarness.Timeout);
+
+        // Assert
+        unsubscribed.Status.ShouldBe(MqttRequestStatus.NotConnected);
+        ReconnectHarness.Packets(second.TakeWritten()).ShouldBe(
+        [
+            ClientPackets.Connect,
+            ReconnectHarness.Subscribe(1, "a/+", MqttQoS.AtLeastOnce),
+            ReconnectHarness.Unsubscribe(2, "a/+"),
+        ]);
+        await harness.StopAsync();
+    }
+
+    /// <summary>
+    /// Proves a subscribe whose SUBACK arrives after an unsubscribe of the same filter is not remembered, so the
+    /// next connection does not subscribe to it again.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task SubscribeAsync_UnsubscribedBeforeTheSubAck_IsNotRemembered()
+    {
+        // Arrange
+        ReconnectHarness harness = ReconnectHarness.Create();
+        MemoryLink first = await harness.StartConnectedAsync();
+        ValueTask<MqttRequestResult> subscribe = harness.Client.SubscribeAsync("a/+", MqttQoS.AtLeastOnce);
+        await first.WhenWrittenAsync(2);
+        ValueTask<MqttRequestResult> unsubscribe = harness.Client.UnsubscribeAsync("a/+");
+        await first.WhenWrittenAsync(3);
+        first.Deliver(ReconnectHarness.SubAck(1, 0x01));
+        first.Deliver(ReconnectHarness.UnsubAck(2));
+        MqttRequestResult subscribed = await subscribe.AsTask().WaitAsync(ReconnectHarness.Timeout);
+        MqttRequestResult unsubscribed = await unsubscribe.AsTask().WaitAsync(ReconnectHarness.Timeout);
+
+        // Act
+        first.EndFromPeer();
+        await harness.AdvanceAsync(s_initial);
+        MemoryLink second = await harness.LinkAsync(2);
+        second.Deliver(ClientPackets.ConnAckAccepted);
+        await harness.Log.WhenAsync("connected again");
+
+        // Assert
+        subscribed.IsSuccess.ShouldBeTrue();
+        unsubscribed.IsSuccess.ShouldBeTrue();
+        ReconnectHarness.Packets(second.TakeWritten()).ShouldBe([ClientPackets.Connect]);
+        await harness.StopAsync();
+    }
+
+    /// <summary>
+    /// Proves a subscribe made again after an unsubscribe of the same filter, both while an earlier subscribe still
+    /// waits for its SUBACK, is remembered: only the subscribes that began before the unsubscribe are ignored.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task SubscribeAsync_SubscribedAgainAfterTheUnsubscribe_IsRemembered()
+    {
+        // Arrange
+        ReconnectHarness harness = ReconnectHarness.Create();
+        MemoryLink first = await harness.StartConnectedAsync();
+        ValueTask<MqttRequestResult> early = harness.Client.SubscribeAsync("a/+", MqttQoS.AtLeastOnce);
+        await first.WhenWrittenAsync(2);
+        ValueTask<MqttRequestResult> unsubscribe = harness.Client.UnsubscribeAsync("a/+");
+        await first.WhenWrittenAsync(3);
+        ValueTask<MqttRequestResult> late = harness.Client.SubscribeAsync("a/+", MqttQoS.AtMostOnce);
+        await first.WhenWrittenAsync(4);
+        first.Deliver(ReconnectHarness.SubAck(1, 0x01));
+        first.Deliver(ReconnectHarness.UnsubAck(2));
+        first.Deliver(ReconnectHarness.SubAck(3, 0x00));
+        await early.AsTask().WaitAsync(ReconnectHarness.Timeout);
+        await unsubscribe.AsTask().WaitAsync(ReconnectHarness.Timeout);
+        await late.AsTask().WaitAsync(ReconnectHarness.Timeout);
+
+        // Act
+        first.EndFromPeer();
+        await harness.AdvanceAsync(s_initial);
+        MemoryLink second = await harness.LinkAsync(2);
+        second.Deliver(ClientPackets.ConnAckAccepted);
+        await second.WhenWrittenAsync(2).WaitAsync(ReconnectHarness.Timeout);
+        second.Deliver(ReconnectHarness.SubAck(1, 0x00));
+        await harness.Log.WhenAsync("connected again");
+
+        // Assert
+        ReconnectHarness.Packets(second.TakeWritten()).ShouldBe(
+        [
+            ClientPackets.Connect,
+            ReconnectHarness.Subscribe(1, "a/+", MqttQoS.AtMostOnce),
+        ]);
+        await harness.StopAsync();
+    }
+
+    /// <summary>
     /// Proves a CONNACK refusal that the same CONNECT would meet again stops the reconnecting client for good:
     /// <c>OnStopped</c> is called once with it, the connection cycle ends, and no attempt follows however long the
     /// clock runs.

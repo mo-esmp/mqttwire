@@ -100,6 +100,13 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
     private readonly OrderedDictionary<string, MqttQoS> _subscriptions = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// For each filter with a subscribe in flight, how many are in flight and how often the filter was unsubscribed
+    /// meanwhile; under <see cref="_gate"/>. An entry is removed when the last subscribe to its filter ends, so the
+    /// table holds only filters with a subscribe in flight.
+    /// </summary>
+    private readonly Dictionary<string, SubscribesInFlight> _subscribesInFlight = new(StringComparer.Ordinal);
+
+    /// <summary>
     /// The connection the application's requests go to, from just before <c>OnConnected</c> until the cycle sees
     /// the connection end; otherwise <see langword="null"/>.
     /// </summary>
@@ -293,7 +300,9 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
     /// The outcome, as <see cref="MqttWireClient.SubscribeAsync"/> reports it. When there is no connection it
     /// fails at once with <see cref="MqttRequestStatus.NotConnected"/>, nothing is sent and nothing is remembered:
     /// there is no queue. Only a granted subscription (<see cref="MqttRequestResult.IsSuccess"/>) is remembered; a
-    /// refused one leaves what was remembered as it was.
+    /// refused one leaves what was remembered as it was. A grant is not remembered when
+    /// <see cref="UnsubscribeAsync"/> was called for the same filter after this call began: the server processes the
+    /// UNSUBSCRIBE after this SUBSCRIBE, so the filter ends unsubscribed.
     /// </returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="topicFilter"/> is <see langword="null"/>.
@@ -327,7 +336,19 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
             return NotConnected();
         }
 
-        return RememberWhenGrantedAsync(client.SubscribeAsync(topicFilter, qos, cancellationToken), topicFilter, qos);
+        int unsubscribes = BeginSubscribe(topicFilter);
+        ValueTask<MqttRequestResult> request;
+        try
+        {
+            request = client.SubscribeAsync(topicFilter, qos, cancellationToken);
+        }
+        catch
+        {
+            EndSubscribe(topicFilter, qos, unsubscribes, granted: false);
+            throw;
+        }
+
+        return RememberWhenGrantedAsync(request, topicFilter, qos, unsubscribes);
     }
 
     /// <summary>
@@ -343,7 +364,8 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
     /// <returns>
     /// The outcome, as <see cref="MqttWireClient.UnsubscribeAsync"/> reports it. When there is no connection it
     /// fails at once with <see cref="MqttRequestStatus.NotConnected"/> and nothing is sent. The filter is forgotten
-    /// whatever the outcome.
+    /// whatever the outcome, and a subscribe to it already in flight is not remembered when granted. A connection
+    /// that is subscribing again to the filter at that moment unsubscribes from it before <c>OnConnected</c>.
     /// </returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="topicFilter"/> is <see langword="null"/>.
@@ -362,12 +384,23 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(topicFilter);
         TopicChecks.ThrowIfInvalidTopicFilter(topicFilter, ArrayPool<byte>.Shared);
         cancellationToken.ThrowIfCancellationRequested();
+        MqttWireClient? client;
         lock (_gate)
         {
             _subscriptions.Remove(topicFilter);
+            if (_subscribesInFlight.TryGetValue(topicFilter, out SubscribesInFlight? inFlight))
+            {
+                // A subscribe already in flight must not remember the filter when its SUBACK comes.
+                inFlight.Unsubscribes++;
+            }
+
+            // Read under the lock: a new connection is published under it only once every filter forgotten during
+            // its re-subscribe was unsubscribed there, so either that connection sees this filter forgotten, or this
+            // call sees the connection.
+            client = _current;
         }
 
-        return _current is MqttWireClient client ? client.UnsubscribeAsync(topicFilter, cancellationToken) : NotConnected();
+        return client is not null ? client.UnsubscribeAsync(topicFilter, cancellationToken) : NotConnected();
     }
 
     /// <summary>
@@ -514,21 +547,89 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
     /// <param name="qos">
     /// The QoS asked for.
     /// </param>
+    /// <param name="unsubscribes">
+    /// The filter's unsubscribe count when the subscribe began, from <see cref="BeginSubscribe"/>.
+    /// </param>
     /// <returns>
-    /// The subscribe's outcome; it throws what the subscribe throws, and then nothing is remembered.
+    /// The subscribe's outcome; it throws what the subscribe throws, and then nothing is remembered. A grant is
+    /// not remembered when the filter was unsubscribed since the subscribe began.
     /// </returns>
-    private async ValueTask<MqttRequestResult> RememberWhenGrantedAsync(ValueTask<MqttRequestResult> request, string topicFilter, MqttQoS qos)
+    private async ValueTask<MqttRequestResult> RememberWhenGrantedAsync(
+        ValueTask<MqttRequestResult> request,
+        string topicFilter,
+        MqttQoS qos,
+        int unsubscribes)
     {
-        MqttRequestResult result = await request.ConfigureAwait(false);
-        if (result.IsSuccess)
+        bool granted = false;
+        try
         {
-            lock (_gate)
+            MqttRequestResult result = await request.ConfigureAwait(false);
+            granted = result.IsSuccess;
+            return result;
+        }
+        finally
+        {
+            EndSubscribe(topicFilter, qos, unsubscribes, granted);
+        }
+    }
+
+    /// <summary>
+    /// Counts a subscribe to a filter as in flight, so that an unsubscribe of the filter before its SUBACK keeps it
+    /// from being remembered.
+    /// </summary>
+    /// <param name="topicFilter">
+    /// The topic filter.
+    /// </param>
+    /// <returns>
+    /// The filter's unsubscribe count now, for <see cref="EndSubscribe"/> to compare.
+    /// </returns>
+    private int BeginSubscribe(string topicFilter)
+    {
+        lock (_gate)
+        {
+            if (!_subscribesInFlight.TryGetValue(topicFilter, out SubscribesInFlight? inFlight))
+            {
+                inFlight = new SubscribesInFlight();
+                _subscribesInFlight.Add(topicFilter, inFlight);
+            }
+
+            inFlight.Count++;
+            return inFlight.Unsubscribes;
+        }
+    }
+
+    /// <summary>
+    /// Ends a subscribe counted by <see cref="BeginSubscribe"/>: remembers the filter when the server granted it
+    /// and it was not unsubscribed since, and drops the filter's entry when no other subscribe to it is in flight.
+    /// </summary>
+    /// <param name="topicFilter">
+    /// The topic filter.
+    /// </param>
+    /// <param name="qos">
+    /// The QoS asked for.
+    /// </param>
+    /// <param name="unsubscribes">
+    /// The filter's unsubscribe count when the subscribe began.
+    /// </param>
+    /// <param name="granted">
+    /// Whether the server granted the subscription.
+    /// </param>
+    private void EndSubscribe(string topicFilter, MqttQoS qos, int unsubscribes, bool granted)
+    {
+        lock (_gate)
+        {
+            SubscribesInFlight inFlight = _subscribesInFlight[topicFilter];
+            if (granted && inFlight.Unsubscribes == unsubscribes)
             {
                 _subscriptions[topicFilter] = qos;
             }
-        }
 
-        return result;
+            inFlight.Count--;
+            if (inFlight.Count == 0)
+            {
+                _subscribesInFlight.Remove(topicFilter);
+            }
+        }
     }
 
     /// <summary>
@@ -735,12 +836,13 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
                     : (AttemptEnd.Failed, null);
             }
 
-            if (!await ResubscribeAsync(client, stop).ConfigureAwait(false))
+            (bool resubscribed, List<string>? granted) = await ResubscribeAsync(client, stop).ConfigureAwait(false);
+            if (!resubscribed)
             {
                 return (AttemptEnd.Failed, null);
             }
 
-            _current = client;
+            PublishConnection(client, granted);
             Invoke(_options.OnConnected, new MqttConnectedInfo(isReconnect, ack));
             CompleteStart(ack);
             await EndConnectionAsync(client, closed, stop).ConfigureAwait(false);
@@ -808,24 +910,28 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
     /// Stops the wait for a SUBACK.
     /// </param>
     /// <returns>
-    /// <see langword="true"/> when every filter was granted or refused; <see langword="false"/> when the
-    /// connection ended first. What is remembered is changed only by refusals.
+    /// Whether every filter was granted or refused (<see langword="false"/> when the connection ended first), and
+    /// the filters the server granted, or <see langword="null"/> when there were none. What is remembered is changed
+    /// only by refusals; a granted filter the application unsubscribed meanwhile is left to
+    /// <see cref="PublishConnection"/>.
     /// </returns>
     /// <exception cref="OperationCanceledException">
     /// <paramref name="stop"/> was cancelled.
     /// </exception>
-    private async Task<bool> ResubscribeAsync(MqttWireClient client, CancellationToken stop)
+    private async Task<(bool Completed, List<string>? Granted)> ResubscribeAsync(MqttWireClient client, CancellationToken stop)
     {
         KeyValuePair<string, MqttQoS>[] remembered;
         lock (_gate)
         {
             if (_subscriptions.Count == 0)
             {
-                return true;
+                return (true, null);
             }
 
             remembered = [.. _subscriptions];
         }
+
+        List<string>? granted = null;
 
         foreach ((string filter, MqttQoS qos) in remembered)
         {
@@ -841,12 +947,13 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
             MqttRequestResult result = await client.SubscribeAsync(filter, qos, stop).ConfigureAwait(false);
             if (result.IsSuccess)
             {
+                (granted ??= []).Add(filter);
                 continue;
             }
 
             if (result.Status is MqttRequestStatus.NotConnected or MqttRequestStatus.ConnectionLost)
             {
-                return false;
+                return (false, null);
             }
 
             lock (_gate)
@@ -857,7 +964,63 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
             Invoke(_options.OnSubscriptionRefused, filter, result);
         }
 
-        return true;
+        return (true, granted);
+    }
+
+    /// <summary>
+    /// Makes a connection whose re-subscribe completed the one the application's requests go to. First, every
+    /// granted filter the application unsubscribed during the re-subscribe is unsubscribed on the connection,
+    /// without waiting for the UNSUBACK; the connection is published under <see cref="_gate"/> only once no such
+    /// filter is left, so an <see cref="UnsubscribeAsync"/> either came before and is handled here, or sees the
+    /// connection and unsubscribes there itself, and the application's own requests always follow these
+    /// UNSUBSCRIBEs.
+    /// </summary>
+    /// <param name="client">
+    /// The new connection's client.
+    /// </param>
+    /// <param name="granted">
+    /// The filters the re-subscribe was granted, or <see langword="null"/>; the ones unsubscribed here are removed.
+    /// </param>
+    private void PublishConnection(MqttWireClient client, List<string>? granted)
+    {
+        while (true)
+        {
+            List<string>? forgotten = null;
+            lock (_gate)
+            {
+                if (granted is not null)
+                {
+                    int kept = 0;
+                    for (int i = 0; i < granted.Count; i++)
+                    {
+                        string filter = granted[i];
+                        if (_subscriptions.ContainsKey(filter))
+                        {
+                            granted[kept++] = filter;
+                        }
+                        else
+                        {
+                            (forgotten ??= []).Add(filter);
+                        }
+                    }
+
+                    granted.RemoveRange(kept, granted.Count - kept);
+                }
+
+                if (forgotten is null)
+                {
+                    _current = client;
+                    return;
+                }
+            }
+
+            foreach (string filter in forgotten)
+            {
+                // Not awaited: OnConnected need not wait for the UNSUBACK, and a request that is never awaited is
+                // left to the garbage collector. A connection that has ended meanwhile sends nothing.
+                _ = client.UnsubscribeAsync(filter, CancellationToken.None);
+            }
+        }
     }
 
     /// <summary>
@@ -979,5 +1142,23 @@ public sealed class MqttWireReconnectingClient : IAsyncDisposable
             // OnCallbackError itself failed; there is nowhere left to report it, and the cycle carries on.
         }
 #pragma warning restore RCS1075
+    }
+
+    /// <summary>
+    /// The subscribes in flight to one filter, and how often the filter was unsubscribed while any was; under
+    /// <see cref="_gate"/>.
+    /// </summary>
+    private sealed class SubscribesInFlight
+    {
+        /// <summary>
+        /// Gets or sets the number of subscribes to the filter in flight.
+        /// </summary>
+        public int Count { get; set; }
+
+        /// <summary>
+        /// Gets or sets the number of unsubscribes of the filter since the entry was made; a subscribe remembers
+        /// the filter only when this is what it was when the subscribe began.
+        /// </summary>
+        public int Unsubscribes { get; set; }
     }
 }
