@@ -176,8 +176,11 @@ public sealed partial class MqttWireClient : IAsyncDisposable
     public MqttWireClient(MqttWireClientOptions options)
         : this(
             options,
-            options.OnMessage,
-            options.OnClosed,
+
+            // Null-conditional on purpose: these run before the constructor below checks options for null, so a
+            // null options must reach that check and throw ArgumentNullException, not a NullReferenceException here.
+            options?.OnMessage,
+            options?.OnClosed,
             ClientWebSocketConnector.Instance,
             TimeProvider.System,
             ArrayPool<byte>.Shared)

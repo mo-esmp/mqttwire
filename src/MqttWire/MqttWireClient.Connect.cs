@@ -255,18 +255,7 @@ public sealed partial class MqttWireClient
 
         if (connAck.ReasonCode >= MqttReasonCode.UnspecifiedError)
         {
-            string? reasonString = ReadReasonString(connAck.Properties);
-            _refusal = new MqttConnectAck(
-                MqttClientCloseReason.ConnectRefused,
-                connAck.ReasonCode,
-                reasonString,
-                ReadUserProperties(connAck.Properties),
-                exception: null);
-            return TryBeginEnd(
-                new MqttClientCloseInfo(MqttClientCloseReason.ConnectRefused, connAck.ReasonCode, reasonString, null),
-                EndMode.Close)
-                ? EndStep.Close
-                : EndStep.None;
+            return HandleConnAckRefusal(connAck);
         }
 
         // The client asked for a clean start, so the server cannot have a session (MQTT 5, 3.2.2.1.1).
@@ -300,6 +289,33 @@ public sealed partial class MqttWireClient
         // Set before the read loop started, and the read loop is the caller.
         _connectResult!.TrySetResult(ack);
         return EndStep.None;
+    }
+
+    /// <summary>
+    /// Records a CONNACK that refuses the connection and begins closing the client, unless another reason ended
+    /// the connection first. The refusal is stored in either case.
+    /// </summary>
+    /// <param name="connAck">
+    /// The decoded CONNACK, whose reason code is a refusal (0x80 or above).
+    /// </param>
+    /// <returns>
+    /// <see cref="EndStep.Close"/> when this call recorded the end; <see cref="EndStep.None"/> when another reason
+    /// ended the connection first.
+    /// </returns>
+    private EndStep HandleConnAckRefusal(in ConnAckPacket connAck)
+    {
+        string? reasonString = ReadReasonString(connAck.Properties);
+        _refusal = new MqttConnectAck(
+            MqttClientCloseReason.ConnectRefused,
+            connAck.ReasonCode,
+            reasonString,
+            ReadUserProperties(connAck.Properties),
+            exception: null);
+        return TryBeginEnd(
+            new MqttClientCloseInfo(MqttClientCloseReason.ConnectRefused, connAck.ReasonCode, reasonString, null),
+            EndMode.Close)
+            ? EndStep.Close
+            : EndStep.None;
     }
 
     /// <summary>

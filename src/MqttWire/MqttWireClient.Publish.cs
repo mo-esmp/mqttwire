@@ -66,7 +66,7 @@ public sealed partial class MqttWireClient
     /// A QoS 0 publish is allocation-free when the send lock is uncontended and the write completes synchronously;
     /// a write that completes asynchronously (always in the browser) allocates its state machine.
     /// </remarks>
-    public async ValueTask<MqttRequestResult> PublishAsync(string topic, ReadOnlyMemory<byte> payload, MqttQoS qos)
+    public ValueTask<MqttRequestResult> PublishAsync(string topic, ReadOnlyMemory<byte> payload, MqttQoS qos)
     {
         ArgumentNullException.ThrowIfNull(topic);
         if (qos > MqttQoS.ExactlyOnce)
@@ -84,7 +84,7 @@ public sealed partial class MqttWireClient
             utf8Topic = utf8Topic[..FieldSize.StrictUtf8.GetBytes(topic, utf8Topic)];
             TopicChecks.CheckTopicName(utf8Topic);
 
-            return await Publish(utf8Topic, payload.Span, qos).ConfigureAwait(false);
+            return Publish(utf8Topic, payload.Span, qos);
         }
         finally
         {

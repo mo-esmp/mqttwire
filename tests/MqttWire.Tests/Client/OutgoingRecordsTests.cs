@@ -143,7 +143,7 @@ public sealed class OutgoingRecordsTests
         records.TryAdd(RecordKind.PublishQoS2AwaitingPubRec, 0, records.RentCompletion(), out OutgoingRecord? record, out _);
 
         // Act
-        records.Advance(record!, RecordKind.PublishQoS2AwaitingPubComp, 5);
+        OutgoingRecords.Advance(record!, RecordKind.PublishQoS2AwaitingPubComp, 5);
         bool added = records.TryAdd(RecordKind.PublishQoS1, 6, records.RentCompletion(), out _, out MqttRequestStatus failure);
 
         // Assert
@@ -165,7 +165,7 @@ public sealed class OutgoingRecordsTests
         records.TryAdd(RecordKind.PublishQoS2AwaitingPubRec, 10, records.RentCompletion(), out OutgoingRecord? record, out _);
 
         // Act
-        records.Advance(record!, RecordKind.PublishQoS2AwaitingPubComp, 50);
+        OutgoingRecords.Advance(record!, RecordKind.PublishQoS2AwaitingPubComp, 50);
 
         // Assert
         emptyOldest.ShouldBeNull();
