@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using MqttWire.Client;
 using MqttWire.Codec;
@@ -99,7 +100,8 @@ public sealed partial class MqttWireClient
     /// <summary>
     /// Reads once into the receive buffer and handles every whole packet in it, sending the acknowledgement a
     /// packet asks for before the next packet is handled. Once the end has begun, what is read is dropped
-    /// unhandled, until the server ends the link or the close deadline aborts it.
+    /// unhandled, until the server ends the link or the close deadline aborts it. It uses the pooling builder, so
+    /// a call that suspends allocates nothing in steady state.
     /// </summary>
     /// <param name="link">
     /// The link.
@@ -110,6 +112,7 @@ public sealed partial class MqttWireClient
     /// <exception cref="Exception">
     /// The read failed; the read loop records it.
     /// </exception>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<bool> ReadAndHandleAsync(IMqttLink link)
     {
         int read = await link.ReadAsync(_receive.GetReadMemory(), CancellationToken.None).ConfigureAwait(false);

@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Runtime.CompilerServices;
 
 namespace MqttWire.Link;
 
@@ -12,7 +13,8 @@ namespace MqttWire.Link;
 internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
 {
     /// <summary>
-    /// Waits with a zero-byte receive, which completes when data is available and consumes nothing.
+    /// Waits with a zero-byte receive, which completes when data is available and consumes nothing. It uses the
+    /// pooling builder, so a wait that suspends, as every idle wait does, allocates nothing in steady state.
     /// </summary>
     /// <param name="cancellationToken">
     /// Cancels the wait.
@@ -21,11 +23,13 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
     /// A task that completes when a read would not wait. A close from the peer also completes it: the socket then
     /// records the close, and the next <see cref="ReadAsync"/> returns 0.
     /// </returns>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask WaitForDataAsync(CancellationToken cancellationToken)
         => await webSocket.ReceiveAsync(Memory<byte>.Empty, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
-    /// Reads the next bytes, skipping empty frames.
+    /// Reads the next bytes, skipping empty frames. It uses the pooling builder, so a read that suspends allocates
+    /// nothing in steady state.
     /// </summary>
     /// <param name="buffer">
     /// Receives the bytes.
@@ -40,6 +44,7 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
     /// <exception cref="WebSocketException">
     /// The socket failed.
     /// </exception>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken)
     {
         while (true)
