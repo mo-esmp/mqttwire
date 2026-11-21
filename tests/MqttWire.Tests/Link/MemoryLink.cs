@@ -63,6 +63,17 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     private bool _holdWrites;
 
     /// <summary>
+    /// Whether <see cref="WaitForDataAsync"/> completes at once, so that the client's read itself is pending.
+    /// </summary>
+    private bool _skipWaits;
+
+    /// <summary>
+    /// Whether <see cref="Abort"/> leaves a pending wait or read pending, until <see cref="Deliver"/>,
+    /// <see cref="EndFromPeer"/> or <see cref="FailReads"/> ends it.
+    /// </summary>
+    private bool _holdReadsOnAbort;
+
+    /// <summary>
     /// Completes when <see cref="WriteCount"/> reaches <see cref="_writesWanted"/>, or <see langword="null"/> when
     /// no one waits.
     /// </summary>
@@ -100,6 +111,20 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
             lock (_gate)
             {
                 return _held.Count > 0 ? _held.Peek().Buffer : default;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the buffer the pending read fills, or an empty buffer when no read is pending.
+    /// </summary>
+    public Memory<byte> PendingReadBuffer
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _pending == Pending.Read ? _pendingBuffer : default;
             }
         }
     }
@@ -318,6 +343,30 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     }
 
     /// <summary>
+    /// Makes every later <see cref="WaitForDataAsync"/> complete at once, so that the read that follows it stays
+    /// pending, holding its buffer, until data comes or the read is ended.
+    /// </summary>
+    public void SkipWaits()
+    {
+        lock (_gate)
+        {
+            _skipWaits = true;
+        }
+    }
+
+    /// <summary>
+    /// Makes <see cref="Abort"/> leave a pending wait or read pending, as a link may whose abort ends its read only
+    /// later; <see cref="Deliver"/>, <see cref="EndFromPeer"/> or <see cref="FailReads"/> then ends it.
+    /// </summary>
+    public void HoldReadsOnAbort()
+    {
+        lock (_gate)
+        {
+            _holdReadsOnAbort = true;
+        }
+    }
+
+    /// <summary>
     /// Completes every held write, oldest first, and stops holding later ones. A write that succeeds counts
     /// towards <see cref="WriteCount"/> and <see cref="TakeWritten"/>.
     /// </summary>
@@ -378,7 +427,7 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
                 return ValueTask.FromException(new OperationCanceledException());
             }
 
-            if (_dataCount > 0 || _ended)
+            if (_dataCount > 0 || _ended || _skipWaits)
             {
                 return default;
             }
@@ -494,7 +543,8 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
 
     /// <summary>
     /// Records the abort and ends a pending wait or read with <see cref="OperationCanceledException"/>, as
-    /// <see cref="WebSocket.Abort"/> does. Held writes stay pending until <see cref="CompleteHeldWrites"/>.
+    /// <see cref="WebSocket.Abort"/> does, unless <see cref="HoldReadsOnAbort"/> was called. Held writes stay
+    /// pending until <see cref="CompleteHeldWrites"/>.
     /// </summary>
     public void Abort()
     {
@@ -502,7 +552,7 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
         lock (_gate)
         {
             IsAborted = true;
-            if (_pending == Pending.None)
+            if (_pending == Pending.None || _holdReadsOnAbort)
             {
                 return;
             }

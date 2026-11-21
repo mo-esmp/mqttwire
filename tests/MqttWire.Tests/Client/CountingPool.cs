@@ -15,6 +15,11 @@ internal sealed class CountingPool : ArrayPool<byte>
     private int _largestRent;
 
     /// <summary>
+    /// The number of returns refused; under <see cref="_gate"/>.
+    /// </summary>
+    private int _faultyReturns;
+
+    /// <summary>
     /// Completes when no buffer is out, or <see langword="null"/> when no one waits; under <see cref="_gate"/>.
     /// </summary>
     private TaskCompletionSource? _noneOutstanding;
@@ -29,6 +34,21 @@ internal sealed class CountingPool : ArrayPool<byte>
             lock (_gate)
             {
                 return _rented.Count;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the number of returns this pool refused: a buffer returned twice, or one it never rented. A refused
+    /// return also throws, but the client may swallow that exception, so a test asserts this count.
+    /// </summary>
+    public int FaultyReturns
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _faultyReturns;
             }
         }
     }
@@ -77,10 +97,12 @@ internal sealed class CountingPool : ArrayPool<byte>
 
     /// <summary>
     /// Waits until every rented buffer is back, for buffers that writes running on the thread pool return after
-    /// the test has moved on. Waits for no time of its own: it completes on the return that empties the pool.
+    /// the test has moved on. It completes on the return that empties the pool; the 30-second limit is only a
+    /// fail-safe, so that a leak fails the test instead of hanging the run, and no outcome depends on it.
     /// </summary>
     /// <returns>
-    /// A task that completes, never inline, once no buffer is out; at once when none is out now.
+    /// A task that completes, never inline, once no buffer is out; at once when none is out now. It fails with
+    /// <see cref="TimeoutException"/> when a buffer is still out after 30 seconds.
     /// </returns>
     public Task WhenNoneOutstandingAsync()
     {
@@ -92,7 +114,7 @@ internal sealed class CountingPool : ArrayPool<byte>
             }
 
             _noneOutstanding ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            return _noneOutstanding.Task;
+            return _noneOutstanding.Task.WaitAsync(TimeSpan.FromSeconds(30));
         }
     }
 
@@ -135,6 +157,7 @@ internal sealed class CountingPool : ArrayPool<byte>
         {
             if (!_rented.Remove(array))
             {
+                _faultyReturns++;
                 throw new InvalidOperationException("The buffer was not rented from this pool, or was returned twice.");
             }
 
