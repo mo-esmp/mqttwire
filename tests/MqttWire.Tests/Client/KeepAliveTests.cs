@@ -197,19 +197,17 @@ public sealed class KeepAliveTests
     }
 
     /// <summary>
-    /// Proves a Server Keep Alive of 0 turns keep-alive off, as MQTT 5 (3.1.2.10) says: no PINGREQ is sent and an
-    /// unacknowledged request does not end the connection, however long it waits.
+    /// Proves a Server Keep Alive of 0 turns the PINGREQs off, as MQTT 5 (3.1.2.10) says: with no request in flight
+    /// nothing is written and the connection stays up, however long it is idle.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
     /// </returns>
     [Fact]
-    public async Task Tick_ServerKeepAliveZero_SendsNothingAndKeepsTheConnection()
+    public async Task Tick_ServerKeepAliveZero_SendsNoPingReq()
     {
         // Arrange
         ClientHarness harness = await ConnectAsync(TimeSpan.FromSeconds(10), ClientPackets.ConnAckServerKeepAlive0);
-        _ = harness.Client.PublishAsync("a/b", s_hi, MqttQoS.AtLeastOnce);
-        harness.NextPacket();
 
         // Act
         harness.Time.Advance(TimeSpan.FromMinutes(10));
@@ -217,7 +215,43 @@ public sealed class KeepAliveTests
         // Assert
         harness.Link.TakeWritten().ShouldBeEmpty();
         harness.Client.IsConnected.ShouldBeTrue();
-        harness.Timers.PeriodicTimers().ShouldBeEmpty();
+        harness.Closed.ShouldBeEmpty();
+    }
+
+    /// <summary>
+    /// Proves a Server Keep Alive of 0 keeps the acknowledgement deadline, at twice the client's own interval: a
+    /// request unacknowledged for 20 s, with a keep-alive option of 10 s, ends the connection with
+    /// <see cref="MqttClientCloseReason.AcknowledgementTimedOut"/> at that tick and not before, aborting the link
+    /// without a DISCONNECT, and no PINGREQ is ever written.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Tick_ServerKeepAliveZero_KeepsTheAcknowledgementDeadline()
+    {
+        // Arrange
+        CountingPool pool = new();
+        ClientHarness harness = await ConnectAsync(TimeSpan.FromSeconds(10), ClientPackets.ConnAckServerKeepAlive0, pool);
+        ValueTask<MqttRequestResult> publish = harness.Client.PublishAsync("a/b", s_hi, MqttQoS.AtLeastOnce);
+        harness.NextPacket();
+        harness.Time.Advance(TimeSpan.FromSeconds(20) - TimeSpan.FromTicks(1));
+        bool connectedJustBefore = harness.Client.IsConnected;
+
+        // Act
+        harness.Time.Advance(TimeSpan.FromTicks(1));
+        MqttRequestResult result = await publish;
+
+        // Assert
+        connectedJustBefore.ShouldBeTrue();
+        harness.Client.IsConnected.ShouldBeFalse();
+        harness.Link.IsAborted.ShouldBeTrue();
+        harness.Link.ClosedWith.ShouldBeNull();
+        harness.Link.TakeWritten().ShouldBeEmpty();
+        harness.Closed.ShouldBe([new MqttClientCloseInfo(MqttClientCloseReason.AcknowledgementTimedOut, MqttReasonCode.Success, null, null)]);
+        result.Status.ShouldBe(MqttRequestStatus.ConnectionLost);
+        harness.Timers.ActiveTimers.ShouldBe(0);
+        pool.Outstanding.ShouldBe(0);
     }
 
     /// <summary>

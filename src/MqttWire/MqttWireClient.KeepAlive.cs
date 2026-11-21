@@ -4,7 +4,9 @@ namespace MqttWire;
 
 /// <content>
 /// Keep-alive: one timer per connection that ticks every half interval, sends PINGREQ when nothing was sent, and
-/// ends the connection when a PINGREQ or a request goes unanswered for too long (6.9, decision 8).
+/// ends the connection when a PINGREQ or a request goes unanswered for too long (6.9, decision 8). A server that
+/// turns keep-alive off (Server Keep Alive 0) stops the PINGREQs only: the acknowledgement deadline stays, at
+/// twice the client's own interval, so no request waits for ever.
 /// </content>
 public sealed partial class MqttWireClient
 {
@@ -14,16 +16,23 @@ public sealed partial class MqttWireClient
     private static readonly TimerCallback s_keepAliveTick = static state => ((MqttWireClient)state!).OnKeepAliveTick();
 
     /// <summary>
-    /// The keep-alive timer, from the accepting CONNACK until the connection is finished; <see langword="null"/>
-    /// before, after, and when the server turned keep-alive off. Under <see cref="_gate"/>.
+    /// The keep-alive timer, from the accepting CONNACK until the connection is finished, also when the server
+    /// turned keep-alive off; <see langword="null"/> before and after. Under <see cref="_gate"/>.
     /// </summary>
     private ITimer? _keepAliveTimer;
 
     /// <summary>
-    /// The keep-alive interval in force: the CONNACK's Server Keep Alive, or the client's own. Set before the timer
-    /// is created and never changed, so a tick reads it without the lock.
+    /// The interval the timer works with: the CONNACK's Server Keep Alive, or the client's own when the CONNACK has
+    /// none or turns keep-alive off. Set before the timer is created and never changed, so a tick reads it without
+    /// the lock.
     /// </summary>
     private TimeSpan _keepAliveInterval;
+
+    /// <summary>
+    /// Whether the ticks send PINGREQ and keep its deadline: <see langword="false"/> when the server sent a Server
+    /// Keep Alive of 0 (MQTT 5, 3.1.2.10). Set with <see cref="_keepAliveInterval"/> and never changed.
+    /// </summary>
+    private bool _sendsPings;
 
     /// <summary>
     /// The <see cref="TimeProvider.GetTimestamp"/> of the oldest PINGREQ not yet answered, or 0 when none waits.
@@ -39,8 +48,9 @@ public sealed partial class MqttWireClient
     /// The CONNACK's validated properties.
     /// </param>
     /// <returns>
-    /// The interval; <see cref="TimeSpan.Zero"/> when the server sent a Server Keep Alive of 0, which turns
-    /// keep-alive off (MQTT 5, 3.1.2.10).
+    /// The interval; <see cref="TimeSpan.Zero"/> when the server sent a Server Keep Alive of 0, which turns the
+    /// PINGREQs off (MQTT 5, 3.1.2.10) but not the acknowledgement deadline (see
+    /// <see cref="StartKeepAliveLocked"/>).
     /// </returns>
     private TimeSpan ReadKeepAliveInterval(in PropertyBlock properties)
         => properties.TryGetInteger(PropertyId.ServerKeepAlive, out uint seconds) ? TimeSpan.FromSeconds(seconds) : KeepAlive;
@@ -50,17 +60,15 @@ public sealed partial class MqttWireClient
     /// <see cref="_gate"/>, as the connection becomes connected.
     /// </summary>
     /// <param name="interval">
-    /// The keep-alive interval; <see cref="TimeSpan.Zero"/> creates no timer.
+    /// The keep-alive interval of the connection. <see cref="TimeSpan.Zero"/>, keep-alive turned off by the server,
+    /// still creates the timer, for the acknowledgement deadline alone: it then ticks every half of the client's
+    /// own interval and sends no PINGREQ.
     /// </param>
     private void StartKeepAliveLocked(TimeSpan interval)
     {
-        if (interval == TimeSpan.Zero)
-        {
-            return;
-        }
-
-        _keepAliveInterval = interval;
-        TimeSpan period = interval / 2;
+        _sendsPings = interval != TimeSpan.Zero;
+        _keepAliveInterval = _sendsPings ? interval : KeepAlive;
+        TimeSpan period = _keepAliveInterval / 2;
         _keepAliveTimer = _time.CreateTimer(s_keepAliveTick, this, period, period);
     }
 
@@ -92,8 +100,9 @@ public sealed partial class MqttWireClient
     /// <see cref="MqttClientCloseReason.KeepAliveTimedOut"/> when a PINGREQ has waited a full interval, or with
     /// <see cref="MqttClientCloseReason.AcknowledgementTimedOut"/> when the oldest request has waited twice the
     /// interval for its next acknowledgement; otherwise sends PINGREQ when nothing was sent for half the interval.
-    /// Does nothing unless connected, so a tick that comes after the end, as a timer's late callback may, changes
-    /// nothing.
+    /// With keep-alive turned off by the server only the acknowledgement deadline is checked, against the client's
+    /// own interval. Does nothing unless connected, so a tick that comes after the end, as a timer's late callback
+    /// may, changes nothing.
     /// </summary>
     /// <remarks>
     /// Runs on the timer's thread: it never blocks and holds the lock only to read the records. The PINGREQ goes
@@ -115,8 +124,9 @@ public sealed partial class MqttWireClient
 
         long now = _time.GetTimestamp();
         TimeSpan interval = _keepAliveInterval;
+        bool sendsPings = _sendsPings;
         long pingRequest = Volatile.Read(ref _pingRequestTimestamp);
-        if (pingRequest != 0 && _time.GetElapsedTime(pingRequest, now) >= interval)
+        if (sendsPings && pingRequest != 0 && _time.GetElapsedTime(pingRequest, now) >= interval)
         {
             TryBeginEnd(new MqttClientCloseInfo(MqttClientCloseReason.KeepAliveTimedOut, MqttReasonCode.Success, null, null), EndMode.Abort);
             return;
@@ -128,7 +138,7 @@ public sealed partial class MqttWireClient
             return;
         }
 
-        if (_time.GetElapsedTime(LastSendTimestamp, now) < interval / 2)
+        if (!sendsPings || _time.GetElapsedTime(LastSendTimestamp, now) < interval / 2)
         {
             return;
         }
