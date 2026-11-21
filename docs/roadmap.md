@@ -10,7 +10,8 @@ first preview are proposals. The designs behind it:
 - [GrainWire on MqttWire](specs/2026-11-19-grainwire-on-mqttwire-design.md)
 
 Both designs were approved by the owner on 2026-11-19. Of the work below, GrainWire 0.1.0-preview.1
-exists, and steps 0, 1 and 2 of the order of work are done. Step 3 is next.
+exists, and steps 0, 1 and 2 of the order of work are done. Step 3 is next. On 2026-11-21 the
+owner decided that MqttWire is finished first, and GrainWire moves to it afterwards.
 
 ## MqttWire
 
@@ -46,14 +47,21 @@ subscriptions, subscription identifiers, enhanced authentication.
 
 ## Order of work for the next releases
 
-From section 7 of [GrainWire on MqttWire](specs/2026-11-19-grainwire-on-mqttwire-design.md). The
-two repositories are built together, a part at a time.
+From section 7 of [GrainWire on MqttWire](specs/2026-11-19-grainwire-on-mqttwire-design.md), in
+the order the owner set on 2026-11-21: **MqttWire is finished first**, its server, sample,
+benchmark and preview package, and GrainWire moves to it afterwards. The design built the two
+repositories together, a part at a time, so that GrainWire's tests would exercise MqttWire
+early; MqttWire's own interop tests and sample now carry that until step 5. Steps 3 to 7 are
+numbered in the new order; the MqttWire steps keep the numbers of section 7 of the MqttWire
+design.
 
 | Step | Where | What |
 |---|---|---|
 | 0 | GrainWire | Measure what an idle connection costs today and what the floor is; report to the owner. **Done** on 2026-11-20: the floor is 35% of today, and the owner set the GrainWire target to floor + 3 KB ([the report](https://github.com/mo-esmp/grainwire/blob/main/docs/step-0-idle-memory.md)). |
 | 1 | MqttWire | The repository, the codec and its tests. Planned in [docs/plans/2026-11-20-step-1-codec-plan.md](plans/2026-11-20-step-1-codec-plan.md), tracked in #1. **Done**: merged in #2. |
-| 2 | MqttWire | The client and the reconnecting client. Planned in [docs/plans/2026-11-20-step-2-client-plan.md](plans/2026-11-20-step-2-client-plan.md), tracked in #3; the local package `0.1.0-dev.2` is the hand-over to step 3. **Done**: merged in #4. |
-| 3 | GrainWire | `GrainWire.Client` moves to MqttWire's client. Tracked in [mo-esmp/grainwire#8](https://github.com/mo-esmp/grainwire/issues/8). |
-| 4 | MqttWire, then GrainWire | MqttWire's server, sample and benchmark; then the gateway becomes its host. |
-| 5 | GrainWire | Measure again and write up. |
+| 2 | MqttWire | The client and the reconnecting client. Planned in [docs/plans/2026-11-20-step-2-client-plan.md](plans/2026-11-20-step-2-client-plan.md), tracked in #3; the local package `0.1.0-dev.2` was the hand-over to GrainWire's move, now step 5. **Done**: merged in #4. |
+| 3 | MqttWire | The server, its tests, the interops with MQTTnet and MQTT.js, the `GroupChat` sample and the benchmark. Tracked in #6. |
+| 4 | MqttWire | The preview package `0.1.0-preview.1` of both packages, with `docs/mqtt-support.md`. Tracked in #7. |
+| 5 | GrainWire | `GrainWire.Client` moves to MqttWire's client. Tracked in [mo-esmp/grainwire#8](https://github.com/mo-esmp/grainwire/issues/8). |
+| 6 | GrainWire | The gateway becomes MqttWire's host, `ScriptedGateway` is rebuilt on MqttWire's server, and MQTTnet's server packages leave GrainWire. |
+| 7 | GrainWire | Measure again and write up. |

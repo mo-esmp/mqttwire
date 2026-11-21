@@ -366,6 +366,11 @@ green in the repository it touches.
 
 The last commit that still uses MQTTnet gets a git tag when the owner makes it.
 
+**The order was changed by the owner on 2026-11-21**, after step 2: MqttWire is finished first,
+its server, sample, benchmark and preview package (MqttWire's steps 3 and 4), and GrainWire's
+steps 3, 4 (its GrainWire part) and 5 follow. The steps keep their content; the
+[roadmap](../roadmap.md) holds the order and the numbers they now carry.
+
 ## 8. Success
 
 - Goals 1, 2 and 5 hold: no MQTTnet in the two packages; all existing tests pass with their
@@ -401,6 +406,8 @@ The last commit that still uses MQTTnet gets a git tag when the owner makes it.
 - Unity and .NET Standard 2.1 wait for Unity 7.
 - After step 0 (2026-11-20): the target for a joined connection in GrainWire is **floor + 3 KB**,
   in states 2 and 3 alike, not the floor + 2 KB that was proposed (section 6).
+- After step 2 (2026-11-21): MqttWire is finished, up to its preview package, before GrainWire
+  moves to it (section 7).
 
 Put to the owner as assumptions and not objected to: the wire stays standard MQTT 5; the
 TypeScript client stays on MQTT.js; MQTTnet stays in the tests and the benchmark.

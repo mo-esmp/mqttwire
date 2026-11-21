@@ -1077,6 +1077,10 @@ MqttWire's own steps are:
 
 Each step ends with every test green.
 
+On 2026-11-21, after step 2, the owner decided that steps 3 and 4 are done before GrainWire
+moves to the client, so GrainWire's move no longer runs between them; the
+[roadmap](../roadmap.md) holds the order.
+
 ## 8. Success
 
 - The interop tests pass with MQTTnet and MQTT.js at every QoS in both directions.
