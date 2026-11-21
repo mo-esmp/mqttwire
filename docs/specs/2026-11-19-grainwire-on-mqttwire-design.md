@@ -352,8 +352,13 @@ The packages are a preview and not published, so the removal needs no deprecatio
 
 ## 7. Order of work
 
-The two repositories are built together, a part at a time. Each step ends with every test
-green in the repository it touches.
+The two repositories were first planned to be built together, a part at a time, in the order of
+the table below. **On 2026-11-21, after step 2, the owner changed the order:** MqttWire is
+finished first (the MqttWire part of step 4, then its preview package), and steps 3, the
+GrainWire part of 4, and 5 follow. The steps keep their content, except that MqttWire's server
+exists by the time of step 3, so step 3 may also rebuild `ScriptedGateway` on it (5.7) instead
+of the two choices its row gives. The [roadmap](../roadmap.md) holds the order and the numbers
+the steps now carry. Each step ends with every test green in the repository it touches.
 
 | Step | Where | What |
 |---|---|---|
@@ -365,11 +370,6 @@ green in the repository it touches.
 | 5 | GrainWire | Measure again (section 6) and write up (5.11). |
 
 The last commit that still uses MQTTnet gets a git tag when the owner makes it.
-
-**The order was changed by the owner on 2026-11-21**, after step 2: MqttWire is finished first,
-its server, sample, benchmark and preview package (MqttWire's steps 3 and 4), and GrainWire's
-steps 3, 4 (its GrainWire part) and 5 follow. The steps keep their content; the
-[roadmap](../roadmap.md) holds the order and the numbers they now carry.
 
 ## 8. Success
 
