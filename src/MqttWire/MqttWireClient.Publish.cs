@@ -165,7 +165,7 @@ public sealed partial class MqttWireClient
     /// Tells whether an acknowledgement is the one a record waits for.
     /// </summary>
     /// <param name="type">
-    /// PUBACK, PUBREC or PUBCOMP.
+    /// PUBACK, PUBREC, PUBCOMP, SUBACK or UNSUBACK.
     /// </param>
     /// <param name="kind">
     /// What the record waits for.
@@ -178,6 +178,8 @@ public sealed partial class MqttWireClient
         (PacketType.PubAck, RecordKind.PublishQoS1) => true,
         (PacketType.PubRec, RecordKind.PublishQoS2AwaitingPubRec) => true,
         (PacketType.PubComp, RecordKind.PublishQoS2AwaitingPubComp) => true,
+        (PacketType.SubAck, RecordKind.Subscribe) => true,
+        (PacketType.UnsubAck, RecordKind.Unsubscribe) => true,
         _ => false,
     };
 

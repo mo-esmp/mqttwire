@@ -245,10 +245,7 @@ public sealed partial class MqttWireClient
                 return HandlePubRel(packet, out disconnect);
 
             case PacketType.SubAck or PacketType.UnsubAck:
-                // Task 7 handles these. Until then the client subscribes to nothing, so a server that sends one
-                // breaks the protocol.
-                disconnect = MqttReasonCode.ProtocolError;
-                return EndStep.DisconnectAndClose;
+                return HandleSubscribeAck(header.Type, packet, out disconnect);
 
             default:
                 // CONNECT, a second CONNACK, SUBSCRIBE, UNSUBSCRIBE, PINGREQ and AUTH: a server never sends these to
