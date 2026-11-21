@@ -18,7 +18,8 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
     /// Cancels the wait.
     /// </param>
     /// <returns>
-    /// A task that completes when a read would not wait.
+    /// A task that completes when a read would not wait. A close from the peer also completes it: the socket then
+    /// records the close, and the next <see cref="ReadAsync"/> returns 0.
     /// </returns>
     public async ValueTask WaitForDataAsync(CancellationToken cancellationToken)
         => await webSocket.ReceiveAsync(Memory<byte>.Empty, cancellationToken).ConfigureAwait(false);
@@ -34,6 +35,7 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
     /// </param>
     /// <returns>
     /// The number of bytes read, or 0 when the peer closed or sent a text message (the link then closes with 1003).
+    /// A close the peer sent is not answered here: the caller answers it with <see cref="CloseAsync"/>.
     /// </returns>
     /// <exception cref="WebSocketException">
     /// The socket failed.
@@ -42,6 +44,13 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
     {
         while (true)
         {
+            if (webSocket.State is WebSocketState.CloseReceived or WebSocketState.Closed)
+            {
+                // The peer's close was already taken, by the zero-byte receive of WaitForDataAsync or by an earlier
+                // read; receiving again would throw instead of reporting the end.
+                return 0;
+            }
+
             ValueWebSocketReceiveResult result = await webSocket.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
             switch (result.MessageType)
             {

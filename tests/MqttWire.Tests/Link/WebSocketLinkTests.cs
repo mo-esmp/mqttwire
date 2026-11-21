@@ -175,6 +175,37 @@ public sealed class WebSocketLinkTests
     }
 
     /// <summary>
+    /// Proves a close from the peer that ends a wait for data makes the next read return zero rather than throw,
+    /// and that the link can then answer the close.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task ReadAsync_PeerClosesDuringWait_ReturnsZeroAndTheCloseCanBeAnswered()
+    {
+        // Arrange
+        (WebSocket client, WebSocket server) = WebSocketPair.Create();
+        using WebSocket clientSocket = client;
+        using WebSocket serverSocket = server;
+        WebSocketLink link = new(clientSocket);
+        byte[] buffer = new byte[16];
+        ValueTask wait = link.WaitForDataAsync(CancellationToken.None);
+        await serverSocket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, CancellationToken.None);
+        await wait;
+
+        // Act
+        int read = await link.ReadAsync(buffer, CancellationToken.None);
+        await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
+        WebSocketReceiveResult answer = await serverSocket.ReceiveAsync(buffer, CancellationToken.None);
+
+        // Assert
+        read.ShouldBe(0);
+        answer.MessageType.ShouldBe(WebSocketMessageType.Close);
+        answer.CloseStatus.ShouldBe(WebSocketCloseStatus.NormalClosure);
+    }
+
+    /// <summary>
     /// Proves waiting for data completes when data arrives and leaves the data to be read.
     /// </summary>
     /// <returns>
