@@ -35,6 +35,12 @@ public sealed partial class MqttWireClient
         /// code, then close the link.
         /// </summary>
         DisconnectAndClose,
+
+        /// <summary>
+        /// The handler recorded the end itself, with the reason it wanted kept: send DISCONNECT with the handler's
+        /// code, then close the link.
+        /// </summary>
+        DisconnectRecorded,
     }
 
     /// <summary>
@@ -136,7 +142,7 @@ public sealed partial class MqttWireClient
             }
 
             _receive.Clear();
-            await CloseLinkAsync(link, step == EndStep.DisconnectAndClose ? disconnect : null).ConfigureAwait(false);
+            await CloseLinkAsync(link, step is EndStep.DisconnectAndClose or EndStep.DisconnectRecorded ? disconnect : null).ConfigureAwait(false);
             CompleteFailedConnect();
             return true;
         }
@@ -232,9 +238,15 @@ public sealed partial class MqttWireClient
             case PacketType.PubAck or PacketType.PubRec or PacketType.PubComp:
                 return HandlePublishAck(packet, out disconnect);
 
-            case PacketType.Publish or PacketType.PubRel or PacketType.SubAck or PacketType.UnsubAck:
-                // Tasks 6 and 7 handle these. Until then the client subscribes to nothing, so a server that sends
-                // one breaks the protocol.
+            case PacketType.Publish:
+                return HandlePublish(packet, out disconnect);
+
+            case PacketType.PubRel:
+                return HandlePubRel(packet, out disconnect);
+
+            case PacketType.SubAck or PacketType.UnsubAck:
+                // Task 7 handles these. Until then the client subscribes to nothing, so a server that sends one
+                // breaks the protocol.
                 disconnect = MqttReasonCode.ProtocolError;
                 return EndStep.DisconnectAndClose;
 

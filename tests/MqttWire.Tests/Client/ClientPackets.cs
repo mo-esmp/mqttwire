@@ -122,4 +122,59 @@ internal static class ClientPackets
     /// PUBREL with 0x92, packet identifier not found, for packet identifier 7.
     /// </summary>
     public static readonly byte[] PubRelNotFound7 = Hex.Parse("62 03 00 07 92");
+
+    /// <summary>
+    /// PUBLISH at QoS 2 with topic "a/b", packet identifier 7 and payload "hi".
+    /// </summary>
+    public static readonly byte[] PublishQoS2Id7 = Hex.Parse("34 0A 00 03 61 2F 62 00 07 00 68 69");
+
+    /// <summary>
+    /// The PUBLISH of <see cref="PublishQoS2Id7"/> resent with DUP set.
+    /// </summary>
+    public static readonly byte[] PublishQoS2Id7Dup = Hex.Parse("3C 0A 00 03 61 2F 62 00 07 00 68 69");
+
+    /// <summary>
+    /// PUBREC for packet identifier 7 in the short form.
+    /// </summary>
+    public static readonly byte[] PubRec7 = Hex.Parse("50 02 00 07");
+
+    /// <summary>
+    /// PUBREL for packet identifier 7 in the short form.
+    /// </summary>
+    public static readonly byte[] PubRel7 = Hex.Parse("62 02 00 07");
+
+    /// <summary>
+    /// PUBCOMP for packet identifier 7 in the short form.
+    /// </summary>
+    public static readonly byte[] PubComp7 = Hex.Parse("70 02 00 07");
+
+    /// <summary>
+    /// PUBCOMP with 0x92, packet identifier not found, for packet identifier 7.
+    /// </summary>
+    public static readonly byte[] PubCompNotFound7 = Hex.Parse("70 03 00 07 92");
+
+    /// <summary>
+    /// PUBLISH at QoS 0 with topic "a/b", a Topic Alias property of 1 and payload "hi".
+    /// </summary>
+    public static readonly byte[] PublishWithTopicAlias = Hex.Parse("30 0B 00 03 61 2F 62 03 23 00 01 68 69");
+
+    /// <summary>
+    /// PUBLISH at QoS 0 whose topic is a cut two-byte UTF-8 sequence.
+    /// </summary>
+    public static readonly byte[] PublishTopicNotUtf8 = Hex.Parse("30 04 00 01 C3 00");
+
+    /// <summary>
+    /// DISCONNECT with 0x83, implementation specific error.
+    /// </summary>
+    public static readonly byte[] DisconnectImplementationSpecific = Hex.Parse("E0 01 83");
+
+    /// <summary>
+    /// DISCONNECT with 0x93, receive maximum exceeded.
+    /// </summary>
+    public static readonly byte[] DisconnectReceiveMaximumExceeded = Hex.Parse("E0 01 93");
+
+    /// <summary>
+    /// DISCONNECT with 0x94, topic alias invalid.
+    /// </summary>
+    public static readonly byte[] DisconnectTopicAliasInvalid = Hex.Parse("E0 01 94");
 }

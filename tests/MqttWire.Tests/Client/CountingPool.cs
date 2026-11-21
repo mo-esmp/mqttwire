@@ -1,4 +1,6 @@
 using System.Buffers;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace MqttWire.Tests.Client;
 
@@ -38,6 +40,34 @@ internal sealed class CountingPool : ArrayPool<byte>
                 return _largestRent;
             }
         }
+    }
+
+    /// <summary>
+    /// Tells whether a span lies inside an array this pool has rented and not had returned: the span is a view
+    /// into a pooled buffer, not a copy.
+    /// </summary>
+    /// <param name="span">
+    /// The span to look for.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the span's first byte is inside a buffer that is out.
+    /// </returns>
+    public bool IsViewIntoRentedBuffer(ReadOnlySpan<byte> span)
+    {
+        ref byte start = ref MemoryMarshal.GetReference(span);
+        lock (_gate)
+        {
+            foreach (byte[] array in _rented)
+            {
+                nint offset = Unsafe.ByteOffset(ref MemoryMarshal.GetArrayDataReference(array), ref start);
+                if (offset >= 0 && offset < array.Length)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
