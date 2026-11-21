@@ -416,9 +416,11 @@ public sealed partial class MqttWireClient : IAsyncDisposable
     /// end.
     /// </summary>
     /// <returns>
-    /// A task that completes when <see cref="ConnectAsync"/> has returned, the read loop has finished, every buffer
-    /// it held is back in the pool, and <c>OnClosed</c>, if due, has returned. It does not throw, unless finishing
-    /// the connection failed through a bug in the client.
+    /// A task that completes when <see cref="ConnectAsync"/> has returned, the read loop has finished,
+    /// <c>OnClosed</c>, if due, has returned, and every write handed to the send path before then has ended, so
+    /// every buffer the client held is back in the pool. A write still in flight when the link was aborted is
+    /// waited for; the abort makes it end. It does not throw, unless finishing the connection failed through a bug
+    /// in the client.
     /// </returns>
     public async ValueTask DisposeAsync()
     {
@@ -470,15 +472,43 @@ public sealed partial class MqttWireClient : IAsyncDisposable
             }
         }
 
+        await WaitUntilEndedAsync(connectReturned, ended).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Waits until the connect has returned, the read loop has finished the connection, and every write handed to
+    /// the send path before then has ended and returned its buffer.
+    /// </summary>
+    /// <param name="connectReturned">
+    /// Completes when <see cref="ConnectAsync"/> has returned, or <see langword="null"/> when it was never called.
+    /// </param>
+    /// <param name="ended">
+    /// Completes when the read loop has finished, or <see langword="null"/> when no link was opened.
+    /// </param>
+    /// <returns>
+    /// A task that completes then. It throws only what finishing the connection failed with, a bug in the client.
+    /// </returns>
+    private async ValueTask WaitUntilEndedAsync(TaskCompletionSource? connectReturned, TaskCompletionSource? ended)
+    {
         if (connectReturned is not null)
         {
             await connectReturned.Task.ConfigureAwait(false);
         }
 
-        if (ended is not null)
+        if (ended is null)
         {
-            await ended.Task.ConfigureAwait(false);
+            // No link, so no write.
+            return;
         }
+
+        await ended.Task.ConfigureAwait(false);
+
+        // A write still in flight, or queued behind one, owns its buffer until it has ended (6.8 rule 3), and the
+        // link may have been aborted under it. Each entered the send lock's queue before this wait, and the lock
+        // serves its waiters in order, so when this turn comes each has returned its buffer. The read loop aborted
+        // the link as it finished, so each write ends promptly; a later one finds the connection over and returns.
+        await _sendLock.WaitAsync().ConfigureAwait(false);
+        _sendLock.Release();
     }
 
     /// <summary>
