@@ -6,6 +6,12 @@ namespace MqttWire;
 public enum MqttClientCloseReason : byte
 {
     /// <summary>
+    /// No reason recorded: the zero value, which only a default <see cref="MqttClientCloseInfo"/> carries. The
+    /// client never reports it.
+    /// </summary>
+    None,
+
+    /// <summary>
     /// The application disposed the client.
     /// </summary>
     Disposed,

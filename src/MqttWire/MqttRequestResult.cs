@@ -23,7 +23,9 @@ public readonly record struct MqttRequestResult(MqttRequestStatus Status, MqttRe
 
     /// <summary>
     /// Gets the QoS a subscription was granted, or <see langword="null"/> when the exchange did not complete
-    /// or the reason code is not a granted QoS (0x00, 0x01 or 0x02).
+    /// or the reason code is not a granted QoS (0x00, 0x01 or 0x02). Meaningful for a subscribe's result only:
+    /// the result does not know its request's kind, so a successful publish or unsubscribe, whose reason code is
+    /// 0x00, reads as <see cref="MqttQoS.AtMostOnce"/> here.
     /// </summary>
     public MqttQoS? GrantedQoS => Status == MqttRequestStatus.Completed && (byte)ReasonCode <= (byte)MqttQoS.ExactlyOnce
         ? (MqttQoS)(byte)ReasonCode

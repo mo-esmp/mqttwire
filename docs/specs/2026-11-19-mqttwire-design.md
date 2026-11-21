@@ -269,7 +269,10 @@ ValueTask<MqttRequestResult> done = client.PublishAsync("some/topic", payload, M
 - **`PublishAsync`, `SubscribeAsync` and `UnsubscribeAsync` return
   `ValueTask<MqttRequestResult>`.** The result holds a status and the server's reason code.
   `IsSuccess` is true when the exchange completed with a reason code below `0x80`;
-  `GrantedQoS` gives the QoS a SUBACK granted, and is null for anything else. The statuses are:
+  `GrantedQoS` gives the QoS a SUBACK granted, and is null for a refusal or an exchange that did
+  not complete. It is meaningful for a subscribe's result only: the result does not know its
+  request's kind, so a successful publish or unsubscribe (reason code `0x00`) reads as QoS 0. The
+  statuses are:
   `Completed` (the exchange ended; the reason code is the server's); `NotConnected`,
   `ReceiveMaximumReached`, `PacketTooLarge`, `QoSNotSupported` and `NoFreePacketIdentifier`
   (the request failed at once and was not sent); and `ConnectionLost` (the connection ended
