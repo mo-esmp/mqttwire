@@ -11,6 +11,7 @@ permissions:
 jobs:
   dotnet:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       CI: true
     steps:

@@ -12,6 +12,13 @@ internal static class KnownPackets
     public static readonly byte[] Connect = Hex.Parse("10 18 00 04 4D 51 54 54 05 C2 00 0F 03 21 04 00 00 02 63 31 00 01 75 00 01 70");
 
     /// <summary>
+    /// The CONNECT of <see cref="Connect"/> with a Maximum Packet Size of 1,048,576 after the receive maximum: what
+    /// the client sends with its default options.
+    /// </summary>
+    public static readonly byte[] ConnectWithMaximumPacketSize = Hex.Parse(
+        "10 1D 00 04 4D 51 54 54 05 C2 00 0F 08 21 04 00 27 00 10 00 00 00 02 63 31 00 01 75 00 01 70");
+
+    /// <summary>
     /// CONNECT with client id "c" and nothing else: no user name, no password, no Will, no properties.
     /// </summary>
     public static readonly byte[] ConnectMinimal = Hex.Parse("10 0E 00 04 4D 51 54 54 05 02 00 00 00 00 01 63");
