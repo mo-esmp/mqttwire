@@ -61,6 +61,17 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     private Exception? _readFailure;
     private Exception? _writeFailure;
     private bool _holdWrites;
+
+    /// <summary>
+    /// Completes when <see cref="WriteCount"/> reaches <see cref="_writesWanted"/>, or <see langword="null"/> when
+    /// no one waits.
+    /// </summary>
+    private TaskCompletionSource? _writesWaiter;
+
+    /// <summary>
+    /// The write count <see cref="_writesWaiter"/> waits for.
+    /// </summary>
+    private int _writesWanted;
     private CancellationTokenRegistration _registration;
 
     /// <summary>
@@ -267,6 +278,31 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
             byte[] result = _written.AsSpan(0, _writtenCount).ToArray();
             _writtenCount = 0;
             return result;
+        }
+    }
+
+    /// <summary>
+    /// Waits until the link has taken a number of writes in all, for writes that a send lock hands to the thread
+    /// pool. One waiter at a time.
+    /// </summary>
+    /// <param name="count">
+    /// The value <see cref="WriteCount"/> must reach.
+    /// </param>
+    /// <returns>
+    /// A task that completes, never inline, once that many writes were taken.
+    /// </returns>
+    public Task WhenWrittenAsync(int count)
+    {
+        lock (_gate)
+        {
+            if (WriteCount >= count)
+            {
+                return Task.CompletedTask;
+            }
+
+            _writesWanted = count;
+            _writesWaiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            return _writesWaiter.Task;
         }
     }
 
@@ -710,5 +746,10 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
         bytes.CopyTo(_written.AsSpan(_writtenCount));
         _writtenCount += bytes.Length;
         WriteCount++;
+        if (_writesWaiter is not null && WriteCount >= _writesWanted)
+        {
+            _writesWaiter.SetResult();
+            _writesWaiter = null;
+        }
     }
 }

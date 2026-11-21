@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using MqttWire.Client;
 using MqttWire.Codec;
 using MqttWire.Link;
@@ -18,6 +19,11 @@ public sealed partial class MqttWireClient
         /// Carry on reading.
         /// </summary>
         None,
+
+        /// <summary>
+        /// Send the acknowledgement in <see cref="_reply"/>, then carry on handling the buffered packets.
+        /// </summary>
+        SendReply,
 
         /// <summary>
         /// This read loop recorded the end: close the link without a DISCONNECT.
@@ -77,8 +83,9 @@ public sealed partial class MqttWireClient
     }
 
     /// <summary>
-    /// Reads once into the receive buffer and handles every whole packet in it. Once the end has begun, what is
-    /// read is dropped unhandled, until the server ends the link or the close deadline aborts it.
+    /// Reads once into the receive buffer and handles every whole packet in it, sending the acknowledgement a
+    /// packet asks for before the next packet is handled. Once the end has begun, what is read is dropped
+    /// unhandled, until the server ends the link or the close deadline aborts it.
     /// </summary>
     /// <param name="link">
     /// The link.
@@ -105,33 +112,47 @@ public sealed partial class MqttWireClient
         }
 
         _receive.Advance(read);
-        if (_phase >= Phase.Closing)
+        while (true)
         {
+            if (_phase >= Phase.Closing)
+            {
+                _receive.Clear();
+                return true;
+            }
+
+            EndStep step = HandleBuffered(out MqttReasonCode disconnect);
+            if (step == EndStep.SendReply)
+            {
+                // Awaited before the next packet is handled, so the acknowledgements go out in the order the
+                // packets came (MQTT 4.6). A failed write ends the connection, which the next turn sees.
+                await SendReplyAsync().ConfigureAwait(false);
+                continue;
+            }
+
+            if (step == EndStep.None)
+            {
+                _receive.Compact();
+                return true;
+            }
+
             _receive.Clear();
+            await CloseLinkAsync(link, step == EndStep.DisconnectAndClose ? disconnect : null).ConfigureAwait(false);
+            CompleteFailedConnect();
             return true;
         }
-
-        EndStep step = HandleBuffered(out MqttReasonCode disconnect);
-        if (step == EndStep.None)
-        {
-            _receive.Compact();
-            return true;
-        }
-
-        _receive.Clear();
-        await CloseLinkAsync(link, step == EndStep.DisconnectAndClose ? disconnect : null).ConfigureAwait(false);
-        CompleteFailedConnect();
-        return true;
     }
 
     /// <summary>
-    /// Frames and handles every whole packet in the receive buffer, until one ends the connection.
+    /// Frames and handles every whole packet in the receive buffer, until one asks for a reply or ends the
+    /// connection.
     /// </summary>
     /// <param name="disconnect">
     /// The DISCONNECT's reason code when the result is <see cref="EndStep.DisconnectAndClose"/>.
     /// </param>
     /// <returns>
-    /// <see cref="EndStep.None"/> to carry on; otherwise what this read loop, which recorded the end, does next.
+    /// <see cref="EndStep.None"/> when every whole packet is handled; <see cref="EndStep.SendReply"/> when the
+    /// packet just handled, already consumed, asks for the reply in <see cref="_reply"/>; otherwise what this read
+    /// loop, which recorded the end, does next.
     /// </returns>
     private EndStep HandleBuffered(out MqttReasonCode disconnect)
     {
@@ -186,8 +207,9 @@ public sealed partial class MqttWireClient
     /// The DISCONNECT's reason code when the result is <see cref="EndStep.DisconnectAndClose"/>.
     /// </param>
     /// <returns>
-    /// <see cref="EndStep.None"/> to carry on; <see cref="EndStep.Close"/> for a DISCONNECT from the server this
-    /// call recorded; <see cref="EndStep.DisconnectAndClose"/> for a malformed packet or one the server may not send.
+    /// <see cref="EndStep.None"/> to carry on; <see cref="EndStep.SendReply"/> when the packet is answered with the
+    /// reply in <see cref="_reply"/>; <see cref="EndStep.Close"/> for a DISCONNECT from the server this call
+    /// recorded; <see cref="EndStep.DisconnectAndClose"/> for a malformed packet or one the server may not send.
     /// </returns>
     private EndStep HandlePacket(in PacketHeader header, ReadOnlySpan<byte> packet, out MqttReasonCode disconnect)
     {
@@ -207,10 +229,12 @@ public sealed partial class MqttWireClient
                 Volatile.Write(ref _lastPingResponseTimestamp, _time.GetTimestamp());
                 return EndStep.None;
 
-            case PacketType.Publish or PacketType.PubAck or PacketType.PubRec or PacketType.PubRel
-                or PacketType.PubComp or PacketType.SubAck or PacketType.UnsubAck:
-                // Tasks 5 to 7 handle these. Until then the client has nothing in flight and subscribes to nothing,
-                // so a server that sends one breaks the protocol.
+            case PacketType.PubAck or PacketType.PubRec or PacketType.PubComp:
+                return HandlePublishAck(packet, out disconnect);
+
+            case PacketType.Publish or PacketType.PubRel or PacketType.SubAck or PacketType.UnsubAck:
+                // Tasks 6 and 7 handle these. Until then the client subscribes to nothing, so a server that sends
+                // one breaks the protocol.
                 disconnect = MqttReasonCode.ProtocolError;
                 return EndStep.DisconnectAndClose;
 
@@ -247,4 +271,56 @@ public sealed partial class MqttWireClient
         MqttClientCloseInfo info = new(MqttClientCloseReason.ServerDisconnected, received.ReasonCode, ReadReasonString(received.Properties), null);
         return TryBeginEnd(info, EndMode.Close) ? EndStep.Close : EndStep.None;
     }
+
+    /// <summary>
+    /// Records the acknowledgement the read loop sends once the packet being handled is consumed, before it
+    /// handles the next one.
+    /// </summary>
+    /// <param name="type">
+    /// PUBACK, PUBREC, PUBREL or PUBCOMP.
+    /// </param>
+    /// <param name="packetIdentifier">
+    /// The packet identifier it carries.
+    /// </param>
+    /// <param name="reasonCode">
+    /// Its reason code; a success is written without one.
+    /// </param>
+    /// <returns>
+    /// <see cref="EndStep.SendReply"/>, for the handler to return.
+    /// </returns>
+    private EndStep RecordReply(PacketType type, ushort packetIdentifier, MqttReasonCode reasonCode)
+    {
+        _reply = new Reply(type, packetIdentifier, reasonCode);
+        return EndStep.SendReply;
+    }
+
+    /// <summary>
+    /// Encodes the acknowledgement in <see cref="_reply"/> into a rented buffer and sends it through the send lock.
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> when the link took it; <see langword="false"/> when the end had begun, or the write
+    /// failed and ended the connection.
+    /// </returns>
+    private ValueTask<bool> SendReplyAsync()
+    {
+        Reply reply = _reply;
+        byte[] packet = _pool.Rent(AckCodec.GetSize(reply.ReasonCode, null));
+        int length = AckCodec.Write(packet, reply.Type, reply.PacketIdentifier, reply.ReasonCode, null);
+        return SendAsync(packet, length, isDisconnect: false);
+    }
+
+    /// <summary>
+    /// An acknowledgement the read loop owes the server: PUBACK, PUBREC, PUBREL or PUBCOMP, without properties.
+    /// </summary>
+    /// <param name="Type">
+    /// The packet type.
+    /// </param>
+    /// <param name="PacketIdentifier">
+    /// The packet identifier it carries.
+    /// </param>
+    /// <param name="ReasonCode">
+    /// Its reason code.
+    /// </param>
+    [StructLayout(LayoutKind.Auto)]
+    private readonly record struct Reply(PacketType Type, ushort PacketIdentifier, MqttReasonCode ReasonCode);
 }

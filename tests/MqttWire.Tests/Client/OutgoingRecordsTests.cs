@@ -194,6 +194,33 @@ public sealed class OutgoingRecordsTests
     }
 
     /// <summary>
+    /// Proves removing a record that was already removed does nothing, even after its identifier was given to a
+    /// new record: the new record stays in the table.
+    /// </summary>
+    [Fact]
+    public void Remove_StaleRecordAfterIdentifierReuse_LeavesTheNewRecord()
+    {
+        // Arrange
+        OutgoingRecords records = new(10);
+        FillWithSubscribes(records);
+        records.TryGet(3, out OutgoingRecord? stale).ShouldBeTrue();
+        records.TryGet(5, out OutgoingRecord? five).ShouldBeTrue();
+        records.Remove(stale);
+        records.Remove(five);
+        records.TryAdd(RecordKind.Subscribe, 0, records.RentCompletion(), out OutgoingRecord? reused, out _);
+
+        // Act
+        records.Remove(stale);
+
+        // Assert
+        reused.ShouldNotBeNull();
+        reused.ShouldNotBeSameAs(stale);
+        reused.PacketIdentifier.ShouldBe((ushort)3);
+        records.TryGet(3, out OutgoingRecord? found).ShouldBeTrue();
+        found.ShouldBeSameAs(reused);
+    }
+
+    /// <summary>
     /// Proves DrainAll hands every record on and leaves the table empty.
     /// </summary>
     [Fact]

@@ -266,7 +266,8 @@ public sealed partial class MqttWireClient
             return EndStep.DisconnectAndClose;
         }
 
-        // Tasks 5 and 8 read the server's Receive Maximum, Maximum Packet Size, Maximum QoS and Server Keep Alive here.
+        // Task 8 reads Server Keep Alive here.
+        OutgoingRecords records = ReadServerLimits(connAck.Properties, out MqttQoS maximumQoS, out uint maximumPacketSize);
         MqttConnectAck ack = new(null, MqttReasonCode.Success, ReadReasonString(connAck.Properties), ReadUserProperties(connAck.Properties), null);
         lock (_gate)
         {
@@ -275,12 +276,43 @@ public sealed partial class MqttWireClient
                 return EndStep.None;
             }
 
+            // In place before the connection counts as connected, so a publish that sees it connected finds them.
+            _records = records;
+            _serverMaximumQoS = maximumQoS;
+            _serverMaximumPacketSize = maximumPacketSize;
             _phase = Phase.Connected;
         }
 
         // Set before the read loop started, and the read loop is the caller.
         _connectResult!.TrySetResult(ack);
         return EndStep.None;
+    }
+
+    /// <summary>
+    /// Reads the server's limits on what the client sends from an accepting CONNACK (MQTT 5, 3.2.2.3.2, 3.2.2.3.4
+    /// and 3.2.2.3.6). Absent, they are a Receive Maximum of 65,535, QoS 2 and no packet size limit.
+    /// </summary>
+    /// <param name="properties">
+    /// The CONNACK's validated properties.
+    /// </param>
+    /// <param name="maximumQoS">
+    /// The highest QoS the server accepts.
+    /// </param>
+    /// <param name="maximumPacketSize">
+    /// The largest packet the server accepts, or <see cref="uint.MaxValue"/> when it sets none.
+    /// </param>
+    /// <returns>
+    /// The connection's outgoing records, limited to the server's Receive Maximum and never more than 1,024
+    /// publishes in flight.
+    /// </returns>
+    private static OutgoingRecords ReadServerLimits(in PropertyBlock properties, out MqttQoS maximumQoS, out uint maximumPacketSize)
+    {
+        int publishLimit = properties.TryGetInteger(PropertyId.ReceiveMaximum, out uint receiveMaximum)
+            ? (int)Math.Min(receiveMaximum, ClientLimits.MaxPublishesInFlight)
+            : ClientLimits.MaxPublishesInFlight;
+        maximumQoS = properties.TryGetInteger(PropertyId.MaximumQoS, out uint qos) ? (MqttQoS)qos : MqttQoS.ExactlyOnce;
+        maximumPacketSize = properties.TryGetInteger(PropertyId.MaximumPacketSize, out uint size) ? size : uint.MaxValue;
+        return new OutgoingRecords(publishLimit);
     }
 
     /// <summary>

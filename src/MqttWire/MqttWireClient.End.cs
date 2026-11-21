@@ -15,6 +15,13 @@ public sealed partial class MqttWireClient
     private static readonly TimerCallback s_closeTimedOut = static state => ((MqttWireClient)state!).AbortLink();
 
     /// <summary>
+    /// Completes a drained record's request with <see cref="MqttRequestStatus.ConnectionLost"/>; a static lambda,
+    /// so draining allocates no delegate.
+    /// </summary>
+    private static readonly Action<OutgoingRecord> s_completeConnectionLost =
+        static record => record.Completion.Complete(new MqttRequestResult(MqttRequestStatus.ConnectionLost, MqttReasonCode.UnspecifiedError));
+
+    /// <summary>
     /// How the one who records the end treats the link.
     /// </summary>
     private enum EndMode
@@ -31,12 +38,18 @@ public sealed partial class MqttWireClient
     }
 
     /// <summary>
-    /// Completes every request still in flight with <see cref="MqttRequestStatus.ConnectionLost"/>. Called once,
-    /// by the read loop after it has stopped and before <c>OnClosed</c>.
+    /// Completes every request still in flight with <see cref="MqttRequestStatus.ConnectionLost"/> and frees its
+    /// record. Called once, by the read loop after it has stopped and before <c>OnClosed</c>.
     /// </summary>
-    private static void CompleteInFlightRequests()
+    private void CompleteInFlightRequests()
     {
-        // Nothing is in flight yet: the outgoing records that this drains come with publishing (Task 5).
+        lock (_gate)
+        {
+            // Records are added only while connected, so every one was in place before the end was recorded, and
+            // none is added after. Completing under the lock runs no caller code: completions continue
+            // asynchronously (decision 6). Each completion is read before its record is recycled.
+            _records?.DrainAll(s_completeConnectionLost);
+        }
     }
 
     /// <summary>

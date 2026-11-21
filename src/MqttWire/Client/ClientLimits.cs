@@ -11,6 +11,11 @@ internal static class ClientLimits
     public const int ReceiveMaximum = 1024;
 
     /// <summary>
+    /// The most QoS 1 and 2 publishes the client has in flight, whatever larger Receive Maximum the server allows.
+    /// </summary>
+    public const int MaxPublishesInFlight = 1024;
+
+    /// <summary>
     /// The size of the first read buffer, in bytes.
     /// </summary>
     public const int FirstReadBufferBytes = 4096;

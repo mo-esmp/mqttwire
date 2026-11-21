@@ -207,15 +207,18 @@ internal sealed class OutgoingRecords(int publishLimit)
     /// <summary>
     /// Removes a record, frees its identifier and publish slot, and keeps the record for reuse. The caller
     /// reads the record's completion before calling this and must not touch the record afterwards. Removing a
-    /// record that is not in the table does nothing.
+    /// record that is not in the table does nothing, also when its identifier now belongs to another record.
     /// </summary>
     /// <param name="record">
     /// A record of this table.
     /// </param>
     public void Remove(OutgoingRecord record)
     {
-        if (_records.Remove(record.PacketIdentifier))
+        // A stale record that was removed before must not take a newer record with the same identifier along.
+        if (_records.TryGetValue(record.PacketIdentifier, out OutgoingRecord? current)
+            && ReferenceEquals(current, record))
         {
+            _records.Remove(record.PacketIdentifier);
             Release(record);
         }
     }

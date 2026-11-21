@@ -130,6 +130,28 @@ public sealed partial class MqttWireClient : IAsyncDisposable
     private long _lastPingResponseTimestamp;
 
     /// <summary>
+    /// The requests sent and not yet acknowledged; created by the read loop from the accepting CONNACK, before
+    /// the connection is connected, and used only under <see cref="_gate"/>.
+    /// </summary>
+    private OutgoingRecords? _records;
+
+    /// <summary>
+    /// The highest QoS the server accepts, from the CONNACK's Maximum QoS; set with <see cref="_records"/>.
+    /// </summary>
+    private MqttQoS _serverMaximumQoS;
+
+    /// <summary>
+    /// The largest packet the server accepts, from the CONNACK's Maximum Packet Size, or
+    /// <see cref="uint.MaxValue"/> when it sets none; set with <see cref="_records"/>.
+    /// </summary>
+    private uint _serverMaximumPacketSize;
+
+    /// <summary>
+    /// The acknowledgement the read loop sends after the packet it has just handled; read-loop state only.
+    /// </summary>
+    private Reply _reply;
+
+    /// <summary>
     /// Creates a client. Nothing is connected until <see cref="ConnectAsync"/> is called.
     /// </summary>
     /// <param name="options">

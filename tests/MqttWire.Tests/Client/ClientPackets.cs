@@ -62,4 +62,64 @@ internal static class ClientPackets
     /// PINGRESP.
     /// </summary>
     public static readonly byte[] PingResp = Hex.Parse("D0 00");
+
+    /// <summary>
+    /// CONNACK with success and Receive Maximum 2.
+    /// </summary>
+    public static readonly byte[] ConnAckReceiveMaximum2 = Hex.Parse("20 06 00 00 03 21 00 02");
+
+    /// <summary>
+    /// CONNACK with success and Receive Maximum 65,535, more than the client ever uses.
+    /// </summary>
+    public static readonly byte[] ConnAckReceiveMaximum65535 = Hex.Parse("20 06 00 00 03 21 FF FF");
+
+    /// <summary>
+    /// CONNACK with success and Maximum QoS 1.
+    /// </summary>
+    public static readonly byte[] ConnAckMaximumQoS1 = Hex.Parse("20 05 00 00 02 24 01");
+
+    /// <summary>
+    /// CONNACK with success and Maximum Packet Size 32.
+    /// </summary>
+    public static readonly byte[] ConnAckMaximumPacketSize32 = Hex.Parse("20 08 00 00 05 27 00 00 00 20");
+
+    /// <summary>
+    /// PUBLISH at QoS 0 to "a/b" with payload "hi".
+    /// </summary>
+    public static readonly byte[] PublishQoS0 = Hex.Parse("30 08 00 03 61 2F 62 00 68 69");
+
+    /// <summary>
+    /// PUBLISH at QoS 1 to "a/b" with payload "hi" and packet identifier 1.
+    /// </summary>
+    public static readonly byte[] PublishQoS1 = Hex.Parse("32 0A 00 03 61 2F 62 00 01 00 68 69");
+
+    /// <summary>
+    /// PUBLISH at QoS 2 to "a/b" with payload "hi" and packet identifier 1.
+    /// </summary>
+    public static readonly byte[] PublishQoS2 = Hex.Parse("34 0A 00 03 61 2F 62 00 01 00 68 69");
+
+    /// <summary>
+    /// PUBACK with success for packet identifier 1.
+    /// </summary>
+    public static readonly byte[] PubAck1 = Hex.Parse("40 02 00 01");
+
+    /// <summary>
+    /// PUBREC with success for packet identifier 1.
+    /// </summary>
+    public static readonly byte[] PubRec1 = Hex.Parse("50 02 00 01");
+
+    /// <summary>
+    /// PUBREL with success for packet identifier 1.
+    /// </summary>
+    public static readonly byte[] PubRel1 = Hex.Parse("62 02 00 01");
+
+    /// <summary>
+    /// PUBCOMP with success for packet identifier 1.
+    /// </summary>
+    public static readonly byte[] PubComp1 = Hex.Parse("70 02 00 01");
+
+    /// <summary>
+    /// PUBREL with 0x92, packet identifier not found, for packet identifier 7.
+    /// </summary>
+    public static readonly byte[] PubRelNotFound7 = Hex.Parse("62 03 00 07 92");
 }
