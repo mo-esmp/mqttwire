@@ -246,28 +246,58 @@ await using MqttWireClient client = new(new MqttWireClientOptions
     UserName = "…",
     Password = token,
     KeepAlive = TimeSpan.FromSeconds(15),
+    MaxIncomingPacketBytes = 1_048_576,                       // the largest packet the client accepts
     ConfigureWebSocket = ws => ws.SetRequestHeader("X-Thing", "…"),
     OnMessage = (in MqttPublish message) => { /* payload valid during the call */ },
     OnClosed = reason => { },
 });
 
 MqttConnectAck ack = await client.ConnectAsync(cancellationToken);   // reason code, reason string, user properties
-MqttQoS granted = await client.SubscribeAsync("some/topic", MqttQoS.AtMostOnce, cancellationToken);
-ValueTask done = client.PublishAsync("some/topic", payload, MqttQoS.AtLeastOnce);   // completes on the acknowledgement
+MqttRequestResult subscribed = await client.SubscribeAsync("some/topic", MqttQoS.AtMostOnce, cancellationToken);
+MqttQoS? granted = subscribed.GrantedQoS;                            // null when the server refused
+ValueTask<MqttRequestResult> done = client.PublishAsync("some/topic", payload, MqttQoS.AtLeastOnce);   // completes on the acknowledgement
 ```
 
-- `PublishAsync` hands the message over in the order of the calls. The task it returns
+- **`ConnectAsync` reports every outcome in the `MqttConnectAck` it returns.** Connected;
+  refused by the server (its CONNACK reason code, reason string and user properties); or no
+  valid CONNACK (unreachable, timed out, malformed, a protocol error). When the client is not
+  connected, `Failure` says why. It throws only for a caller bug (invalid options, a second call
+  to `ConnectAsync`), for the caller's own cancellation, for an exception from
+  `ConfigureWebSocket`, and with `ObjectDisposedException` when the client is disposed during
+  the connect. `OnClosed` is called only for a connection that `ConnectAsync` reported as
+  connected.
+- **`PublishAsync`, `SubscribeAsync` and `UnsubscribeAsync` return
+  `ValueTask<MqttRequestResult>`.** The result holds a status and the server's reason code.
+  `IsSuccess` is true when the exchange completed with a reason code below `0x80`;
+  `GrantedQoS` gives the QoS a SUBACK granted, and is null for a refusal or an exchange that did
+  not complete. It is meaningful for a subscribe's result only: the result does not know its
+  request's kind, so a successful publish or unsubscribe (reason code `0x00`) reads as QoS 0. The
+  statuses are:
+  `Completed` (the exchange ended; the reason code is the server's); `NotConnected`,
+  `ReceiveMaximumReached`, `PacketTooLarge`, `QoSNotSupported`, `NoFreePacketIdentifier` and
+  `SendQueueFull` (the request failed at once and was not sent); and `ConnectionLost` (the connection ended
+  first, so the server may or may not have received the request). A bare QoS could not say
+  "refused" or "connection lost".
+- `PublishAsync` hands the message over in the order of the calls. It encodes the whole packet
+  before it returns, so the caller may reuse its payload at once. The task it returns
   completes when the exchange ends (at once for QoS 0), with the server's reason code; a caller
   that does not care about the acknowledgement does not await it.
 - A publish that has no room in the server's receive window, or is larger than the server's
-  maximum packet size, fails at once and is not sent.
+  maximum packet size, fails at once and is not sent. So does a publish while 1 MiB of earlier
+  publishes waits to be written, because the link is slower than the caller: it fails with
+  `SendQueueFull`. One publish is always taken when nothing waits, so a larger message can
+  still be sent.
+- `MaxIncomingPacketBytes` is the largest packet the client accepts (default 1 MiB, from 4,096
+  to 268,435,460). The client announces it in CONNECT (6.9).
 - `OnMessage` and `OnClosed` are called one at a time, in order. `OnClosed` is called once.
+  An `OnMessage` that throws ends the connection (6.9); an exception from `OnClosed` is
+  swallowed.
 - Options are checked when the client is created: `KeepAlive` is between 1 second and 65,535
   seconds and is rounded up to whole seconds. `ConfigureWebSocket` runs before the client adds
   the `mqtt` sub-protocol, so it cannot remove it; an exception it throws fails that
   `ConnectAsync`. In Blazor WebAssembly the browser supports only part of
   `ClientWebSocketOptions` (no request headers, no TLS or proxy settings); the documentation
-  says so.
+  says so. For the same reason the client does not set `KeepAliveInterval` there (6.5).
 
 #### The reconnecting client (opt-in)
 
@@ -284,33 +314,44 @@ await using MqttWireReconnectingClient client = new(new MqttWireReconnectOptions
     MaxDelay = TimeSpan.FromSeconds(15),
     OnConnected = info => { /* info.IsReconnect: catch up on what was missed */ },
     OnDisconnected = reason => { },
-    OnStopped = reason => { /* it gave up; see below */ },
+    OnStopped = ack => { /* it gave up; see below */ },
+    OnCallbackError = exception => { },                     // there is no logger; see Rules
     OnMessage = (in MqttPublish message) => { },
 });
 
-await client.StartAsync(cancellationToken);                 // completes with the first connection
+MqttConnectAck started = await client.StartAsync(cancellationToken);   // the first connection, or the refusal that stopped it
 await client.SubscribeAsync("groups/42", MqttQoS.AtLeastOnce, cancellationToken);
-ValueTask done = client.PublishAsync("groups/42", payload, MqttQoS.AtLeastOnce);
+ValueTask<MqttRequestResult> done = client.PublishAsync("groups/42", payload, MqttQoS.AtLeastOnce);
 ```
 
 **What it does**
 
 - **Every attempt is a new `MqttWireClient`.** The rule "nothing of a broken connection
   survives" holds here too.
-- **Back-off:** the first retry after `InitialDelay`, then doubling up to `MaxDelay`, with a
-  random part so that many clients do not come back in the same instant. A successful
-  connection puts the delay back to the start.
+- **Back-off:** attempt *n* waits `min(MaxDelay, InitialDelay × 2^(n−1))` times a random
+  factor in [0.8, 1.2], capped at `MaxDelay`, so that many clients do not come back in the same
+  instant. A connection that stays up for at least `MaxDelay` puts the delay back to the start;
+  one that ends sooner counts as a failed attempt, so a server that drops every connection at
+  once (two clients with the same identifier taking each other over, for example) is not retried
+  every `InitialDelay` for ever.
 - **Fresh options for every attempt.** The `ClientOptions` callback is called before each one.
+  An exception from that callback, or from creating the client, counts as a failed attempt and
+  is retried.
 - **It remembers subscriptions and makes them again.** What the application subscribed to
   through the wrapper is subscribed again on every new connection, before `OnConnected` is
   called. A subscription the server refuses this time is dropped from what is remembered and
-  reported through `OnSubscriptionRefused`.
+  reported through `OnSubscriptionRefused`. A connection lost while it subscribes again counts
+  as a failed attempt: `OnConnected` is not called. `UnsubscribeAsync` forgets the filter even
+  while disconnected. A filter unsubscribed while the new connection subscribes to it again is
+  unsubscribed on that connection before `OnConnected`, and a subscribe whose SUBACK comes
+  after an unsubscribe of the same filter is not remembered.
 - **It stops when retrying cannot help.** A refusal that the same CONNECT would meet again
   (unsupported protocol version, client id not valid, bad user name or password, not
   authorized, banned) ends the wrapper: `OnStopped` is called once with the reason, and
-  `StartAsync` fails with it if that happens on the first attempt. Every other failure
-  (unreachable, timed out, server unavailable, a lost connection) is retried until the wrapper
-  is disposed.
+  `StartAsync` returns its `MqttConnectAck` if that happens on the first attempt. Every other
+  failure (unreachable, timed out, server unavailable, a lost connection) is retried until the
+  wrapper is disposed. The token of `StartAsync` matters only until the start completes:
+  cancelling it before then stops the wrapper.
 
 **What it does not do, and the application must know**
 
@@ -318,7 +359,8 @@ ValueTask done = client.PublishAsync("groups/42", payload, MqttQoS.AtLeastOnce);
   the client's topics while it was away are gone. `OnConnected` with `IsReconnect` is the
   application's signal to catch up by its own means.
 - **It does not queue while disconnected.** `PublishAsync` and `SubscribeAsync` fail at once
-  when there is no connection.
+  when there is no connection. A topic or filter that is not valid throws `ArgumentException`,
+  connected or not.
 - **It does not send anything a second time.** A publish that was in flight when the
   connection was lost completes with "connection lost": it may or may not have arrived, and
   what to do about that is the application's decision.
@@ -328,10 +370,16 @@ ValueTask done = client.PublishAsync("groups/42", payload, MqttQoS.AtLeastOnce);
 - `OnConnected`, `OnDisconnected`, `OnSubscriptionRefused`, `OnStopped` and `OnMessage` are
   called one at a time, in order. Every `OnConnected` is followed by exactly one
   `OnDisconnected` before the next `OnConnected`.
-- A callback that throws is logged, and the wrapper carries on.
+- `MqttWire` takes no dependency on a logging package, so the wrapper has no logger. A callback
+  that throws is reported to `OnCallbackError`, and the wrapper carries on.
 - Disposing it stops everything at once: during a back-off, during an attempt, or while
   connected. No callback is called after `DisposeAsync` has returned.
-- It never blocks a thread and works in Blazor WebAssembly.
+- It has no thread of its own and works in Blazor WebAssembly. The wrapper holds one lock while
+  `OnConnected`, `OnSubscriptionRefused` and `OnMessage` run, so that they are called one at a
+  time. On a runtime with several threads, the read loop's thread waits while `OnConnected` or
+  `OnSubscriptionRefused` runs; in single-threaded WebAssembly nothing can wait. A callback
+  must not synchronously wait on a request to the client: that would wait on the thread it
+  stands on.
 - Its delays use an internal clock that the tests replace, so its tests do not wait in real
   time.
 
@@ -368,7 +416,11 @@ Neither the server connection nor the client calls `WebSocket` directly. Each us
 internal abstraction with five operations: wait until data is available, read into a buffer,
 write a buffer, close with a status, abort. One implementation wraps a `WebSocket`. Its
 operations return `ValueTask`, so an operation that completes at once allocates nothing, and on
-the server it must not add a noticeable object per connection.
+the server it must not add a noticeable object per connection. The wait, the read and the client's
+read loop use the pooling method builder, so an idle connection waking for data allocates
+nothing in steady state either. The client's writes are allocation-free when the send lock is
+uncontended and the write completes synchronously; a write that completes asynchronously
+(always in the browser) allocates its state machine.
 
 This keeps own WebSocket framing possible later, and it lets tests drive a connection over an
 in-memory link, byte by byte, and decide exactly when a write completes. It stays internal: a
@@ -383,7 +435,9 @@ Rules for the WebSocket implementation, both sides:
 - **MQTT packets are not aligned to WebSocket messages.** One message may hold several packets
   or part of one. The receiver treats the incoming messages as one byte stream.
 - The server turns the WebSocket's own keep-alive pings off for this endpoint. MQTT has its
-  own keep-alive, and this removes a timer per connection.
+  own keep-alive, and this removes a timer per connection. The client does the same, except in
+  the browser (Blazor WebAssembly), where setting `ClientWebSocketOptions.KeepAliveInterval`
+  throws `PlatformNotSupportedException`; there the client leaves it alone.
 
 ### 6.6 The server connection
 
@@ -745,9 +799,9 @@ not announced either: whether a filter is granted is the host's answer in SUBACK
 
 | Property | Treatment |
 |---|---|
-| Session Present | Must be 0; otherwise the connection is closed (the client asked for a clean start). |
+| Session Present | Must be 0, on an accepting CONNACK and on a refusal alike; otherwise the connection is closed with DISCONNECT `0x82` (the client asked for a clean start, and a refusal may not claim a session). |
 | Reason String, User Property | Given to the caller in the connect result. |
-| Server Keep Alive, Receive Maximum, Maximum Packet Size | Honoured. |
+| Server Keep Alive, Receive Maximum, Maximum Packet Size | Honoured. Maximum Packet Size limits every packet sent after the CONNACK, acknowledgements, PINGREQ and DISCONNECT included: an acknowledgement or PINGREQ over it ends the connection without it, and a DISCONNECT over it is left out of the close. |
 | Maximum QoS | Honoured: a publish above it fails at once. |
 | Everything else | Ignored. |
 
@@ -774,8 +828,10 @@ not announced either: whether a filter is granted is the host's answer in SUBACK
 The inside of `MqttWireClient`.
 
 - **Connect:** open the link, send CONNECT (protocol 5, clean start, client id, user name,
-  password, keep-alive, receive maximum 1,024; no Will, no maximum packet size), wait for
-  CONNACK within the connect timeout.
+  password, keep-alive, receive maximum 1,024, maximum packet size; no Will), wait for
+  CONNACK within the connect timeout. The Maximum Packet Size comes from
+  `MaxIncomingPacketBytes` (default 1 MiB, 4,096 to 268,435,460). A packet over it is refused as
+  soon as its header is read, before it is buffered, with DISCONNECT `0x95`.
 - **Packet identifiers.** PUBLISH, SUBSCRIBE and UNSUBSCRIBE draw from one space (1 to 65535).
   The client keeps a record for each identifier in use: the identifier, what it belongs to (a
   subscribe, an unsubscribe, a publish at QoS 1, a publish at QoS 2 waiting for PUBREC or for
@@ -786,8 +842,9 @@ The inside of `MqttWireClient`.
     65535 to 1;
   - an identifier is in use until its exchange ends: SUBACK, UNSUBACK, PUBACK, or for QoS 2 the
     PUBCOMP that follows PUBREC and PUBREL, or a PUBREC with a failure code;
-  - an acknowledgement for an identifier that is not in use is ignored; an unknown PUBREC is
-    answered with a PUBREL carrying `0x92`;
+  - an acknowledgement for an identifier that is not in use is ignored; an unknown PUBREC with a
+    code below `0x80` is answered with a PUBREL carrying `0x92`, and one with a failure code is
+    ignored, because a failed PUBREC ends its exchange and no PUBREL may follow it;
   - a packet whose write fails never frees its identifier on its own: a failed write is the end
     of the connection, and all records go with it;
   - there may be at most as many publishes in flight as the server's "receive maximum", and
@@ -800,11 +857,30 @@ The inside of `MqttWireClient`.
   lies in one buffer. At QoS 1 it is handed on and answered with PUBACK. At QoS 2 it is handed
   on once and answered with PUBREC; its identifier is remembered until the server's PUBREL,
   which is answered with PUBCOMP; a PUBLISH that repeats a remembered identifier is not handed
-  on again, whatever its DUP flag says.
-- **Keep-alive:** a PINGREQ when nothing was sent for the keep-alive interval; no PINGRESP
-  within the interval ends the connection. One timer per client.
-- **The end of a connection** is reported once, through `OnClosed`: a DISCONNECT from the
-  server, a failed write, a failed read, a timeout.
+  on again, whatever its DUP flag says. A PUBREL for an identifier the client does not remember
+  is answered with PUBCOMP `0x92`. A PUBLISH with a Topic Alias ends the connection with
+  DISCONNECT `0x94`. The client announces a receive maximum of 1,024: a new QoS 1 or 2
+  PUBLISH while 1,024 QoS 2 identifiers wait for their PUBREL ends the connection with `0x93`
+  before it is handed on; a repeat of a remembered identifier takes no new place.
+- **Keep-alive:** one timer per client, ticking every half interval. On a tick the client sends
+  a PINGREQ if nothing was sent for half the interval, so the time between packets never
+  exceeds the keep-alive, as MQTT requires. One PINGREQ waits at a time: no second is queued
+  while one waits for the send lock or for its PINGRESP. It ends the connection if a PINGREQ has
+  waited a full interval for its PINGRESP, counted from when its write began, so a write stalled
+  ahead of it is not taken for a silent server; or if the oldest record is older than twice the
+  interval
+  (above). The interval is the Server Keep Alive from the CONNACK when there is one, else the
+  client's `KeepAlive`. A Server Keep Alive of 0 stops the PINGREQs and the ping deadline, but
+  the acknowledgement deadline stays, at twice the client's own `KeepAlive`.
+- **The end of a connection** is reported once, through `OnClosed`, for a connection that
+  connected: a DISCONNECT from the server, a failed write, a failed read, a timeout. What the
+  client sends when it ends one:
+  - for a fault in the server's packets, DISCONNECT with `0x81`, `0x82`, `0x93`, `0x94` or
+    `0x95`, then close 1000;
+  - when `OnMessage` throws, DISCONNECT `0x83`, then close 1000;
+  - on `DisposeAsync`, DISCONNECT `0x00`, then close 1000;
+  - each close is bounded by a close timeout of 2 seconds, then the link is aborted;
+  - a timeout, or a failed read or write, aborts the link without a DISCONNECT.
 - **The client cannot have the server's deadlock, and must keep it that way.** Nothing on the
   client waits for a QoS window. So everything the client writes goes out in the order it was
   produced, and an acknowledgement never stands behind something that is waiting for the

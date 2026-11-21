@@ -1,6 +1,6 @@
 # Roadmap
 
-Last updated: 2026-11-20
+Last updated: 2026-11-21
 
 Which release delivers what, for GrainWire and for MqttWire, the MQTT library it will run on.
 It records decisions that have been made; it has no dates, and the version numbers after the
@@ -9,8 +9,8 @@ first preview are proposals. The designs behind it:
 - [MqttWire](specs/2026-11-19-mqttwire-design.md)
 - [GrainWire on MqttWire](specs/2026-11-19-grainwire-on-mqttwire-design.md)
 
-Both designs were approved by the owner on 2026-11-19. Nothing below has been built yet, except
-GrainWire 0.1.0-preview.1. Step 0 of the order of work below is done.
+Both designs were approved by the owner on 2026-11-19. Of the work below, GrainWire 0.1.0-preview.1
+exists, and steps 0 and 1 of the order of work are done. Step 2 is built and waits for review.
 
 ## MqttWire
 
@@ -52,8 +52,8 @@ two repositories are built together, a part at a time.
 | Step | Where | What |
 |---|---|---|
 | 0 | GrainWire | Measure what an idle connection costs today and what the floor is; report to the owner. **Done** on 2026-11-20: the floor is 35% of today, and the owner set the GrainWire target to floor + 3 KB ([the report](https://github.com/mo-esmp/grainwire/blob/main/docs/step-0-idle-memory.md)). |
-| 1 | MqttWire | The repository, the codec and its tests. Planned in [docs/plans/2026-11-20-step-1-codec-plan.md](plans/2026-11-20-step-1-codec-plan.md), tracked in #1. |
-| 2 | MqttWire | The client and the reconnecting client. |
+| 1 | MqttWire | The repository, the codec and its tests. Planned in [docs/plans/2026-11-20-step-1-codec-plan.md](plans/2026-11-20-step-1-codec-plan.md), tracked in #1. **Done**: merged in #2. |
+| 2 | MqttWire | The client and the reconnecting client. Planned in [docs/plans/2026-11-20-step-2-client-plan.md](plans/2026-11-20-step-2-client-plan.md), tracked in #3; the local package `0.1.0-dev.2` is the hand-over to step 3. |
 | 3 | GrainWire | `GrainWire.Client` moves to MqttWire's client. |
 | 4 | MqttWire, then GrainWire | MqttWire's server, sample and benchmark; then the gateway becomes its host. |
 | 5 | GrainWire | Measure again and write up. |

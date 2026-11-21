@@ -56,11 +56,6 @@ internal static class ConnectCodec
     private const byte UserNameFlag = 0b1000_0000;
 
     /// <summary>
-    /// The size of the property block the encoder writes: its length byte and the Receive Maximum property.
-    /// </summary>
-    private const int PropertiesSize = 1 + PropertyWriter.UInt16Size;
-
-    /// <summary>
     /// The size of the variable header up to the properties: protocol name, level, flags and keep-alive.
     /// </summary>
     private const int FixedVariableHeaderSize = FieldSize.LengthPrefix + 4 + 1 + 1 + sizeof(ushort);
@@ -260,16 +255,18 @@ internal static class ConnectCodec
     /// A string or the password cannot be carried: too long, or a string containing U+0000 or an unpaired surrogate.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <see cref="ConnectFields.ReceiveMaximum"/> is 0, which the standard forbids.
+    /// <see cref="ConnectFields.ReceiveMaximum"/> or <see cref="ConnectFields.MaximumPacketSize"/> is 0, which the
+    /// standard forbids.
     /// </exception>
     public static int GetSize(in ConnectFields fields)
     {
-        int remainingLength = GetRemainingLength(fields);
+        int remainingLength = GetRemainingLength(fields, out _);
         return PacketHeader.GetLength(remainingLength) + remainingLength;
     }
 
     /// <summary>
-    /// Writes a CONNECT packet: protocol 5, clean start, no Will, Receive Maximum as the only property.
+    /// Writes a CONNECT packet: protocol 5, clean start, no Will, a Receive Maximum and, when given, a Maximum Packet
+    /// Size after it.
     /// </summary>
     /// <param name="destination">
     /// Where to write; it must hold at least <see cref="GetSize"/> bytes.
@@ -288,11 +285,12 @@ internal static class ConnectCodec
     /// first byte is written, so nothing is written.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <see cref="ConnectFields.ReceiveMaximum"/> is 0, which the standard forbids. Nothing is written.
+    /// <see cref="ConnectFields.ReceiveMaximum"/> or <see cref="ConnectFields.MaximumPacketSize"/> is 0, which the
+    /// standard forbids. Nothing is written.
     /// </exception>
     public static int Write(Span<byte> destination, in ConnectFields fields)
     {
-        int remainingLength = GetRemainingLength(fields);
+        int remainingLength = GetRemainingLength(fields, out int propertiesLength);
         int size = PacketHeader.GetLength(remainingLength) + remainingLength;
         if (destination.Length < size)
         {
@@ -317,8 +315,13 @@ internal static class ConnectCodec
         writer.WriteByte(ProtocolLevel);
         writer.WriteByte(flags);
         writer.WriteUInt16(fields.KeepAliveSeconds);
-        writer.WriteVariableByteInteger(PropertiesSize - 1);
+        writer.WriteVariableByteInteger(propertiesLength);
         PropertyWriter.WriteUInt16(ref writer, PropertyId.ReceiveMaximum, fields.ReceiveMaximum);
+        if (fields.MaximumPacketSize is uint maximumPacketSize)
+        {
+            PropertyWriter.WriteUInt32(ref writer, PropertyId.MaximumPacketSize, maximumPacketSize);
+        }
+
         writer.WriteUtf8String(fields.ClientId);
 
         if (fields.UserName is not null)
@@ -340,6 +343,9 @@ internal static class ConnectCodec
     /// <param name="fields">
     /// The fields to measure.
     /// </param>
+    /// <param name="propertiesLength">
+    /// The length of the property block without its length prefix.
+    /// </param>
     /// <returns>
     /// The number of bytes after the fixed header.
     /// </returns>
@@ -350,16 +356,28 @@ internal static class ConnectCodec
     /// A string or the password cannot be carried.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// The Receive Maximum is 0.
+    /// The Receive Maximum or the Maximum Packet Size is 0.
     /// </exception>
-    private static int GetRemainingLength(in ConnectFields fields)
+    private static int GetRemainingLength(in ConnectFields fields, out int propertiesLength)
     {
         if (fields.ReceiveMaximum == 0)
         {
             CodecThrow.OutOfRange("The Receive Maximum cannot be 0.", nameof(ConnectFields.ReceiveMaximum));
         }
 
-        int length = FixedVariableHeaderSize + PropertiesSize + FieldSize.Utf8String(fields.ClientId);
+        if (fields.MaximumPacketSize == 0)
+        {
+            CodecThrow.OutOfRange("The Maximum Packet Size cannot be 0.", nameof(ConnectFields.MaximumPacketSize));
+        }
+
+        propertiesLength = PropertyWriter.UInt16Size;
+        if (fields.MaximumPacketSize is not null)
+        {
+            propertiesLength += PropertyWriter.UInt32Size;
+        }
+
+        // The property block is short, so its length prefix is one byte.
+        int length = FixedVariableHeaderSize + 1 + propertiesLength + FieldSize.Utf8String(fields.ClientId);
 
         if (fields.UserName is not null)
         {
