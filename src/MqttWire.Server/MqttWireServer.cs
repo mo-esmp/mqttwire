@@ -36,14 +36,19 @@ public sealed class MqttWireServer
     /// <param name="pool">
     /// The pool every buffer is rented from.
     /// </param>
+    /// <param name="pools">
+    /// The pools of the queues and exchange records, or <see langword="null"/> for the server's own; given only by
+    /// the tests of a pool that fails.
+    /// </param>
     internal MqttWireServer(IMqttWireHandler handler, MqttWireServerOptions options, ILogger<MqttWireServer> logger,
-        TimeProvider time, ArrayPool<byte> pool)
+        TimeProvider time, ArrayPool<byte> pool, ServerPools? pools = null)
     {
         Handler = handler;
         Options = options;
         Logger = logger;
         Time = time;
         Pool = pool;
+        Pools = pools ?? new ServerPools();
         ConnectDeadlineLength = ToTimestampLength(ServerLimits.ConnectDeadline, time);
         AuthenticationDeadlineLength = ToTimestampLength(ServerLimits.AuthenticationDeadline, time);
         CloseDeadlineLength = ToTimestampLength(ServerLimits.CloseDeadline, time);
@@ -90,7 +95,7 @@ public sealed class MqttWireServer
     /// <summary>
     /// Gets the pools of the objects a busy connection needs; an idle connection holds none of them.
     /// </summary>
-    internal ServerPools Pools { get; } = new();
+    internal ServerPools Pools { get; }
 
     /// <summary>
     /// Gets a value indicating whether the server is stopping, so the admission step lets no connection in. Read

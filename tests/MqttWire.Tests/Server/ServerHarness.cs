@@ -104,10 +104,15 @@ internal sealed class ServerHarness
     /// The pool the server rents from, or <see langword="null"/> for <see cref="Pool"/>; a test that gives its own
     /// pool asserts on it itself.
     /// </param>
+    /// <param name="pools">
+    /// The pools of queues and exchange records, or <see langword="null"/> for the server's own; for the tests of a
+    /// pool that fails.
+    /// </param>
     /// <returns>
     /// The harness.
     /// </returns>
-    public static ServerHarness Create(Action<MqttWireServerOptions>? configure = null, ArrayPool<byte>? pool = null)
+    public static ServerHarness Create(Action<MqttWireServerOptions>? configure = null, ArrayPool<byte>? pool = null,
+        ServerPools? pools = null)
     {
         MqttWireServerOptions options = new();
         configure?.Invoke(options);
@@ -116,7 +121,7 @@ internal sealed class ServerHarness
         FakeTimeProvider time = new();
         CountingTimeProvider timers = new(time);
         CountingPool counting = new();
-        MqttWireServer server = new(handler, options, log, timers, pool ?? counting);
+        MqttWireServer server = new(handler, options, log, timers, pool ?? counting, pools);
         server.Start();
         return new ServerHarness(server, handler, log, time, timers, counting);
     }

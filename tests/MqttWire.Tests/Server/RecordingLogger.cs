@@ -26,6 +26,12 @@ internal sealed class RecordingLogger : ILogger<MqttWireServer>
     private int _awaitedEventId;
 
     /// <summary>
+    /// Gets or sets an event id whose entries are recorded and then answered with an exception, as a logging provider
+    /// that fails does; 0 for none.
+    /// </summary>
+    public int ThrowForEventId { get; set; }
+
+    /// <summary>
     /// Gets every entry logged, oldest first, with its message formatted.
     /// </summary>
     public List<(LogLevel Level, EventId Id, string Message, Exception? Exception)> Entries { get; } = [];
@@ -102,6 +108,9 @@ internal sealed class RecordingLogger : ILogger<MqttWireServer>
     /// <param name="formatter">
     /// Formats the state and the exception into the message.
     /// </param>
+    /// <exception cref="InvalidOperationException">
+    /// The entry's event id is <see cref="ThrowForEventId"/>; the entry is recorded first.
+    /// </exception>
     public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
         Func<TState, Exception?, string> formatter)
     {
@@ -115,6 +124,11 @@ internal sealed class RecordingLogger : ILogger<MqttWireServer>
                 _awaited.SetResult();
                 _awaited = null;
             }
+        }
+
+        if (ThrowForEventId != 0 && eventId.Id == ThrowForEventId)
+        {
+            throw new InvalidOperationException("The logging provider failed.");
         }
     }
 }

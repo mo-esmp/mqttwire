@@ -1,6 +1,7 @@
 ﻿using System.Buffers;
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.ObjectPool;
 using MqttWire.Server;
 using MqttWire.Server.Internal;
 using MqttWire.Tests.Client;
@@ -259,6 +260,189 @@ public sealed class SendHardeningTests
     }
 
     /// <summary>
+    /// Proves that a logging provider that throws while the fault is logged does not defeat the fault path: no
+    /// exception reaches the host's <c>TrySend</c>, the link is aborted, the run completes, the slot is freed and
+    /// nothing is held.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Fault_LoggerThrows_StillGivesThePathUpAndEndsTheConnection()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        harness.Log.ThrowForEventId = SendPathFaultedEvent;
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+
+        // Act
+        MqttSendResult result = server.TrySend(s_topic, new ThrowingMemory(length: 10).Memory, MqttQoS.AtMostOnce);
+        bool aborted = connection.Link.IsAborted;
+        await connection.Run;
+
+        // Assert
+        result.ShouldBe(MqttSendResult.NotOpen);
+        aborted.ShouldBeTrue();
+        harness.Log.Entries.ShouldContain(entry => entry.Id.Id == SendPathFaultedEvent);
+        harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
+        server.GetCounts().ShouldBe(s_idle);
+        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.Pool.Outstanding.ShouldBe(0);
+        harness.Pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a logging provider that throws does not let the fault path take an open step: behind a held write
+    /// a control packet and three deliveries wait, the second of which throws when it is encoded; when the held write
+    /// ends, the PINGRESP and the first are written, the fault ends the connection with the third still waiting, and
+    /// the path is given up through the Closing step, so nothing more is written and nothing is held.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Fault_LoggerThrowsWithSomethingWaiting_StillGivesThePathUpThroughTheClosingStep()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        harness.Log.ThrowForEventId = SendPathFaultedEvent;
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        connection.Link.HoldWrites();
+        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(s_topic, new ThrowingMemory(length: 10).Memory, MqttQoS.AtMostOnce)
+            .ShouldBe(MqttSendResult.Taken);
+        server.TrySend(s_topic, "m4"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        connection.Deliver(ClientPackets.PingReq);
+        ConnectionCounts before = server.GetCounts();
+
+        // Act
+        connection.CompleteHeldWrites();
+        bool aborted = connection.Link.IsAborted;
+        ConnectionCounts afterTheFault = server.GetCounts();
+        await connection.Run;
+
+        // Assert
+        before.WaitingDeliveries.ShouldBe(3);
+        before.WaitingControlPackets.ShouldBe(1);
+        aborted.ShouldBeTrue();
+        afterTheFault.ShouldBe(s_idle);
+        connection.TakeWritten().ShouldBe(
+            [.. ServerPackets.Delivery("m1"u8), .. ClientPackets.PingResp, .. ServerPackets.Delivery("m2"u8)]);
+        harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
+        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.Pool.Outstanding.ShouldBe(0);
+        harness.Pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a QoS 1 message whose exchange record cannot be had, the records' pool throwing in the hold that
+    /// would take the send path, is not taken (no exception reaches the host) and ends the connection: the path is not
+    /// left taken, the run completes and the slot is freed.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task TrySend_RecordsPoolThrowsOnGet_EndsTheConnectionAndFreesItsSlot()
+    {
+        // Arrange
+        ThrowingRecordsPool records = new();
+        ServerPools pools = new(
+            new DefaultObjectPool<WaitingDeliveries>(new ServerPools.WaitingDeliveriesPolicy()), records);
+        ServerHarness harness = ServerHarness.Create(pools: pools);
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        records.ThrowOnGet = true;
+
+        // Act
+        MqttSendResult result = server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
+        await connection.Run;
+
+        // Assert
+        result.ShouldBe(MqttSendResult.NotOpen);
+        connection.Link.IsAborted.ShouldBeTrue();
+        connection.TakeWritten().ShouldBeEmpty();
+        harness.Log.Entries.ShouldContain(entry => entry.Id.Id == SendPathFaultedEvent && entry.Exception == records.Thrown);
+        harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
+        server.GetCounts().ShouldBe(s_idle);
+        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a pool that throws when the DISCONNECT of a host's close is rented, while the close holds the send
+    /// path, throws nothing at the host and ends the connection: the link is aborted, the run completes, the reason
+    /// the host gave is kept, and the fault is logged with event 20.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Close_PoolThrowsOnTheDisconnectRent_EndsTheConnection()
+    {
+        // Arrange
+        ThrowingPool pool = new();
+        ServerHarness harness = ServerHarness.Create(pool: pool);
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        pool.ThrowOnRent(which: 1);
+
+        // Act
+        server.Close(MqttReasonCode.AdministrativeAction);
+        bool aborted = connection.Link.IsAborted;
+        await connection.Run;
+
+        // Assert
+        pool.HasThrown.ShouldBeTrue();
+        aborted.ShouldBeTrue();
+        connection.TakeWritten().ShouldBeEmpty();
+        connection.Link.ClosedWith.ShouldBeNull();
+        harness.Log.Entries.ShouldContain(entry => entry.Id.Id == SendPathFaultedEvent && entry.Exception == pool.Thrown);
+        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        server.GetCounts().ShouldBe(s_idle);
+        pool.Inner.Outstanding.ShouldBe(0);
+        pool.Inner.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a pool that throws when the CONNACK of an admitted connection is rented, while the admission's
+    /// reservation holds the send path, ends the connection before any packet is written, and that the host is told
+    /// once: one <c>OnClosed</c>, with <see cref="MqttCloseReason.ConnectionLost"/>.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Connect_PoolThrowsOnTheConnAckRent_EndsTheConnectionWithoutOnClosedTwice()
+    {
+        // Arrange
+        ThrowingPool pool = new();
+        ServerHarness harness = ServerHarness.Create(pool: pool);
+        TestConnection connection = harness.Accept();
+
+        // The first rent is the read buffer the CONNECT is read into, the second the CONNACK's.
+        pool.ThrowOnRent(which: 2);
+
+        // Act
+        connection.Deliver(ServerPackets.Connect);
+        await connection.Run;
+
+        // Assert
+        pool.HasThrown.ShouldBeTrue();
+        connection.Link.IsAborted.ShouldBeTrue();
+        connection.TakeWritten().ShouldBeEmpty();
+        harness.Handler.Calls.ShouldContain(static call => call.StartsWith("OnAdmit", StringComparison.Ordinal));
+        harness.Log.Entries.ShouldContain(entry => entry.Id.Id == SendPathFaultedEvent && entry.Exception == pool.Thrown);
+        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
+        pool.Inner.Outstanding.ShouldBe(0);
+        pool.Inner.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Sends a message of the test's own while a write is held, in a frame of its own so that no local of the test
     /// keeps its payload alive.
     /// </summary>
@@ -350,6 +534,41 @@ public sealed class SendHardeningTests
         {
             // Nothing to release.
         }
+    }
+
+    /// <summary>
+    /// A pool of exchange records that throws on <see cref="Get"/> once told to, as a pool may that cannot allocate.
+    /// </summary>
+    private sealed class ThrowingRecordsPool : ObjectPool<ExchangeRecords>
+    {
+        /// <summary>
+        /// Gets the exception <see cref="Get"/> throws.
+        /// </summary>
+        public InvalidOperationException Thrown { get; } = new("The records cannot be had.");
+
+        /// <summary>
+        /// Gets or sets a value indicating whether <see cref="Get"/> throws.
+        /// </summary>
+        public bool ThrowOnGet { get; set; }
+
+        /// <summary>
+        /// Hands out new records, unless told to throw.
+        /// </summary>
+        /// <returns>
+        /// Records that hold none.
+        /// </returns>
+        /// <exception cref="InvalidOperationException">
+        /// <see cref="ThrowOnGet"/> is set.
+        /// </exception>
+        public override ExchangeRecords Get() => ThrowOnGet ? throw Thrown : new ExchangeRecords();
+
+        /// <summary>
+        /// Takes records back and drops them, cleared.
+        /// </summary>
+        /// <param name="obj">
+        /// The records.
+        /// </param>
+        public override void Return(ExchangeRecords obj) => obj.Clear();
     }
 
     /// <summary>

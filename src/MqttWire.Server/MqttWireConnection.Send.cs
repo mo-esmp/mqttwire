@@ -85,9 +85,9 @@ public sealed partial class MqttWireConnection
     /// </param>
     /// <returns>
     /// <see cref="MqttSendResult.Taken"/> when the message was written or waits; otherwise why it was not taken. A
-    /// message that was not taken is held nowhere. A fault inside MqttWire while this caller encodes the message
-    /// (<see cref="FaultSendPath"/>) is not thrown: it ends the connection, and the result is
-    /// <see cref="MqttSendResult.NotOpen"/>.
+    /// message that was not taken is held nowhere. A fault inside MqttWire while the message is decided on or encoded
+    /// (an object pool or the buffer pool throws, <see cref="FaultSendPath"/>) is not thrown: it ends the connection,
+    /// and the result is <see cref="MqttSendResult.NotOpen"/>.
     /// </returns>
     private MqttSendResult TakeDelivery(MqttTopic topic, ReadOnlyMemory<byte> payload, MqttQoS qos)
     {
@@ -96,40 +96,20 @@ public sealed partial class MqttWireConnection
         bool tooLarge = payloadLength > options.MaxOutgoingBytes || payloadLength > MaxDeliveryPayloadBytes
             || GetDeliverySize(topic, payloadLength, qos) > _clientMaxPacketSize;
         long now = qos == MqttQoS.AtMostOnce ? 0 : _server.Time.GetTimestamp();
-        ushort packetIdentifier = 0;
+        PendingDelivery delivery = new(topic, payload, qos);
         MqttSendResult result;
-        lock (_sendLock)
+        bool write;
+        ushort packetIdentifier;
+        try
         {
-            if (_state != ConnectionState.Active)
-            {
-                return MqttSendResult.NotOpen;
-            }
-
-            if (tooLarge)
-            {
-                result = MqttSendResult.TooLarge;
-            }
-            else if (!_writing && _waiting is null && HasWindowRoom(qos))
-            {
-                // This caller writes the message; its record is in place before its packet is handed to the link.
-                _writing = true;
-                _writingBytes = payloadLength;
-                _outgoingBytes += payloadLength;
-                packetIdentifier = TakeDeliveryRecord(qos, now);
-                result = MqttSendResult.Taken;
-            }
-            else if ((_waiting?.Count ?? 0) >= options.MaxOutgoingMessages
-                     || (long)_outgoingBytes + payloadLength > options.MaxOutgoingBytes)
-            {
-                result = MqttSendResult.Evicted;
-            }
-            else
-            {
-                _waiting ??= _server.Pools.Waiting.Get();
-                _waiting.Enqueue(new PendingDelivery(topic, payload, qos));
-                _outgoingBytes += payloadLength;
-                return MqttSendResult.Taken;
-            }
+            result = DecideDelivery(delivery, tooLarge, now, out write, out packetIdentifier);
+        }
+        catch (Exception exception)
+        {
+            // An object pool threw in the hold (the queue's or the records'). Each is asked before anything changes,
+            // so the send path was not taken and nothing changed: the fault ends the connection without touching it.
+            EndFaulted(exception);
+            return MqttSendResult.NotOpen;
         }
 
         // Outside the lock: a close writes or aborts, and a write may take as long as the link does.
@@ -141,12 +121,84 @@ public sealed partial class MqttWireConnection
         {
             BeginClose(MqttCloseReason.OutgoingLimitPassed, MqttReasonCode.QuotaExceeded, reasonString: null);
         }
-        else
+        else if (write)
         {
-            result = WriteTakenDelivery(new PendingDelivery(topic, payload, qos), packetIdentifier);
+            result = WriteTakenDelivery(delivery, packetIdentifier);
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// The one hold of the lock in which <see cref="TakeDelivery"/> decides what becomes of a message: refused, to
+    /// be written now by this caller (the send path taken, the message counted and its exchange record taken), or
+    /// added to what waits. Whatever can throw in it, the pool of the records or of the queues, is asked before
+    /// anything changes.
+    /// </summary>
+    /// <param name="delivery">
+    /// The message.
+    /// </param>
+    /// <param name="tooLarge">
+    /// Whether the message is too large for the client or for the options.
+    /// </param>
+    /// <param name="now">
+    /// The time, a timestamp of the server's clock, for the record of a QoS 1 or 2 delivery; 0 at QoS 0.
+    /// </param>
+    /// <param name="write">
+    /// <see langword="true"/> when the caller now holds the send path and is to write the message.
+    /// </param>
+    /// <param name="packetIdentifier">
+    /// The packet identifier the delivery's record took when <paramref name="write"/> is <see langword="true"/> and its
+    /// QoS is 1 or 2; otherwise 0.
+    /// </param>
+    /// <returns>
+    /// <see cref="MqttSendResult.Taken"/> when the message is written now or waits; otherwise why it was refused.
+    /// </returns>
+    /// <exception cref="Exception">
+    /// An object pool threw; nothing changed, and the send path was not taken.
+    /// </exception>
+    private MqttSendResult DecideDelivery(in PendingDelivery delivery, bool tooLarge, long now, out bool write,
+        out ushort packetIdentifier)
+    {
+        MqttWireServerOptions options = _server.Options;
+        int payloadLength = delivery.Payload.Length;
+        write = false;
+        packetIdentifier = 0;
+        lock (_sendLock)
+        {
+            if (_state != ConnectionState.Active)
+            {
+                return MqttSendResult.NotOpen;
+            }
+
+            if (tooLarge)
+            {
+                return MqttSendResult.TooLarge;
+            }
+
+            if (!_writing && _waiting is null && HasWindowRoom(delivery.QoS))
+            {
+                // This caller writes the message; its record is in place before its packet is handed to the link,
+                // and is taken first, so that a pool that throws leaves the path free.
+                packetIdentifier = TakeDeliveryRecord(delivery.QoS, now);
+                _writing = true;
+                _writingBytes = payloadLength;
+                _outgoingBytes += payloadLength;
+                write = true;
+                return MqttSendResult.Taken;
+            }
+
+            if ((_waiting?.Count ?? 0) >= options.MaxOutgoingMessages
+                || (long)_outgoingBytes + payloadLength > options.MaxOutgoingBytes)
+            {
+                return MqttSendResult.Evicted;
+            }
+
+            _waiting ??= _server.Pools.Waiting.Get();
+            _waiting.Enqueue(delivery);
+            _outgoingBytes += payloadLength;
+            return MqttSendResult.Taken;
+        }
     }
 
     /// <summary>
@@ -603,8 +655,10 @@ public sealed partial class MqttWireConnection
         TaskCompletionSource? idle = null;
         SendStep step;
 
-        // Read before the hold, for the record of a delivery taken in it: the clock is not called under the lock.
-        long now = _server.Time.GetTimestamp();
+        // Read before the hold, for the record of a delivery taken in it: the clock is not called under the lock. A
+        // Closing connection takes no record and stays Closing, so it does not call the clock at all, and its step
+        // (the one the fault path takes) cannot throw.
+        long now = _state >= ConnectionState.Closing ? 0 : _server.Time.GetTimestamp();
         lock (_sendLock)
         {
             if (_state >= ConnectionState.Closing)
@@ -815,9 +869,10 @@ public sealed partial class MqttWireConnection
             return SendStep.HandOver;
         }
 
+        // The record first: should its pool throw, the delivery still waits, for the fault path to drop.
         delivery = waiting.Peek();
-        waiting.Dequeue();
         packetIdentifier = TakeDeliveryRecord(delivery.QoS, now);
+        waiting.Dequeue();
         _writingBytes = delivery.Payload.Length;
         if (waiting.Count == 0)
         {
@@ -894,13 +949,22 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// The last resort of a holder of the send path that something threw at (an encoding whose payload memory throws,
-    /// the pool, anything inside MqttWire): the connection is beyond saving. It ends the connection as
-    /// <see cref="EndFaulted"/> does, returns the one buffer the holder rented and has not handed to the link, then
-    /// gives the path up through the Closing step, which drops what waits, the exchange records and the control
-    /// buffer, clears the counts and tells whoever waits for the path to be idle; the last write is taken as failed,
-    /// so no WebSocket close is attempted. Called only by a holder, from its catch; it costs nothing on the paths
-    /// that do not throw.
+    /// the pool, anything inside MqttWire): the connection is beyond saving. In this order: the close begins with
+    /// <see cref="MqttCloseReason.ConnectionLost"/> and the link is aborted (<see cref="CloseAfterFault"/>); the one
+    /// buffer the holder rented and has not handed to the link goes back; the path is given up through the Closing
+    /// step, which drops what waits, the exchange records and the control buffer, clears the counts and tells whoever
+    /// waits for the path to be idle (the last write is taken as failed, so no WebSocket close is attempted); and the
+    /// fault is logged, last (<see cref="LogFault"/>). Called only by a holder, from its catch; it costs nothing on the
+    /// paths that do not throw.
     /// </summary>
+    /// <remarks>
+    /// It cannot throw, so it runs at most once per holder: no catch site sees an exception from it and calls it
+    /// again, a thread-pool work item never fails, and a host's <see cref="TrySend"/> gets no exception. When it
+    /// returns, the connection is Closing or later, the link is aborted, and the send path has been given up through
+    /// the Closing step. Each call it makes that could throw is guarded: the close's own throw can come only after its
+    /// move to Closing (the clock), the abort and the pool's return are swallowed, the Closing step neither reads the
+    /// clock nor lets a pool's exception out, and the log is swallowed.
+    /// </remarks>
     /// <param name="exception">
     /// What was thrown.
     /// </param>
@@ -910,38 +974,104 @@ public sealed partial class MqttWireConnection
     /// </param>
     private void FaultSendPath(Exception exception, byte[]? unsent)
     {
-        try
+        Exception? secondary = CloseAfterFault();
+        if (unsent is not null)
         {
-            EndFaulted(exception);
-            if (unsent is not null)
+            try
             {
                 _server.Pool.Return(unsent);
             }
+            catch (Exception refused)
+            {
+                // A pool that refuses a buffer it lent: the buffer is left to the garbage collector, never returned
+                // twice, and the refusal is logged with the fault.
+                secondary ??= refused;
+            }
         }
-        finally
-        {
-            // Whatever became of the above, the path is given up, so that the end of the run never waits for ever.
-            // The connection is Closing, so this is the Closing step, which never hands the path on.
-            SendStep step = TakeNextStep(failed: true, handOver: false, out _, out _, out _, out _, out _);
-            Debug.Assert(step == SendStep.Idle, "A Closing step after a failure always gives the send path up.");
-        }
+
+        // The connection is Closing, so this is the Closing step: it never hands the path on and cannot throw.
+        Debug.Assert(_state >= ConnectionState.Closing, "The close began before the path is given up.");
+        SendStep step = TakeNextStep(failed: true, handOver: false, out _, out _, out _, out _, out _);
+        Debug.Assert(step == SendStep.Idle, "A Closing step after a failure always gives the send path up.");
+        LogFault(exception, secondary);
     }
 
     /// <summary>
-    /// Ends a connection after a fault inside MqttWire's sending: logs it as an error (event 20, the client id and the
-    /// exception; never a payload), begins the close with <see cref="MqttCloseReason.ConnectionLost"/>, unless an
-    /// earlier close recorded its own reason, and aborts the link, which a close that had begun already has not
-    /// necessarily done. It never touches the send path's own state: when the caller holds the path, the close finds
-    /// it taken and aborts; when nobody does, the close takes it and writes its WebSocket close as any close does.
+    /// Ends a connection after a fault inside MqttWire's sending, for a caller that does not hold the send path:
+    /// begins the close and aborts the link (<see cref="CloseAfterFault"/>), then logs the fault
+    /// (<see cref="LogFault"/>). It never touches the send path's own state: when someone holds the path, the close
+    /// finds it taken and aborts; when nobody does, the close takes it and writes its WebSocket close as any close
+    /// does. It cannot throw.
     /// </summary>
     /// <param name="exception">
     /// What was thrown.
     /// </param>
-    private void EndFaulted(Exception exception)
+    private void EndFaulted(Exception exception) => LogFault(exception, CloseAfterFault());
+
+    /// <summary>
+    /// Begins the close with <see cref="MqttCloseReason.ConnectionLost"/>, unless an earlier close recorded its own
+    /// reason, and aborts the link, which a close that had begun already has not necessarily done. It cannot throw,
+    /// and when it returns the connection is Closing or later: the close's own throw can come only after its move to
+    /// Closing (the clock read for its stamp).
+    /// </summary>
+    /// <returns>
+    /// The first exception the close or the abort threw, to be logged with the fault; <see langword="null"/> when
+    /// neither threw.
+    /// </returns>
+    private Exception? CloseAfterFault()
     {
-        ServerLog.SendPathFaulted(_server.Logger, ClientId, exception);
-        BeginClose(MqttCloseReason.ConnectionLost, MqttReasonCode.Success, reasonString: null);
-        RunningLink.Abort();
+        Exception? secondary = null;
+        try
+        {
+            BeginClose(MqttCloseReason.ConnectionLost, MqttReasonCode.Success, reasonString: null);
+        }
+        catch (Exception thrown)
+        {
+            // The connection is Closing all the same; the abort below ends the link.
+            secondary = thrown;
+        }
+
+        try
+        {
+            RunningLink.Abort();
+        }
+        catch (Exception thrown)
+        {
+            // A link that cannot even be aborted: the sweep's close deadline is all that is left.
+            secondary ??= thrown;
+        }
+
+        return secondary;
+    }
+
+    /// <summary>
+    /// Logs a fault inside MqttWire's sending as an error: event 20, the client id and the exception, never a payload
+    /// or a password. It cannot throw.
+    /// </summary>
+    /// <param name="exception">
+    /// What was thrown.
+    /// </param>
+    /// <param name="secondary">
+    /// What the handling of the fault threw in its turn, or <see langword="null"/>; when there is one, both are
+    /// logged together in an <see cref="AggregateException"/>.
+    /// </param>
+    private void LogFault(Exception exception, Exception? secondary)
+    {
+        Exception logged = secondary is null ? exception : new AggregateException(exception, secondary);
+
+        // Deliberately swallowed below, and the only catch here that does nothing: a logging provider that throws
+        // while a fault is being reported leaves nowhere to report it, and the connection has already been ended and
+        // its send path given up. Throwing on would undo exactly what the fault path guarantees.
+#pragma warning disable RCS1075 // Avoid empty catch clause that catches System.Exception: see the comment above.
+        try
+        {
+            ServerLog.SendPathFaulted(_server.Logger, ClientId, logged);
+        }
+        catch (Exception)
+        {
+            // Nowhere left to report it.
+        }
+#pragma warning restore RCS1075
     }
 
     /// <summary>

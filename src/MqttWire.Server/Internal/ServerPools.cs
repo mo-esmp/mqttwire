@@ -10,19 +10,42 @@ namespace MqttWire.Server.Internal;
 internal sealed class ServerPools
 {
     /// <summary>
-    /// Gets the pool of the queues of waiting deliveries; it keeps at most
+    /// Creates the server's pools, each keeping at most <see cref="ServerLimits.MaxPooledObjects"/>.
+    /// </summary>
+    public ServerPools()
+        : this(
+            new DefaultObjectPool<WaitingDeliveries>(new WaitingDeliveriesPolicy(), ServerLimits.MaxPooledObjects),
+            new DefaultObjectPool<ExchangeRecords>(new ExchangeRecordsPolicy(), ServerLimits.MaxPooledObjects))
+    {
+    }
+
+    /// <summary>
+    /// Creates the pools from the two given, for the tests of a pool that fails.
+    /// </summary>
+    /// <param name="waiting">
+    /// The pool of the queues of waiting deliveries.
+    /// </param>
+    /// <param name="records">
+    /// The pool of the exchange records.
+    /// </param>
+    public ServerPools(ObjectPool<WaitingDeliveries> waiting, ObjectPool<ExchangeRecords> records)
+    {
+        Waiting = waiting;
+        Records = records;
+    }
+
+    /// <summary>
+    /// Gets the pool of the queues of waiting deliveries; by default it keeps at most
     /// <see cref="ServerLimits.MaxPooledObjects"/>, a queue that comes back holds no delivery, and one grown past
     /// <see cref="ServerLimits.MaxPooledQueueCapacity"/> slots is not kept.
     /// </summary>
-    public ObjectPool<WaitingDeliveries> Waiting { get; } =
-        new DefaultObjectPool<WaitingDeliveries>(new WaitingDeliveriesPolicy(), ServerLimits.MaxPooledObjects);
+    public ObjectPool<WaitingDeliveries> Waiting { get; }
 
     /// <summary>
-    /// Gets the pool of the exchange records; it keeps at most <see cref="ServerLimits.MaxPooledObjects"/>, and an
-    /// object that comes back holds no record.
+    /// Gets the pool of the exchange records; by default it keeps at most <see cref="ServerLimits.MaxPooledObjects"/>,
+    /// and an object that comes back holds no record.
     /// </summary>
-    public ObjectPool<ExchangeRecords> Records { get; } =
-        new DefaultObjectPool<ExchangeRecords>(new ExchangeRecordsPolicy(), ServerLimits.MaxPooledObjects);
+    public ObjectPool<ExchangeRecords> Records { get; }
 
     /// <summary>
     /// Creates the exchange records and clears each object that comes back.
