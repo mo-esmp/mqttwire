@@ -231,13 +231,14 @@ public sealed class SendInterleavingTests
         // The CONNACK, the first message and the 40 added.
         await connection.Link.WhenWrittenAsync(count: Added + 2);
         await harness.Pool.WhenNoneOutstandingAsync();
+        await connection.WhenSendPathIdleAsync();
 
         // Assert
         first.ShouldBe(MqttSendResult.Taken);
         writes.ShouldBe(Added + 1);
         writesInsideTheCall.ShouldBe(16);
         connection.TakeWritten().ShouldBe(expected.ToArray());
-        harness.AssertBounds();
+        AssertIdle(harness, server);
     }
 
     /// <summary>
@@ -295,13 +296,14 @@ public sealed class SendInterleavingTests
         // The CONNACK, the first message and the 40 added.
         await inner.WhenWrittenAsync(count: Added + 2);
         await harness.Pool.WhenNoneOutstandingAsync();
+        await connection.WhenSendPathIdleAsync();
 
         // Assert
         first.ShouldBe(MqttSendResult.Taken);
         writes.ShouldBe(Added + 1);
         writesInsideTheCall.ShouldBe(16);
         connection.TakeWritten().ShouldBe(expected.ToArray());
-        harness.AssertBounds();
+        AssertIdle(harness, server);
     }
 
     /// <summary>

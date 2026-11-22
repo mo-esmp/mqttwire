@@ -119,9 +119,10 @@ public sealed partial class MqttWireConnection
     private ReadOnlyMemory<byte> _remainingPayload;
 
     /// <summary>
-    /// Completes when the send path is given up; it exists only while the end of the run waits for a write in
-    /// progress. Guarded by <see cref="_sendLock"/>: set by the end of the run, taken by the hold that clears
-    /// <see cref="_writing"/>.
+    /// Completes when the send path is given up; it exists only while the end of the run, or a test
+    /// (<see cref="WhenSendPathIdleAsync"/>), waits for the holder to give it up. Guarded by <see cref="_sendLock"/>:
+    /// set by whoever waits, taken by the hold that clears <see cref="_writing"/>, whether the connection is Closing
+    /// or not.
     /// </summary>
     private TaskCompletionSource? _sendIdle;
 
@@ -321,6 +322,29 @@ public sealed partial class MqttWireConnection
         lock (_sendLock)
         {
             _lastDeliveryIdentifier = packetIdentifier;
+        }
+    }
+
+    /// <summary>
+    /// Waits until the send path is given up, for the tests that assert what is true only once the holder of the
+    /// path has finished (a close that then finds the path idle and writes its DISCONNECT, counts that are idle). It
+    /// uses the completion the end of the run waits on, so it adds no field and costs an idle connection nothing.
+    /// </summary>
+    /// <returns>
+    /// A task that completes, never inline, in the hold that gives the send path up; at once when the path is not
+    /// taken now. The path may be taken again by the time the caller resumes.
+    /// </returns>
+    internal Task WhenSendPathIdleAsync()
+    {
+        lock (_sendLock)
+        {
+            if (!_writing)
+            {
+                return Task.CompletedTask;
+            }
+
+            _sendIdle ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            return _sendIdle.Task;
         }
     }
 

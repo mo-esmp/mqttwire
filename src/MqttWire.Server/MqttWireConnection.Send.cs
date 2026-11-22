@@ -622,6 +622,12 @@ public sealed partial class MqttWireConnection
             {
                 step = TakeOpenStep(now, handOver, out delivery, out packetIdentifier, out piece, out buffer,
                     out emptied);
+                if (step == SendStep.Idle)
+                {
+                    // Whoever waits for the give-up is told by the hold that made it, as in Closing.
+                    idle = _sendIdle;
+                    _sendIdle = null;
+                }
             }
         }
 

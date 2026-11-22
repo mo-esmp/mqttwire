@@ -1020,12 +1020,14 @@ public sealed class SendTests
         // The CONNACK, the first message and the seventeen.
         await connection.Link.WhenWrittenAsync(count: 19);
         await harness.Pool.WhenNoneOutstandingAsync();
+        await connection.WhenSendPathIdleAsync();
 
         // Assert
         first.ShouldBe(MqttSendResult.Taken);
         writes.ShouldBe(18);
         writesInsideTheCall.ShouldBe(16);
         connection.TakeWritten().ShouldBe(expected.ToArray());
+        server.GetCounts().ShouldBe(s_idle);
         harness.AssertBounds();
     }
 

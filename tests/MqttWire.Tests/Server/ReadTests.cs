@@ -167,7 +167,8 @@ public sealed class ReadTests
     /// <summary>
     /// Proves that the keep-alive is measured from the moment the connection becomes Active, not from the CONNECT: with
     /// keep-alive 2 and a host that answers after 8 seconds, the connection is open at the first sweep after the
-    /// CONNACK and closed with 0x8D at the first sweep 3 seconds or more after it.
+    /// CONNACK and closed with 0x8D at the first sweep 3 seconds or more after it. The CONNACK's send path is waited
+    /// out first: a close that found it still taken would abort instead of writing its DISCONNECT.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -184,7 +185,10 @@ public sealed class ReadTests
         harness.Advance(TimeSpan.FromSeconds(8));
         Task connAckWritten = connection.Link.WhenWrittenAsync(1);
         answer.SetResult(MqttConnectResult.Accept());
+
+        // The link has the CONNACK before the connect phase, on another thread, gives the send path up.
         await connAckWritten;
+        await connection.WhenSendPathIdleAsync();
         byte[] connAck = connection.TakeWritten();
 
         // Act
@@ -192,11 +196,15 @@ public sealed class ReadTests
         byte[] writtenAt2 = connection.TakeWritten();
         harness.Advance(TimeSpan.FromSeconds(2));
         byte[] writtenAt4 = connection.TakeWritten();
+        connection.Link.EndFromPeer();
+        await connection.Run;
 
         // Assert
         connAck.ShouldBe(ServerPackets.ConnAck);
         writtenAt2.ShouldBeEmpty();
         writtenAt4.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.KeepAliveTimeout));
+        harness.Handler.Calls.ShouldContain("OnClosed c1 KeepAliveTimedOut");
+        harness.Pool.Outstanding.ShouldBe(0);
     }
 
     /// <summary>

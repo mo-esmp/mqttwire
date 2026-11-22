@@ -112,7 +112,8 @@ public sealed partial class MqttWireConnection
             if (_writing)
             {
                 // Completed, never inline, by the hold that gives the send path up: what follows calls the host.
-                _sendIdle = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                // Shared with a test that already waits for the same give-up (WhenSendPathIdleAsync).
+                _sendIdle ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 idle = _sendIdle.Task;
             }
         }

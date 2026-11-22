@@ -94,6 +94,17 @@ internal sealed class TestConnection(
     }
 
     /// <summary>
+    /// Waits until the server's send path for this connection has been given up, for a test whose next step or
+    /// assertion holds only once the holder of the path has finished: a write the link took (which
+    /// <see cref="MemoryLink.WhenWrittenAsync"/> reports) is not yet a path given up. It waits on the server's own
+    /// completion of the give-up, never in real time.
+    /// </summary>
+    /// <returns>
+    /// A task that completes once the path is idle; at once when it is idle now.
+    /// </returns>
+    public Task WhenSendPathIdleAsync() => Connection.ShouldNotBeNull().WhenSendPathIdleAsync();
+
+    /// <summary>
     /// Takes everything the server wrote since the last call.
     /// </summary>
     /// <returns>
