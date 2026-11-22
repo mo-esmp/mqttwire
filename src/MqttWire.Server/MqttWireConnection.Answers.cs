@@ -1,4 +1,5 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using MqttWire.Codec;
 using MqttWire.Server.Internal;
 
@@ -123,15 +124,12 @@ public sealed partial class MqttWireConnection
     /// reserved for it (so no MQTT packet can precede it); what a host sent meanwhile is written behind it. It never
     /// waits: a write that does not complete at once is awaited elsewhere. A failed write ends the connection with
     /// <see cref="MqttCloseReason.ConnectionLost"/>, and so does a fault inside MqttWire, such as a pool that throws
-    /// (<see cref="FaultSendPath"/>); the caller then finds the connection Closing.
+    /// (<see cref="FaultSendPath"/>). A host's user property that cannot be carried ends it as the host's bug
+    /// (<see cref="RefuseUnencodableConnAck"/>). It never throws; the caller then finds the connection Closing.
     /// </summary>
     /// <param name="fields">
     /// The fields to encode.
     /// </param>
-    /// <exception cref="ArgumentException">
-    /// A field cannot be carried (the host's bug); nothing is rented or written, the connection begins to close,
-    /// and the send path is given up, so nothing that waited is written in the CONNACK's place.
-    /// </exception>
     private void SendConnAck(in ConnAckFields fields)
     {
         int size;
@@ -140,12 +138,10 @@ public sealed partial class MqttWireConnection
             // The size checks every field before anything is rented.
             size = ConnAckCodec.GetSize(fields);
         }
-        catch (ArgumentException)
+        catch (ArgumentException exception)
         {
-            // The close finds the send path taken and aborts; then the path is given up and what waited is dropped.
-            BeginClose(CloseCause.ConnectionLost, MqttReasonCode.Success, reasonString: null);
-            ContinueSending(returned: null, failed: false, InlineWrites);
-            throw;
+            RefuseUnencodableConnAck(exception);
+            return;
         }
 
         byte[]? unsent = null;
@@ -159,6 +155,59 @@ public sealed partial class MqttWireConnection
         {
             // The send path is reserved for this CONNACK: the fault gives it up, with the buffer if one was rented.
             FaultSendPath(exception, unsent);
+            return;
+        }
+
+        StartSending(unsent.AsMemory(start: 0, length), unsent, InlineWrites);
+    }
+
+    /// <summary>
+    /// Ends an admitted connection whose success CONNACK cannot be encoded because a user property the host returned
+    /// from <see cref="IMqttWireHandler.OnConnectAsync"/> cannot be carried. <see cref="MqttConnectResult.Accept"/>
+    /// refuses such a value, so this happens only when the host changed the array after it was accepted, which its
+    /// documentation forbids: it is the host's bug, not a lost link. This caller holds the send path, reserved for the
+    /// CONNACK, so nothing has been written: in one hold of the lock the connection moves to Closing with
+    /// <see cref="CloseCause.HandlerThrew"/>, which <see cref="IMqttWireHandler.OnClosed"/> then reports; event 15
+    /// names <c>OnConnectAsync</c> and carries the exception; and CONNACK 0x83 is written in the success CONNACK's
+    /// place, then the WebSocket close, with whatever waited dropped by the Closing step. When another close won the
+    /// move first (it found the path taken and aborted the link), the exception is still logged and the path is given
+    /// up. A fault while the refusal is encoded ends the connection as any fault of the send path does.
+    /// </summary>
+    /// <param name="exception">
+    /// What the encoding of the success CONNACK threw.
+    /// </param>
+    private void RefuseUnencodableConnAck(ArgumentException exception)
+    {
+        bool won;
+        lock (_sendLock)
+        {
+            won = TryEnterClosing(CloseCause.HandlerThrew, out _);
+            if (won)
+            {
+                // The send path stays this caller's: the refusal, then the WebSocket close, are written through it.
+                _closeStatus = (ushort)WebSocketCloseStatus.NormalClosure;
+            }
+        }
+
+        LogEnd(CloseCause.HandlerThrew, MqttReasonCode.ImplementationSpecificError, payloadLength: 0,
+            nameof(IMqttWireHandler.OnConnectAsync), exception);
+        if (!won)
+        {
+            ContinueSending(returned: null, failed: false, InlineWrites);
+            return;
+        }
+
+        byte[]? unsent = null;
+        int length;
+        try
+        {
+            ConnAckFields refusal = new() { ReasonCode = MqttReasonCode.ImplementationSpecificError };
+            unsent = _server.Pool.Rent(ConnAckCodec.GetSize(refusal));
+            length = ConnAckCodec.Write(unsent, refusal);
+        }
+        catch (Exception fault)
+        {
+            FaultSendPath(fault, unsent);
             return;
         }
 

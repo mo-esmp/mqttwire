@@ -5,11 +5,128 @@ namespace MqttWire.Server.Internal;
 /// <summary>
 /// The server's log events (design 6.12), source-generated so that a level that is off costs a check and nothing
 /// else: no string is built and no value boxed unless the level is on. Every end of a connection the server decides
-/// on has its own event; a reason code is logged as its <see cref="MqttReasonCode"/> name. No event carries a
+/// on has its own event; a reason code is logged as its <see cref="MqttReasonCode"/> name. A line names the client by
+/// its client id; a connection that has none yet (it sent no CONNECT that was read) is named by its remote end point
+/// instead, through a variant of the same event (the same id, name and level; the methods ending in <c>From</c>),
+/// whose caller checks the level before it reads the end point. No line has an empty client id. No event carries a
 /// password, a user name, a payload, a topic, user properties or a reason string from the host.
 /// </summary>
 internal static partial class ServerLog
 {
+    /// <summary>
+    /// Event 1 for a connection that has no client id yet: the same id, name and level, naming the remote end point.
+    /// </summary>
+    private static readonly Action<ILogger, string, MqttReasonCode, Exception?> s_malformedPacketFrom =
+        LoggerMessage.Define<string, MqttReasonCode>(LogLevel.Debug, new EventId(1, nameof(MalformedPacket)),
+            "Connection from {RemoteEndPoint} sent a malformed packet; the connection was ended with reason code {ReasonCode}.",
+            new LogDefineOptions { SkipEnabledCheck = true });
+
+    /// <summary>
+    /// Event 2 for a connection that has no client id yet: the same id, name and level, naming the remote end point.
+    /// </summary>
+    private static readonly Action<ILogger, string, MqttReasonCode, Exception?> s_protocolErrorFrom =
+        LoggerMessage.Define<string, MqttReasonCode>(LogLevel.Debug, new EventId(2, nameof(ProtocolError)),
+            "Connection from {RemoteEndPoint} broke the protocol; the connection was ended with reason code {ReasonCode}.",
+            new LogDefineOptions { SkipEnabledCheck = true });
+
+    /// <summary>
+    /// Event 16 for a connection that has no client id yet: the same id, name and level, naming the remote end point.
+    /// </summary>
+    private static readonly Action<ILogger, string, Exception?> s_serverStoppingFrom =
+        LoggerMessage.Define<string>(LogLevel.Debug, new EventId(16, nameof(ServerStopping)),
+            "Connection from {RemoteEndPoint} was ended because the server is stopping.",
+            new LogDefineOptions { SkipEnabledCheck = true });
+
+    /// <summary>
+    /// Event 18 for a connection that has no client id yet: the same id, name and level, naming the remote end point.
+    /// </summary>
+    private static readonly Action<ILogger, string, Exception?> s_connectionLostFrom =
+        LoggerMessage.Define<string>(LogLevel.Debug, new EventId(18, nameof(ConnectionLost)),
+            "Connection from {RemoteEndPoint} was lost.",
+            new LogDefineOptions { SkipEnabledCheck = true });
+
+    /// <summary>
+    /// Event 20 for a connection that has no client id yet: the same id, name and level, naming the remote end point.
+    /// </summary>
+    private static readonly Action<ILogger, string, Exception?> s_sendPathFaultedFrom =
+        LoggerMessage.Define<string>(LogLevel.Error, new EventId(20, nameof(SendPathFaulted)),
+            "Sending to the connection from {RemoteEndPoint} failed inside MqttWire; the connection was ended.",
+            new LogDefineOptions { SkipEnabledCheck = true });
+
+    /// <summary>
+    /// Logs event 1, a malformed packet, for a connection that has no client id yet. The caller has checked that
+    /// <see cref="LogLevel.Debug"/> is enabled.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="remoteEndPoint">
+    /// The remote end point, address and port, or "unknown".
+    /// </param>
+    /// <param name="reasonCode">
+    /// The reason code of the end; no packet carries it when the first packet was refused.
+    /// </param>
+    public static void MalformedPacketFrom(ILogger logger, string remoteEndPoint, MqttReasonCode reasonCode) =>
+        s_malformedPacketFrom(logger, remoteEndPoint, reasonCode, arg4: null);
+
+    /// <summary>
+    /// Logs event 2, a protocol error, for a connection that has no client id yet. The caller has checked that
+    /// <see cref="LogLevel.Debug"/> is enabled.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="remoteEndPoint">
+    /// The remote end point, address and port, or "unknown".
+    /// </param>
+    /// <param name="reasonCode">
+    /// The reason code of the end; no packet carries it when the first packet was refused.
+    /// </param>
+    public static void ProtocolErrorFrom(ILogger logger, string remoteEndPoint, MqttReasonCode reasonCode) =>
+        s_protocolErrorFrom(logger, remoteEndPoint, reasonCode, arg4: null);
+
+    /// <summary>
+    /// Logs event 16, the server's stop, for a connection that has no client id yet. The caller has checked that
+    /// <see cref="LogLevel.Debug"/> is enabled.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="remoteEndPoint">
+    /// The remote end point, address and port, or "unknown".
+    /// </param>
+    public static void ServerStoppingFrom(ILogger logger, string remoteEndPoint) =>
+        s_serverStoppingFrom(logger, remoteEndPoint, arg3: null);
+
+    /// <summary>
+    /// Logs event 18, a lost link, for a connection that has no client id yet. The caller has checked that
+    /// <see cref="LogLevel.Debug"/> is enabled.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="remoteEndPoint">
+    /// The remote end point, address and port, or "unknown".
+    /// </param>
+    public static void ConnectionLostFrom(ILogger logger, string remoteEndPoint) =>
+        s_connectionLostFrom(logger, remoteEndPoint, arg3: null);
+
+    /// <summary>
+    /// Logs event 20, a fault of the send path, for a connection that has no client id yet. The caller has checked
+    /// that <see cref="LogLevel.Error"/> is enabled.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="remoteEndPoint">
+    /// The remote end point, address and port, or "unknown".
+    /// </param>
+    /// <param name="exception">
+    /// What was thrown.
+    /// </param>
+    public static void SendPathFaultedFrom(ILogger logger, string remoteEndPoint, Exception exception) =>
+        s_sendPathFaultedFrom(logger, remoteEndPoint, exception);
+
     /// <summary>
     /// Logs that the client sent a malformed packet, and the connection was ended.
     /// </summary>
@@ -75,20 +192,18 @@ internal static partial class ServerLog
 
     /// <summary>
     /// Logs that no complete CONNECT came within the connect deadline, so the connection was aborted. There is no
-    /// client id yet: the remote end point names the connection.
+    /// client id yet: the remote end point names the connection. The caller checks the level first, so that the end
+    /// point is read and turned into text only for a line that is written.
     /// </summary>
     /// <param name="logger">
     /// The server's logger.
     /// </param>
-    /// <param name="remoteAddress">
-    /// The remote IP address of the request, or the text "unknown" when it has none.
+    /// <param name="remoteEndPoint">
+    /// The remote end point of the request, address and port, or "unknown" when it has none.
     /// </param>
-    /// <param name="remotePort">
-    /// The remote port of the request.
-    /// </param>
-    [LoggerMessage(EventId = 5, Level = LogLevel.Debug,
-        Message = "No complete CONNECT came from {RemoteAddress} port {RemotePort} within the connect deadline; the connection was aborted.")]
-    public static partial void ConnectTimedOut(ILogger logger, object remoteAddress, int remotePort);
+    [LoggerMessage(EventId = 5, Level = LogLevel.Debug, SkipEnabledCheck = true,
+        Message = "Connection from {RemoteEndPoint} sent no complete CONNECT within the connect deadline; it was aborted.")]
+    public static partial void ConnectTimedOut(ILogger logger, string remoteEndPoint);
 
     /// <summary>
     /// Logs that the client sent nothing within one and a half times its keep-alive, so the connection was ended.

@@ -114,6 +114,35 @@ public sealed class PublicTypesTests
     }
 
     /// <summary>
+    /// Proves that a user property no CONNACK can carry, a name or value with U+0000 or an unpaired surrogate, is
+    /// refused when the host accepts with it, so only a host that changes the array afterwards reaches the server's
+    /// last resort.
+    /// </summary>
+    /// <param name="name">
+    /// The property's name.
+    /// </param>
+    /// <param name="value">
+    /// The property's value.
+    /// </param>
+    [Theory]
+    [InlineData("k", "bad\0value")]
+    [InlineData("bad\0name", "v")]
+    [InlineData("k", "lone surrogate")]
+    public void Accept_UserPropertyNotEncodable_Throws(string name, string value)
+    {
+        // Arrange
+        // A lone surrogate does not survive the test's attribute, so it is put in here.
+        string carried = value == "lone surrogate" ? "a" + (char)0xD800 : value;
+        MqttWireUserProperty[] properties = [new MqttWireUserProperty(name, carried)];
+
+        // Act
+        Action accept = () => MqttConnectResult.Accept(userProperties: properties);
+
+        // Assert
+        accept.ShouldThrow<ArgumentException>();
+    }
+
+    /// <summary>
     /// Proves that a granted QoS outside 0 to 2 is refused.
     /// </summary>
     [Fact]

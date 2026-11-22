@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Net;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Time.Testing;
 using MqttWire.Server;
@@ -129,14 +130,23 @@ internal sealed class ServerHarness
     /// <summary>
     /// Opens a connection: a new in-memory link and an HTTP context, handed to the server.
     /// </summary>
+    /// <param name="remoteEndPoint">
+    /// The remote end point the HTTP context reports, or <see langword="null"/> for none (the context's default).
+    /// </param>
     /// <returns>
     /// The connection, waiting for its CONNECT.
     /// </returns>
-    public TestConnection Accept()
+    public TestConnection Accept(IPEndPoint? remoteEndPoint = null)
     {
         MemoryLink link = new();
         CancellationTokenSource requestAborted = new();
         DefaultHttpContext httpContext = new() { RequestAborted = requestAborted.Token };
+        if (remoteEndPoint is not null)
+        {
+            httpContext.Connection.RemoteIpAddress = remoteEndPoint.Address;
+            httpContext.Connection.RemotePort = remoteEndPoint.Port;
+        }
+
         Task run = Server.RunConnectionAsync(httpContext, link);
         return new TestConnection(this, link, run, requestAborted, httpContext);
     }

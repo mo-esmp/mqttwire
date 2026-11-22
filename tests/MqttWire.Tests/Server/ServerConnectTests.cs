@@ -314,6 +314,47 @@ public sealed class ServerConnectTests
     }
 
     /// <summary>
+    /// Proves that a host that changes its accepted user properties into one that cannot be carried (U+0000) before
+    /// the CONNACK is written gets the connection refused with CONNACK 0x83 in the success CONNACK's place, its bug
+    /// logged as an error of <c>OnConnectAsync</c> with the exception, and one <c>OnClosed</c> with
+    /// <see cref="MqttCloseReason.HandlerThrew"/>; nothing is logged as a lost link.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Connect_HostsUserPropertiesCannotBeEncoded_ClosesWith0x83AndLogsTheHostsBug()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        MqttWireUserProperty[] properties = [new MqttWireUserProperty("k", "v")];
+        harness.Handler.Connect = (_, _) =>
+        {
+            MqttConnectResult accepted = MqttConnectResult.Accept(userProperties: properties);
+
+            // The host's bug: the array the server keeps until the CONNACK is written is changed after the accept.
+            properties[0] = new MqttWireUserProperty("k", "bad\0value");
+            return ValueTask.FromResult(accepted);
+        };
+        TestConnection connection = harness.Accept();
+
+        // Act
+        connection.Deliver(ServerPackets.Connect);
+        await connection.Run;
+
+        // Assert
+        connection.TakeWritten().ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.ImplementationSpecificError));
+        connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
+        harness.Handler.Calls.Where(static call => call.StartsWith("OnClosed", StringComparison.Ordinal))
+            .ShouldBe(["OnClosed c1 HandlerThrew"]);
+        harness.Log.Entries.ShouldContain(static entry =>
+            entry.Id.Id == HandlerThrewEvent && entry.Level == LogLevel.Error && entry.Exception is ArgumentException
+            && entry.Message.Contains("OnConnectAsync", StringComparison.Ordinal));
+        harness.Log.Entries.ShouldNotContain(static entry => entry.Id.Id == 18);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves that a host that does not answer within the authentication deadline has its token cancelled, and the
     /// connection is refused with CONNACK 0x88 and ends although the host's task never completes.
     /// </summary>

@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Net;
 using System.Net.WebSockets;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -178,15 +179,17 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Tells the host that the admitted connection ended, with the reason of the first <see cref="BeginClose"/>,
-    /// narrowed to <see cref="MqttCloseReason"/> (<see cref="ToCloseReason"/>). Called once, by the end of the run. An
+    /// narrowed to <see cref="MqttCloseReason"/> (<see cref="TryNarrow"/>). Called once, by the end of the run. An
     /// <see cref="IMqttWireHandler.OnClosed"/> that throws is logged and nothing else: the connection ends all the
     /// same, and so does a logging provider that throws then.
     /// </summary>
     private void ReportClosed()
     {
+        bool narrowed = TryNarrow(CloseCause, out MqttCloseReason reason);
+        Debug.Assert(narrowed, "An end before the admission is never reported to OnClosed.");
         try
         {
-            _server.Handler.OnClosed(this, ToCloseReason(CloseCause));
+            _server.Handler.OnClosed(this, reason);
         }
         catch (Exception exception)
         {
@@ -196,21 +199,34 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Narrows why an admitted connection ended to what <see cref="IMqttWireHandler.OnClosed"/> reports: every cause
-    /// that <see cref="MqttCloseReason"/> names is itself, and a fault of the send path is
-    /// <see cref="MqttCloseReason.ConnectionLost"/>. The three ends before an admission never reach it.
+    /// Narrows why a connection ended to what <see cref="IMqttWireHandler.OnClosed"/> reports: every cause that
+    /// <see cref="MqttCloseReason"/> names is itself, and a fault of the send path is
+    /// <see cref="MqttCloseReason.ConnectionLost"/>. The three ends before an admission
+    /// (<see cref="CloseCause.RefusedByHost"/>, <see cref="CloseCause.AuthenticationTimedOut"/> and
+    /// <see cref="CloseCause.ConnectTimedOut"/>) are never narrowed: no <see cref="IMqttWireHandler.OnClosed"/>
+    /// reports them.
     /// </summary>
     /// <param name="cause">
     /// Why the connection ended.
     /// </param>
+    /// <param name="reason">
+    /// The reason the host is told; <see cref="MqttCloseReason.ConnectionLost"/> when the result is
+    /// <see langword="false"/>.
+    /// </param>
     /// <returns>
-    /// The reason the host is told.
+    /// <see langword="true"/> when the cause can reach <see cref="IMqttWireHandler.OnClosed"/>;
+    /// <see langword="false"/> for an end before the admission.
     /// </returns>
-    private static MqttCloseReason ToCloseReason(CloseCause cause)
+    internal static bool TryNarrow(CloseCause cause, out MqttCloseReason reason)
     {
-        Debug.Assert(cause is <= CloseCause.ServerStopping or CloseCause.SendPathFaulted,
-            "An end before the admission is never reported to OnClosed.");
-        return cause == CloseCause.SendPathFaulted ? MqttCloseReason.ConnectionLost : (MqttCloseReason)cause;
+        if (cause <= CloseCause.ServerStopping)
+        {
+            reason = (MqttCloseReason)cause;
+            return true;
+        }
+
+        reason = MqttCloseReason.ConnectionLost;
+        return cause == CloseCause.SendPathFaulted;
     }
 
     /// <summary>
@@ -486,14 +502,20 @@ public sealed partial class MqttWireConnection
     /// <summary>
     /// Writes the one log line of an end of this connection (design 6.12), or of an exception a handler or the send
     /// path threw: the one place that maps why a connection ended to its event. Called, outside the send path's lock,
-    /// by the call that won the move to Closing, with no exception; and by the code that caught an exception, with it,
-    /// whether or not its close won the move, so that the exception is never lost. The two ends whose line carries an
-    /// exception, <see cref="CloseCause.HandlerThrew"/> (event 15) and <see cref="CloseCause.SendPathFaulted"/>
-    /// (event 20), are written only from the second call; every other end only from the first. Each line carries the
-    /// client id and the fields of its event, never a password, a payload, a topic or the host's reason string. With
-    /// the event's level off, the generated method returns after its check: nothing is built or boxed. It never
-    /// throws: a logging provider that throws is swallowed here, and only here.
+    /// by the call that won the move to Closing, with no exception; and by the code that caught an exception, with it.
+    /// A line names the client by its client id; a connection that has none yet is named by its remote end point,
+    /// through <see cref="WriteRemoteEndLine"/>. Each line carries the fields of its event, never a password, a
+    /// payload, a topic or the host's reason string. With the event's level off nothing is read, built or boxed. It
+    /// never throws: a logging provider that throws is swallowed here, and only here.
     /// </summary>
+    /// <remarks>
+    /// A call that loses the move to Closing logs nothing, with one deliberate exception: the two lines that carry an
+    /// exception, <see cref="CloseCause.HandlerThrew"/> (event 15) and <see cref="CloseCause.SendPathFaulted"/>
+    /// (event 20), are written only by the code that caught the exception, after its own close has begun and whether
+    /// or not that close won. The winner of the move has no exception in hand, and an exception that is the host's bug,
+    /// or MqttWire's, must never be lost because another end came first. So an end can show two lines: the winner's
+    /// (for example 14, the host closed the connection, or 6, the keep-alive deadline) and then 15 or 20.
+    /// </remarks>
     /// <param name="cause">
     /// Why the connection ended.
     /// </param>
@@ -522,7 +544,11 @@ public sealed partial class MqttWireConnection
 #pragma warning disable RCS1075 // Avoid empty catch clause that catches System.Exception: see the comment above.
         try
         {
-            if (exception is null)
+            if (ClientId.Length == 0)
+            {
+                WriteRemoteEndLine(logger, cause, code, exception);
+            }
+            else if (exception is null)
             {
                 WriteEndLine(logger, cause, code, payloadLength);
             }
@@ -543,8 +569,86 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Writes the line of an end decided by the winner of the move to Closing, for the ends whose line carries more
-    /// than the client id: a reason code, the remote end point or a payload's length; the others go on to
+    /// Writes the line of an end of a connection that has no client id yet: it sent no CONNECT that was read, so the
+    /// remote end point names it. Only these ends can happen then: a malformed or refused first packet or CONNECT
+    /// (events 1 and 2), the connect deadline (5), the server's stop (16), a lost link (18) and a fault of the send
+    /// path (20). The level is checked first, so that the end point is read and turned into text only for a line
+    /// that is written. Called only by <see cref="LogEnd"/>, which swallows what a logging provider throws.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="cause">
+    /// Why the connection ended.
+    /// </param>
+    /// <param name="code">
+    /// The reason code of the end.
+    /// </param>
+    /// <param name="exception">
+    /// What the send path threw, with <see cref="CloseCause.SendPathFaulted"/> from the code that caught it; otherwise
+    /// <see langword="null"/>.
+    /// </param>
+    private void WriteRemoteEndLine(ILogger logger, CloseCause cause, MqttReasonCode code, Exception? exception)
+    {
+        if (!logger.IsEnabled(exception is null ? LogLevel.Debug : LogLevel.Error))
+        {
+            return;
+        }
+
+        string remote = GetRemoteEndPoint();
+        switch (cause)
+        {
+            case CloseCause.MalformedPacket:
+                ServerLog.MalformedPacketFrom(logger, remote, code);
+                break;
+
+            case CloseCause.ProtocolError:
+                ServerLog.ProtocolErrorFrom(logger, remote, code);
+                break;
+
+            case CloseCause.ConnectTimedOut:
+                ServerLog.ConnectTimedOut(logger, remote);
+                break;
+
+            case CloseCause.ServerStopping:
+                ServerLog.ServerStoppingFrom(logger, remote);
+                break;
+
+            case CloseCause.ConnectionLost:
+                ServerLog.ConnectionLostFrom(logger, remote);
+                break;
+
+            case CloseCause.SendPathFaulted when exception is not null:
+                ServerLog.SendPathFaultedFrom(logger, remote, exception);
+                break;
+
+            default:
+                // The winner of a fault's close: the code that caught the exception writes the line, with it.
+                Debug.Assert(exception is null && cause is CloseCause.HandlerThrew or CloseCause.SendPathFaulted,
+                    "No other end can happen before the CONNECT is read.");
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Gets the remote end point of the request as text, for a line of a connection that has no client id yet; read
+    /// only once the line's level is known to be on.
+    /// </summary>
+    /// <returns>
+    /// The address and port (for example <c>192.0.2.7:50123</c>, or <c>[2001:db8::1]:50123</c>), or "unknown" when
+    /// the request has no remote address.
+    /// </returns>
+    private string GetRemoteEndPoint()
+    {
+        ConnectionInfo connection = HttpContext.Connection;
+        return connection.RemoteIpAddress is { } address
+            ? new IPEndPoint(address, connection.RemotePort).ToString()
+            : "unknown";
+    }
+
+    /// <summary>
+    /// Writes the line of an end decided by the winner of the move to Closing, for a connection with a client id and
+    /// an end whose line carries more than the client id: a reason code or a payload's length; the others go on to
     /// <see cref="WriteClientIdEndLine"/>. Called only by <see cref="LogEnd"/>, which swallows what a logging provider
     /// throws.
     /// </summary>
@@ -579,12 +683,6 @@ public sealed partial class MqttWireConnection
 
             case CloseCause.AuthenticationTimedOut:
                 ServerLog.AuthenticationTimedOut(logger, ClientId);
-                break;
-
-            case CloseCause.ConnectTimedOut:
-                // No client id yet: the remote end point names the connection.
-                ConnectionInfo remote = HttpContext.Connection;
-                ServerLog.ConnectTimedOut(logger, (object?)remote.RemoteIpAddress ?? "unknown", remote.RemotePort);
                 break;
 
             case CloseCause.MessageTooLargeToSend:
@@ -657,7 +755,9 @@ public sealed partial class MqttWireConnection
                 break;
 
             default:
-                // HandlerThrew or SendPathFaulted: written with the exception by the code that caught it.
+                // Written with the exception by the code that caught it; a new member must get its own arm above.
+                Debug.Assert(cause is CloseCause.HandlerThrew or CloseCause.SendPathFaulted,
+                    "Every other cause has its own line.");
                 break;
         }
     }

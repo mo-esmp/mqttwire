@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Net;
+using System.Text;
 using Microsoft.Extensions.Logging;
 using MqttWire.Server;
 using MqttWire.Server.Internal;
@@ -64,6 +65,16 @@ public sealed class LoggingTests
     private static readonly MqttTopic s_topic = MqttTopic.Create("a/b");
 
     /// <summary>
+    /// The remote end point of the requests of the tests that look for it in the log.
+    /// </summary>
+    private static readonly IPEndPoint s_remote = new(IPAddress.Parse("192.0.2.7"), 50123);
+
+    /// <summary>
+    /// How a line names a connection from <see cref="s_remote"/> that has no client id.
+    /// </summary>
+    private const string RemoteName = "Connection from 192.0.2.7:50123";
+
+    /// <summary>
     /// Proves that each way a connection can end, driven through the scenario that ends it that way, is logged
     /// exactly once with its own event id and level, that no other end is logged for it, and that the line names the
     /// client, except the connect deadline's, which has no client id yet.
@@ -119,6 +130,8 @@ public sealed class LoggingTests
             entry.Message.ShouldContain("c1");
         }
 
+        // An empty client id would leave two spaces after "client".
+        harness.Log.Entries.ShouldAllBe(static entry => !entry.Message.Contains("lient  ", StringComparison.Ordinal));
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -299,13 +312,134 @@ public sealed class LoggingTests
 
         // Assert
         EndEvents(harness).ShouldBe([HandlerThrewEvent, 12, 3, 14], ignoreOrder: true);
-        foreach ((LogLevel _, EventId id, string message, Exception? _) in harness.Log.Entries)
+        harness.Log.Entries.ShouldContain(static entry => entry.Id.Id == HandlerThrewEvent
+            && entry.Exception is InvalidOperationException
+            && entry.Message.Contains(nameof(IMqttWireHandler.OnPublish), StringComparison.Ordinal));
+        foreach ((LogLevel _, EventId id, string message, Exception? exception) in harness.Log.Entries)
         {
-            message.ShouldNotContain(Password, customMessage: $"event {id.Id}");
-            message.ShouldNotContain(UserName, customMessage: $"event {id.Id}");
-            message.ShouldNotContain(Payload, customMessage: $"event {id.Id}");
-            message.ShouldNotContain(HostReason, customMessage: $"event {id.Id}");
+            string text = message + exception?.ToString();
+            text.ShouldNotContain(Password, customMessage: $"event {id.Id}");
+            text.ShouldNotContain(UserName, customMessage: $"event {id.Id}");
+            text.ShouldNotContain(Payload, customMessage: $"event {id.Id}");
+            text.ShouldNotContain(HostReason, customMessage: $"event {id.Id}");
         }
+    }
+
+    /// <summary>
+    /// Proves that the connect deadline's line names the request's real remote end point, address and port.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task End_ConnectTimedOut_NamesTheRemoteEndPoint()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Accept(s_remote);
+        connection.Deliver(ServerPackets.Connect.AsSpan(0, 8));
+
+        // Act
+        harness.Advance(ServerLimits.ConnectDeadline);
+        await connection.Run;
+
+        // Assert
+        EndEvents(harness).ShouldBe([5]);
+        string message = harness.Log.Entries.Single(static entry => entry.Id.Id == 5).Message;
+        message.ShouldContain("192.0.2.7");
+        message.ShouldContain("50123");
+        message.ShouldStartWith(RemoteName);
+    }
+
+    /// <summary>
+    /// Proves that an end that comes before any CONNECT was read (a malformed first packet, a first packet that is
+    /// not a CONNECT, a CONNECT with an empty client id, the server's stop and a lost link) is logged once with its
+    /// own event id, and names the connection by its remote end point, never by an empty client id.
+    /// </summary>
+    /// <param name="scenario">
+    /// How the connection ends.
+    /// </param>
+    /// <param name="eventId">
+    /// The event id of the end.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Theory]
+    [InlineData("garbage", 1)]
+    [InlineData("pingreq", 2)]
+    [InlineData("emptyClientId", 2)]
+    [InlineData("stop", 16)]
+    [InlineData("peerEnds", 18)]
+    public async Task End_BeforeAnyConnect_NamesTheRemoteEndPoint(string scenario, int eventId)
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Accept(s_remote);
+
+        // Act
+        switch (scenario)
+        {
+            case "garbage":
+                connection.Deliver(Hex.Parse("FF FF FF FF FF"));
+                break;
+
+            case "pingreq":
+                connection.Deliver(ClientPackets.PingReq);
+                break;
+
+            case "emptyClientId":
+                connection.Deliver(ServerPackets.ConnectEmptyClientId);
+                break;
+
+            case "stop":
+                await harness.Server.StopAsync();
+                break;
+
+            default:
+                connection.Link.EndFromPeer();
+                break;
+        }
+
+        await connection.Run;
+
+        // Assert
+        EndEvents(harness).ShouldBe([eventId]);
+        harness.Log.Entries.Single(entry => entry.Id.Id == eventId).Message.ShouldStartWith(RemoteName);
+        harness.Log.Entries.ShouldAllBe(static entry => !entry.Message.Contains("lient ", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Proves the one deliberate exception to "a close that loses logs nothing": a host that closes the connection
+    /// from inside <c>OnPublish</c> and then throws gets the host's close logged (event 14, the winner of the move)
+    /// and then the exception (event 15, written by the code that caught it although its close lost), in that order.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task End_HostClosesThenThrows_LogsTheCloseThenTheException()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        InvalidOperationException thrown = new("The host's bug.");
+        harness.Handler.Publish = (connection, in _) =>
+        {
+            connection.Close(MqttReasonCode.AdministrativeAction);
+            throw thrown;
+        };
+        TestConnection connection = harness.Connect();
+
+        // Act
+        connection.Deliver(ClientPackets.PublishQoS1);
+        connection.Link.EndFromPeer();
+        await connection.Run;
+
+        // Assert
+        EndEvents(harness).ShouldBe([14, HandlerThrewEvent]);
+        harness.Log.Entries.Single(static entry => entry.Id.Id == HandlerThrewEvent).Exception.ShouldBeSameAs(thrown);
+        harness.Handler.Calls.Where(static call => call.StartsWith("OnClosed", StringComparison.Ordinal))
+            .ShouldBe(["OnClosed c1 ClosedByHost"]);
     }
 
     /// <summary>
