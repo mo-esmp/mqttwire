@@ -2,6 +2,7 @@
 
 Date: 2026-11-19
 Status: final design (v6), approved by the owner on 2026-11-19
+Updated on 2026-11-22 to the server as built in step 3 (mo-esmp/mqttwire#6).
 Moved to the `mqttwire` repository on 2026-11-20.
 Companion: [GrainWire on MqttWire](2026-11-19-grainwire-on-mqttwire-design.md), the first host.
 History: this design is v5 of ["GrainWire: its own minimal MQTT 5 implementation"](2026-11-19-minimal-mqtt-design.md),
@@ -135,7 +136,12 @@ mqttwire/
   src/MqttWire/                 codec + client
   src/MqttWire.Server/          connection server
   tests/MqttWire.Tests/         codec, client and server tests; MQTTnet as a test dependency
-  tests/interop-js/             MQTT.js against a small test host
+  tests/MqttWire.Interop.Tests/ interops over Kestrel: MQTTnet's client and broker against
+                                MqttWire's server and client
+  tests/MqttWire.TestHost/      a small host with an exact-topic handler, shared by the interops,
+                                MQTT.js and the shared-topics test
+  tests/interop-js/             MQTT.js against the test host
+  bench/MqttWire.Microbench/    BenchmarkDotNet runs of the codec and the client
   bench/MqttWire.Bench/         the floor, and idle connections on a handler that does nothing
   samples/GroupChat/            shared topics through the host (6.10)
   docs/                         this design; "the part of MQTT 5 that is implemented"
@@ -150,6 +156,7 @@ exists and what each member means. Exact type and member names are the builder's
 
 ```csharp
 builder.Services.AddMqttWireServer<MyHandler>(options => { options.MaxOutgoingBytes = 1 << 20; });
+app.UseWebSockets();
 app.MapMqttWire("/mqtt");
 ```
 
@@ -186,7 +193,7 @@ public sealed class MqttWireConnection
 public sealed class MqttWireServer
 {
     public int ConnectionCount { get; }
-    public bool TryGetConnection(string clientId, out MqttWireConnection connection);
+    public bool TryGetConnection(string clientId, [NotNullWhen(true)] out MqttWireConnection? connection);
 }
 ```
 
@@ -195,13 +202,13 @@ public sealed class MqttWireServer
 | Member | Contract |
 |---|---|
 | `MqttConnectRequest` | The CONNECT as the host needs it: client id, user name, password (bytes), the user properties the client sent, the remote end point, whether the connection is secure, and the `HttpContext` of the WebSocket request (headers, cookies, the authenticated user). It owns copies of what it holds, so it may be used across awaits inside `OnConnectAsync`. |
-| `MqttConnectResult` | Accept, with the host's state object for the connection and optional user properties for CONNACK; or refuse, with a reason code and a reason string. |
+| `MqttConnectResult` | Accept, with the host's state object for the connection and optional user properties for CONNACK; or refuse, with a reason code and a reason string. `Accept` throws `ArgumentException` for user properties that cannot be encoded or that are over 1 KiB encoded; a host that changes the array afterwards so that it cannot be encoded is treated as a handler that threw (CONNACK `0x83`, and `OnClosed` says "handler threw"). Every `Refuse` throws `ArgumentOutOfRangeException` for a reason code below `0x80`, and `ArgumentException` for a reason string that no packet can carry (U+0000, an unpaired surrogate); `Close` throws the same `ArgumentException`. |
 | `MqttAdmitResult` | Accept or refuse (reason code and string). When `replaces` is not null and the host accepts, the new connection takes over and the old one is closed with "session taken over" (6.6). |
 | `MqttSubscribeResult` | Grant at a QoS (MqttWire lowers it to `MaxQoS` if needed), or refuse with a reason code and string. MqttWire keeps no record of subscriptions: what a subscription means, and remembering it, is the host's. |
 | `MqttPublish` | Topic, payload, QoS, the retain flag. A view; valid during the call only. |
 | `MqttPublishResult` | Accept, or refuse with a reason code and string. MqttWire sends the answer in the form the QoS calls for. |
-| `TrySend` | Hands a message for this connection to MqttWire and **returns at once**; it never waits for the network (6.6). Safe to call from any thread. The payload and the topic are not copied: the caller must not change them afterwards, and one payload may be handed to any number of connections. The result says: taken, connection not open, too large, or the connection was just evicted. |
-| `MqttTopic` | A topic name encoded once. A host that sends to the same topic often keeps the value; one that does not builds it per call. |
+| `TrySend` | Hands a message for this connection to MqttWire and **returns at once**; it never waits for the network (6.6). Safe to call from any thread. The payload and the topic are not copied: the caller must not change them afterwards, and one payload may be handed to any number of connections. The result says: taken, connection not open, too large, or the connection was just evicted. "Taken" means accepted, not delivered. A QoS above `MaxQoS` is lowered to it; `default(MqttTopic)` and a QoS that is not 0, 1 or 2 throw `ArgumentException`; an empty payload is a valid message. |
+| `MqttTopic` | A topic name encoded once. A host that sends to the same topic often keeps the value; one that does not builds it per call. It accepts at most 65,526 bytes of UTF-8, 9 fewer than MQTT allows, so that the header of every PUBLISH fits one 64 KB buffer (6.6). |
 | `Close` | Ends the connection as 6.6 describes. Safe from any thread, any number of times. |
 | `State` | The host's own object for this connection. MqttWire never looks at it. |
 
@@ -214,19 +221,27 @@ public sealed class MqttWireServer
 - `OnAdmit` runs inside MqttWire's admission step and must not block or call back into the
   server.
 - `OnClosed` is called once, after the last other call for that connection has returned. A
-  connection that was refused in `OnConnectAsync` or `OnAdmit` gets no `OnClosed`.
+  connection that was refused in `OnConnectAsync` or `OnAdmit` gets no `OnClosed`. It must not
+  wait on the server's stop: the stop waits for every `OnClosed` to return.
+- `OnClosed` may run on a thread-pool thread. Over ASP.NET Core's WebSocket an aborted read
+  ends on a thread-pool thread, so `OnClosed` never runs on the sweep's thread or on the thread
+  that stops the server. That comes from the transport, not from MqttWire: on a transport that
+  completes an aborted read inline, `OnClosed` runs inline on the thread that aborts, which can
+  be inside the host's own `TrySend` or `Close` (6.10).
 - A handler method that throws is the host's fault: the exception is logged as an error and
-  the connection is closed with `0x83` (implementation specific error). In `OnClosed` it is
-  logged only.
+  the connection is closed with `0x83` (implementation specific error): with CONNACK `0x83` from
+  `OnConnectAsync` or `OnAdmit`, and then no `OnClosed`; with DISCONNECT `0x83` from the others,
+  and `OnClosed` says "handler threw". In `OnClosed` it is logged only.
 
-**Options** (`MqttWireServerOptions`, checked at start-up; a server with an invalid value does
-not start):
+**Options** (`MqttWireServerOptions`, validated when the server is first resolved, which in a
+`WebApplication` is the call to `MapMqttWire`, or at the latest when the host starts; an invalid
+value throws `OptionsValidationException`, and the host does not start):
 
 | Option | Default | Meaning |
 |---|---|---|
 | `MaxQoS` | 2 | The highest QoS accepted from clients and used towards them. 1 or 2. |
-| `MaxPublishPayloadBytes` | 64 KiB | Largest payload a client may publish. |
-| `MaxOutgoingMessages` | 1,000 | Deliveries that may wait for one connection. |
+| `MaxPublishPayloadBytes` | 64 KiB | Largest payload a client may publish. From 1 byte to 16 MiB. |
+| `MaxOutgoingMessages` | 1,000 | Deliveries that may wait for one connection. At least 1. |
 | `MaxOutgoingBytes` | 1 MiB | Hard bound on what one connection holds on the way out. At least 64 KiB. |
 
 The deadlines, the receive maximum (256) and the other bounds of 6.6 are internal constants.
@@ -431,7 +446,11 @@ Rules for the WebSocket implementation, both sides:
 
 - Sub-protocol `mqtt`. The server accepts a request that offers it and answers with it; a
   WebSocket request that does not offer it is refused with HTTP 400.
-- Binary messages only. A text message closes the connection with WebSocket status 1003.
+- Binary messages only. A text message closes the connection with WebSocket status 1003. On the
+  server it ends the connection as a lost connection; the peer sees 1003 unless a server write
+  was in progress, in which case the close rule of 6.6 aborts the link and the peer may see a
+  reset instead.
+- A link starts at most one close frame, whichever side closes first.
 - **MQTT packets are not aligned to WebSocket messages.** One message may hold several packets
   or part of one. The receiver treats the incoming messages as one byte stream.
 - The server turns the WebSocket's own keep-alive pings off for this endpoint. MQTT has its
@@ -447,8 +466,8 @@ One `MqttWireConnection` per connection holds the MQTT state and the host's stat
 
 | State | Entered when | Leaves by | May hold |
 |---|---|---|---|
-| **Accepted** | the WebSocket is accepted | a complete CONNECT (to Authenticating); the connect deadline, a malformed or wrong first packet (to Closing) | one read buffer, at most 16 KB |
-| **Authenticating** | CONNECT is valid so far | `OnConnectAsync` answers (to admission); its deadline; the socket closing | the request and a short-lived cancellation source |
+| **Accepted** | the WebSocket is accepted | a complete CONNECT (to Authenticating); the connect deadline, a malformed or wrong first packet, a CONNECT that fails MqttWire's own checks, the server stopping (to Closing) | one read buffer, at most 16 KB |
+| **Authenticating** | CONNECT is valid so far | `OnConnectAsync` answers (to admission); its deadline; the socket closing; the server stopping | the request and a short-lived cancellation source; the read buffer only when packets came behind the CONNECT in it, which are handled, in order, after the CONNACK. With nothing behind the CONNECT, the buffer is returned before `OnConnectAsync` is called. |
 | **Active** | the admission step accepted | any end of the connection (to Closing) | what the rest of 6.6 allows |
 | **Closing** | the decision to end is made, once | the bounded close below | no new work is accepted |
 | **Closed** | the read loop has ended and no write is in progress | | nothing |
@@ -468,7 +487,7 @@ Authenticating state.
 | Connect | 10 s from accept until a complete CONNECT has arrived | abort |
 | Authentication | 10 s for `OnConnectAsync` to answer | CONNACK `0x88` (server unavailable) if it can be written, then close |
 | Partial packet | 10 s from the first byte of a packet to its last | close (`0x82`) |
-| Keep-alive | 1.5 times the connection's keep-alive without a packet from the client | close (`0x8D`) |
+| Keep-alive | 1.5 times the connection's keep-alive without a packet from the client, counted from the move to Active until the first packet, so a slow `OnConnectAsync` or `OnAdmit` does not use it up | close (`0x8D`) |
 | Write | 15 s for one piece of at most 64 KB handed to the link to complete | abort |
 | Acknowledgement | 30 s for each phase of a QoS 1 or 2 exchange | close (`0x82`) |
 | Close | 2 s from entering Closing | abort |
@@ -483,7 +502,12 @@ into pieces.
 
 **`OnConnectAsync` and its deadline.** It is the host's code:
 
-- Its cancellation token fires at the authentication deadline, or earlier if the socket closes.
+- Its cancellation token fires at the authentication deadline, or earlier if the socket closes
+  or the server stops. At the deadline and at the stop the token is cancelled on a thread-pool
+  thread, so a host's token callback never runs on the sweep's thread or on the thread that
+  stops the server. The causes are told apart in this order: the request was aborted (nothing
+  is written); the server is stopping (CONNACK `0x8B`); otherwise the deadline passed (CONNACK
+  `0x88`).
 - If it does not answer in time, the socket is closed and MqttWire lets go of the connection.
   **A handler that ignores cancellation keeps running; MqttWire cannot stop it.** What it still
   holds is the request it was given, not the connection.
@@ -492,7 +516,10 @@ into pieces.
 #### Life of a connection
 
 1. The endpoint accepts the WebSocket and creates the connection (Accepted).
-2. The first packet must be a complete CONNECT, within the connect deadline.
+2. The first packet must be a complete CONNECT, within the connect deadline. A first packet that
+   is not a CONNECT, or whose fixed header is malformed, gets no MQTT answer: the WebSocket is
+   closed with status 1002. A CONNECT longer than 16 KB gets CONNACK `0x95`, judged from its
+   fixed header. A CONNECT the codec refuses gets a CONNACK with the codec's reason code.
 3. MqttWire checks what is its own to check:
 
    | Check | Refusal |
@@ -527,14 +554,24 @@ connection the one in its table. From that step on:
 - Two CONNECTs for one client id that finish `OnConnectAsync` at the same time each go through
   the step, one after the other. The second sees the first as `replaces`.
 
+**No MQTT packet precedes the CONNACK.** The send path is reserved for the CONNACK from the start
+of the admission step, and the CONNACK is its first write. A host's `TrySend` between the
+admission and the CONNACK is taken and waits behind it. A connection that is closed in that
+window (a takeover, the stop, the host closing it from inside `OnAdmit`) finds a write in
+progress, so its link is aborted: it gets no CONNACK and no DISCONNECT, and `OnClosed` is still
+called once.
+
 The host decides in `OnAdmit` whether a replacement is allowed (for example only for the same
 user) and does its own accounting there (for example connections per user). Because the step is
 atomic and `OnClosed` is exactly-once, such accounting cannot drift: every accepted `OnAdmit`
 is matched by one `OnClosed`, and a takeover is visible on both sides (`replaces` in one,
 "taken over" in the other).
 
-Removing a connection from the table compares the object, not the client id, so the end of an
-old connection can never remove its replacement.
+A connection stays in the table from its admission until it is Closed: it is removed just before
+its `OnClosed`, and until then `TryGetConnection` finds it and `ConnectionCount` counts it. So a
+CONNECT for a client id whose connection is already closing sees that connection as `replaces`;
+the old one keeps the close reason it already had. Removing a connection from the table compares
+the object, not the client id, so the end of an old connection can never remove its replacement.
 
 #### Reading, with no buffer while idle
 
@@ -548,10 +585,11 @@ loop:
 ```
 
 - **A PUBLISH that is too large is refused without being buffered.** The first bytes of a
-  packet give its total length. In a PUBLISH that length covers the topic, the packet
-  identifier (only at QoS 1 and 2), the properties and the payload, in that order:
+  packet give its Remaining Length, on which the bands below are judged. In a PUBLISH that length
+  covers the topic, the packet identifier (only at QoS 1 and 2), the properties and the payload,
+  in that order. A QoS above `MaxQoS` is judged from the first byte, before anything is skipped:
 
-  | Total length of the PUBLISH | What happens |
+  | Remaining Length of the PUBLISH | What happens |
   |---|---|
   | up to `MaxPublishPayloadBytes` + 5 KiB | The packet is read whole and judged exactly: a payload over the limit is refused, anything else goes to `OnPublish`. The 5 KiB are room for the topic and the properties. |
   | above that, up to 16 times `MaxPublishPayloadBytes` | **Skip.** Only what is needed to find the packet identifier is read: the topic's length, then the topic's bytes are passed over without being kept, then the identifier. The rest is discarded as it arrives, across as many WebSocket messages as it takes, until exactly the packet's length has been consumed. Then it is refused. |
@@ -559,8 +597,12 @@ loop:
 
   The refusal is `0x97` (quota exceeded) with "The message is too large.", in the form the QoS
   calls for: **a PUBACK at QoS 1, a failing PUBREC at QoS 2 (and nothing is remembered), nothing
-  at QoS 0.** `OnPublish` is not called for it. If the skipped part is itself broken, that is a
-  malformed packet (`0x81`).
+  at QoS 0.** `OnPublish` is not called for it. At QoS 1 and 2 it counts against the receive
+  maximum like any other publish, and a QoS 2 publish whose identifier is remembered is answered
+  as a repetition (PUBREC success). If the skipped part is itself broken, that is a malformed
+  packet (`0x81`): its topic length runs past the packet, or it ends before its identifier, or
+  it ends right after its identifier (at QoS 0, right after its topic) with no property length.
+  An identifier of 0 is a protocol error (`0x82`), as in a PUBLISH read whole.
 - Any packet other than PUBLISH that is longer than 16 KB closes the connection with `0x95`.
 - The connection uses the request's own cancellation (`HttpContext.RequestAborted`) and
   `Abort()` on the link to stop a parked read.
@@ -577,10 +619,10 @@ loop:
 |---|---|
 | PUBLISH, QoS 0, 1 or 2 | `OnPublish`. QoS 1 gets a PUBACK at once, QoS 2 a PUBREC (see "QoS 1 and 2"): success, or the host's refusal. QoS 0 gets nothing. A QoS above `MaxQoS`: DISCONNECT `0x9B` (QoS not supported), close; CONNACK has announced "maximum QoS 1" in that case. |
 | PUBACK, PUBREC, PUBREL, PUBCOMP | See "QoS 1 and 2 inside a connection". |
-| SUBSCRIBE | `OnSubscribe` once per filter; SUBACK carries one reason code per filter. Subscription options are passed on to nobody and have no effect. |
+| SUBSCRIBE | `OnSubscribe` once per filter; SUBACK carries one reason code per filter, and the reason string of the host's first refusal. A filter that is not a valid MQTT filter gets `0x8F` (topic filter invalid) without the host being called. Subscription options are passed on to nobody and have no effect. |
 | UNSUBSCRIBE | `OnUnsubscribe` once per filter; UNSUBACK with success. |
 | PINGREQ | PINGRESP. |
-| DISCONNECT | Close. |
+| DISCONNECT | Close, with no DISCONNECT back. |
 | A second CONNECT, AUTH | DISCONNECT `0x82` (protocol error), close. |
 | A packet the server never reads: CONNACK, SUBACK, UNSUBACK, PINGRESP, the reserved type 0 | DISCONNECT `0x82` (protocol error), close. |
 | A malformed packet | DISCONNECT `0x81` (malformed packet), close. |
@@ -592,34 +634,54 @@ as the connection has taken the message or refused it. They never wait for the s
 that sends one message to many connections therefore runs at its own speed, not at the speed of
 the slowest recipient.
 
-A WebSocket allows one write at a time, so:
+A WebSocket allows one write at a time, so the connection has one send path, and **a write is
+in progress whenever the send path is taken**: a piece or a close is with the link, a caller is
+about to start one, the path is reserved for the CONNACK (6.6, "Admission and takeover"), or it
+is being handed to the thread pool (below), even when no bytes are with the link at that
+instant.
 
 - **No write in progress:** the caller encodes the packet into a rented buffer and starts the
   write. If the write completes at once, which is the normal case, the buffer goes back to the
   pool and nothing was allocated for this connection. If it does not, the caller returns
   anyway; the write's completion carries on.
-- **A write in progress:** the message is added to what waits for this connection, which is
-  created when first needed and dropped when empty. Whoever completes the write in progress
-  sends what has been added, by the scheduling rule below.
-- **A rented encoding buffer is never larger than 64 KB.** A small message is copied behind its
-  header into one buffer and written at once. For a larger one the header is written from a
-  small buffer and the payload is then written straight from the memory the host handed over,
-  in pieces of at most 64 KB, so no second copy of a large payload ever exists.
+- **A write in progress:** the message is added to what waits for this connection. Whoever
+  completes the write in progress sends what has been added, by the scheduling rule below. A
+  caller writes at most 16 packets on its own thread while the writes complete at once (one
+  PUBLISH counts once, however many pieces it is written in), then hands the send path to the
+  thread pool; so the drain, and the end of a connection with its `OnClosed`, can run on a
+  thread-pool thread.
+- **What waits is pooled per server.** The queue of waiting deliveries and the QoS exchange
+  records are objects taken from a pool of the server's with the first waiting delivery or the
+  first exchange, and returned, cleared, with the last. At most 1,024 of each are retained, and
+  a queue that grew past 64 entries is not retained. An idle connection holds neither.
+- **A rented encoding buffer is never larger than 64 KB.** A message whose whole packet is at
+  most 16 KB is copied behind its header into one buffer and written at once. For a larger one
+  the header is written from a buffer of its own and the payload is then written straight from
+  the memory the host handed over, in pieces of at most 64 KB, so no second copy of a large
+  payload ever exists.
+- **A writer that throws** (an encoding, the array pool, the link's write call itself) gives
+  the send path up: the connection ends as a lost connection, the fault is logged as an error
+  (6.12), what waited is dropped, and nothing is left taken.
 
 **Scheduling: control packets never wait behind a delivery.** A single ordered list can
 deadlock: the client's window is full, its PUBREC arrives, and the PUBREL that would free the
 window is stuck behind the delivery that waits for the window. So what waits is of two kinds:
 
 - **Control packets:** CONNACK, PUBACK, PUBREC, PUBREL, PUBCOMP, SUBACK, UNSUBACK, PINGRESP,
-  DISCONNECT. They are never held back by a QoS window. When a write completes, waiting control
-  packets are written before any waiting delivery, in the order they were produced.
+  DISCONNECT. They are never held back by a QoS window. A control packet that has to wait is
+  encoded at once into one control buffer per connection, which exists only while control
+  packets wait. When a write completes, the waiting control packets are written before any
+  waiting delivery, in the order they were produced, together as one WebSocket message. One
+  PINGRESP that waits answers a further PINGREQ too.
 - **Deliveries:** what the host sent, in the order of the `TrySend` calls. A delivery at QoS 1
   or 2 that has no room in the client's window waits, and so do the deliveries after it. It
   never holds back a control packet.
-- **What waits as control is bounded.** Answers to the client's publishes are bounded by the
-  receive maximum the server announced. At most one PINGRESP waits. Whatever the mix, more than
-  1,024 waiting control packets evict the connection, and their bytes count towards
-  `MaxOutgoingBytes`.
+- **What waits as control is bounded.** Answers to the client's publishes are bounded in number
+  by the receive maximum the server announced. At most one PINGRESP waits. Whatever the mix,
+  what waits as control is bounded twice: 1,024 packets, and the 64 KB of the one control
+  buffer. Passing either evicts the connection with `0x97`, and the bytes count towards
+  `MaxOutgoingBytes`. A client that lets 64 KB of answers wait behind one stuck write has
+  stopped reading.
 - How this is stored is the builder's choice. The rule is not.
 
 **Limits on what waits:**
@@ -655,11 +717,11 @@ and the connection is closed with `0x95`.
 
 | What | Bound |
 |---|---|
-| Before CONNECT is complete | one read buffer of at most 16 KB, for at most 10 s |
+| Before CONNECT is complete | one read buffer of at most 16 KB, for at most 10 s; when packets came behind the CONNECT in it, the same buffer through Authenticating, for at most 10 s more |
 | Read buffer while a packet is arriving | `MaxPublishPayloadBytes` + 5 KiB, for at most 10 s per packet |
 | On the way out | `MaxOutgoingBytes` (1 MiB), plus one encoding buffer of at most 64 KB |
 | QoS exchange records | 256 for what the client sends, 256 for what the server sends, a few bytes each |
-| Waiting control packets | 1,024, counted in `MaxOutgoingBytes` |
+| Waiting control packets | 1,024 and 64 KB, counted in `MaxOutgoingBytes` |
 | How long a stalled connection holds any of it | the write deadline (15 s) |
 
 What the host holds for a connection (its state, anything it queued from `OnPublish`) is the
@@ -689,9 +751,10 @@ when it entered this phase
 - **The acknowledgement deadline runs per phase**, and starts again when a QoS 2 exchange moves
   to its next phase. The sweep looks at the oldest record of a connection.
 - **An acknowledgement of the wrong kind for a known identifier is a protocol error** (`0x82`,
-  close). One repetition is harmless: a PUBREC for a delivery already waiting for PUBCOMP is
-  answered with PUBREL again and changes nothing.
-- The records of a connection are created with the first exchange and dropped with the last.
+  close). One repetition is harmless: a PUBREC for a delivery already waiting for PUBCOMP, with
+  a failure code or without one, is answered with PUBREL again and changes nothing.
+- The records of a connection are taken from the server's pool with the first exchange and
+  returned with the last (see "Sending").
 
 *Publishes from the client at QoS 2:*
 
@@ -703,14 +766,18 @@ when it entered this phase
 3. PUBREL *n*: *n* is forgotten; the answer is PUBCOMP. For an identifier that is not
    remembered, PUBCOMP carries `0x92` (packet identifier not found).
 4. CONNACK announces **"receive maximum" 256**. Against it the server counts, together, the
-   QoS 2 publishes whose PUBCOMP it has not yet written and the QoS 1 publishes whose PUBACK it
-   has not yet written. A client that passes 256 is closed with `0x93`.
+   QoS 2 identifiers it remembers and the answers to the client's publishes (PUBACKs, PUBCOMPs
+   and failing PUBRECs) that wait and have not yet been handed to the link. A publish refused
+   as too large counts like any other, and a repetition of a remembered identifier takes no new
+   place. The 257th closes the connection with `0x93`, before `OnPublish`.
 
 *Deliveries at QoS 1 or 2:*
 
 1. At QoS 1 the PUBLISH carries an identifier, in use until the client's PUBACK. At QoS 2 it is
    in use until PUBCOMP. A PUBREC with a failure code ends the exchange.
 2. Identifiers come from a counter (1 to 65535, wrapping) that skips those that have a record.
+   The counter is the connection's: it goes on from where it was when the records go back to
+   the pool, so an identifier whose exchange has just ended is not handed out again at once.
 3. **The client's "receive maximum" is honoured:** the window for a connection is the client's
    receive maximum or 256, whichever is smaller. A place in it is free again on PUBACK, on
    PUBCOMP, and on a PUBREC with a failure code. A delivery that has to wait for the window
@@ -729,26 +796,37 @@ Every close the server starts follows the same steps, and none of them waits on 
 1. Enter Closing (once). `TrySend` now says "not open".
 2. **If a write is in progress, abort the link now.** A socket that is not taking data is never
    asked to carry its own eviction notice, and a WebSocket close would only queue behind the
-   write that is stuck.
+   write that is stuck. "A write in progress" is the send path being taken ("Sending"), so this
+   holds also while the path is reserved for the CONNACK or handed to the thread pool.
 3. If no write is in progress: hand DISCONNECT with the reason code to the link, then start the
    WebSocket close through the same one-at-a-time send path, without waiting for the peer's
-   answer. The link is aborted at the close deadline.
+   answer. The link is aborted at the close deadline. A connection that was never admitted gets
+   a CONNACK with a failure code instead of the DISCONNECT; a client's DISCONNECT, a lost link
+   and a fault of the send path get no packet, only the WebSocket close.
 4. **Aborting does not release anything by itself** (6.8). The read loop and the write in
    progress each end with an error once the link is aborted; each returns its own buffer.
-5. The connection is Closed when the read loop has ended and no write is in progress. Then
-   `OnClosed` is called, and only then does the endpoint's request return to Kestrel.
+5. The connection is Closed when the read loop has ended and no write is in progress. In this
+   order: it is removed from the client-id table (by object), it becomes Closed, `OnClosed` is
+   called (if it was admitted), and only then is its slot freed and does the endpoint's request
+   return to Kestrel. The stop waits for the slots.
 
 #### When the host stops
 
-1. Stop accepting: a new WebSocket request is answered with HTTP 503.
-2. Every connection is closed as above with `0x8B` (server shutting down).
+1. Stop accepting: a new WebSocket request is answered with HTTP 503, and the admission step
+   lets no connection in (it refuses with `0x8B` without calling `OnAdmit`).
+2. Every connection is ended as its state calls for: an Active one is closed as above with
+   `0x8B` (server shutting down); an Accepted one is aborted; an Authenticating one has its
+   token cancelled and gets CONNACK `0x8B`. The stopping flag is read in the same step in which
+   a connection takes its slot, so a connection either is seen by the stop's walk or sees the
+   flag: one that takes its slot after the stop began is aborted at once.
 3. Links that are still open after the close deadline are aborted.
 4. The server waits for the read loops and writes to end, so that every buffer is back and
    every `OnClosed` has been called.
 5. The sweep stops.
 
 The whole takes a few seconds at most and does not depend on the host's handlers returning from
-long work, because they do no long work on MqttWire's threads (6.2).
+long work, because they do no long work on MqttWire's threads (6.2). A host must not wait on the
+stop from inside `OnClosed`.
 
 ### 6.7 What is done with each MQTT property
 
@@ -792,9 +870,11 @@ Where MQTT names a more specific reason code, that one is used.
 | Subscription Identifier in a SUBSCRIBE | Refused: DISCONNECT `0xA1`. |
 | User Property, Reason String, Session Expiry Interval (others) | Ignored. |
 
-**CONNACK from the server.** Always: session present 0, Receive Maximum 256, Subscription
-Identifiers Available 0, and the host's user properties. When needed: Maximum QoS 1 (only when
-`MaxQoS` is 1), Session Expiry Interval 0, Server Keep Alive, Reason String. In MQTT 5 a
+**CONNACK from the server.** A success CONNACK always carries: session present 0, Receive
+Maximum 256, Subscription Identifiers Available 0, and the host's user properties. When needed:
+Maximum QoS 1 (only when `MaxQoS` is 1), Session Expiry Interval 0, Server Keep Alive. A
+refusing CONNACK carries its reason code and, when there is one, its Reason String, and nothing
+else. In MQTT 5 a
 capability that is not announced counts as supported, so a server may refuse a subscription
 identifier or a QoS 2 publish only after announcing that. "Maximum packet size" and "retain
 available" are deliberately not announced: what a host does with a large or a retained publish
@@ -927,6 +1007,13 @@ What the host does itself: the table and its clean-up in `OnUnsubscribe` and `On
 may subscribe and publish; wildcards, if it wants them; whether the sender gets its own message
 back; and using the lower of the publish's QoS and the granted QoS.
 
+`_subscribers.Get` above stands for a snapshot of the recipients. A host must not hold a lock
+across `TrySend` unless that lock is re-entrant and its table tolerates a change: `TrySend` can
+close a connection (an eviction, a message too large), and on a transport that completes an
+aborted read inline that connection's `OnClosed` then runs inside the call (6.2). So the host
+takes a snapshot of the recipients under its lock and sends after releasing it, as
+`tests/MqttWire.TestHost/ExactTopicHandler.cs` does.
+
 ### 6.11 Kept open for later
 
 - **A routing helper.** An optional component that keeps the topic-to-connections table and
@@ -944,17 +1031,47 @@ back; and using the lower of the publish's QoS and the granted QoS.
 
 ### 6.12 Logging: why a connection ended
 
-Every end of a connection that the server decides on is logged once, with the client id and one
-of these reasons, each with its own event id:
+Every end of a connection is logged once, by whoever wins the move to Closing, with the client
+id and one of these reasons, each with its own event id. Event 19 is not an end: it is how a
+host task that the connection stopped waiting for ended. `MqttCloseReason` names the reasons
+an admitted connection can end with, two of which the server does not decide:
+`ClientDisconnected` and `ConnectionLost`.
 
-malformed packet · protocol error · refused by the host (with the host's reason code) ·
-authentication timed out · connect timed out · keep-alive timed out · partial packet timed out ·
-write timed out · acknowledgement timed out · outgoing limit passed · receive maximum passed ·
-message too large to send · taken over · closed by the host · handler threw · server stopping.
+| Event | Reason | Level, and what the line carries besides the client id |
+|---|---|---|
+| 1 | malformed packet | debug; the reason code |
+| 2 | protocol error | debug; the reason code |
+| 3 | refused by the host | debug; the host's reason code |
+| 4 | authentication timed out | error |
+| 5 | connect timed out | debug; the remote end point instead of the client id |
+| 6 | keep-alive timed out | debug |
+| 7 | partial packet timed out | debug |
+| 8 | write timed out | debug |
+| 9 | acknowledgement timed out | debug |
+| 10 | outgoing limit passed | debug |
+| 11 | receive maximum passed | debug |
+| 12 | message too large to send | debug; the payload's length |
+| 13 | taken over | debug |
+| 14 | closed by the host | debug; the host's reason code |
+| 15 | handler threw | error; the method's name and the exception |
+| 16 | server stopping | debug |
+| 17 | the client disconnected | debug; the client's reason code |
+| 18 | the connection was lost | debug |
+| 19 | a late `OnConnectAsync` result, observed and discarded | debug; error, with the exception, when it threw |
+| 20 | the send path faulted (6.6, "Sending") | error; the exception |
 
-Ordinary ends are logged at debug level. A handler that threw, and an `OnConnectAsync` that did
-not answer, are logged as errors. **No log line contains a password or a payload.** The same
-reason is what `OnClosed` receives.
+A connection whose CONNECT has not passed MqttWire's own checks has no client id yet: its line
+names the remote end point instead. An incoming packet that is too large, a topic alias, an
+unsupported QoS and a subscription identifier end with "protocol error"; the specific reason
+code is in the line and on the wire.
+
+**No log line contains a password, a user name, a payload, a topic, user properties or the
+host's reason string.** The same reason is what `OnClosed` receives, with one exception: a
+send-path fault is logged as event 20 and reported to `OnClosed` as a lost connection. The three
+ends before admission (refused by the host, authentication timed out, connect timed out) are
+logged but never reach `OnClosed`. And an end can show two lines: events 15 and 20 are written
+by the code that caught the exception, even when its own close lost the race to another (for
+example "closed by the host" followed by "handler threw").
 
 ### 6.13 Tests
 
@@ -978,6 +1095,7 @@ reason is what `OnClosed` receives.
      every accepted `OnAdmit` is matched by exactly one `OnClosed`;
    - an `OnConnectAsync` that never returns and ignores cancellation;
    - a handler method that throws, in each of the six methods;
+   - an idle, connected connection costs MqttWire at most 768 bytes (6.14);
    - "request problem information" 0; a client with a small "maximum packet size";
    - QoS 2 from the client: the full exchange; a refused publish; a repeated identifier with
      DUP 0 and with DUP 1; PUBREL for an unknown identifier; the receive maximum; a PUBREL that
@@ -1048,10 +1166,15 @@ reason is what `OnClosed` receives.
 - The time one sweep takes at the larger count is reported.
 - One run with TLS in Kestrel is reported, not decisive.
 
-**The target, provisional until the floor is known: MqttWire adds no more than 1 KB to the
-floor for an idle connection**, before and after activity alike. If the floor alone is most of
-what a connection costs today in GrainWire, the owner decides whether own WebSocket framing is
-worth looking at (GrainWire's step 0 measures that first; see the companion design).
+**The target: MqttWire adds no more than 1 KB to the floor for an idle connection**, before
+and after activity alike. The owner kept it on 2026-11-20, once GrainWire's step 0 had measured
+the floor at about 11,900 bytes. If the floor alone is most of what a connection costs today in
+GrainWire, the owner decides whether own WebSocket framing is worth looking at (see the
+companion design).
+
+The benchmark comes with the end of step 3. Until it runs, the only measurement is a unit test
+over the in-memory link: there an idle connection costs MqttWire about 684 bytes, held to 768,
+which leaves out the WebSocket link object and its parked read.
 
 ### 6.15 Documentation, versions, maintenance
 
@@ -1110,6 +1233,12 @@ Each step ends with every test green.
 - Unity and .NET Standard 2.1 wait for Unity 7.
 - **An opt-in reconnecting client is part of the first version**, as a wrapper around the
   client that leaves the client itself one connection per instance.
+- The memory target "floor + 1 KB" for MqttWire alone is kept (2026-11-20, 6.14).
+- `State` is an `object?` (2026-11-22).
+- Step 3 lands as two pull requests: the server with its tests and the .NET interops, then
+  MQTT.js, the sample and the benchmark (2026-11-22).
+- The `GroupChat` sample is a server and a Blazor WebAssembly client (2026-11-22).
+- MQTT.js runs in its own Node job in CI (2026-11-22).
 
 ## 10. Proposed by Claude (owner to check)
 
@@ -1132,7 +1261,7 @@ Each step ends with every test green.
    bytes; CONNACK user properties limited to 1 KiB; the deadlines of 6.6.
 9. A handler that throws closes the connection with `0x83`.
 10. On unsubscribe, deliveries MqttWire has already taken are still delivered (6.6).
-11. The target "floor + 1 KB" for MqttWire alone (6.14), provisional.
+11. The target "floor + 1 KB" for MqttWire alone (6.14); kept by the owner on 2026-11-20.
 12. Target framework `net10.0` only, for now.
 13. The repository layout of 6.1, with a `GroupChat` sample.
 14. For the reconnecting client (6.3): it lives in the `MqttWire` package beside the client; it
@@ -1141,16 +1270,67 @@ Each step ends with every test green.
     else until it is disposed; delays of 500 ms doubling to 15 s by default. The `GroupChat`
     sample's client uses it.
 
+Decided while the server was built in step 3 (2026-11-22), not yet seen by the owner:
+
+15. No MQTT packet precedes the CONNACK: the send path is reserved for it from the start of the
+    admission step, and a close in that window aborts the link, with no CONNACK and no
+    DISCONNECT (6.6).
+16. The keep-alive is measured from the move to Active, not from the CONNECT (6.6).
+17. Packets that came behind the CONNECT in the same read keep its buffer through
+    Authenticating and are handled after the CONNACK (6.6).
+18. A first packet that is not a CONNECT gets WebSocket status 1002 and no MQTT answer; a
+    CONNECT over 16 KB gets CONNACK `0x95` (6.6).
+19. `MqttTopic` accepts at most 65,526 bytes; a delivery whose whole packet is at most 16 KB is
+    copied behind its header, a larger one is written from the host's memory in pieces (6.2,
+    6.6).
+20. Waiting control bytes are bounded by the one 64 KB control buffer as well as by 1,024
+    packets; passing either evicts with `0x97` (6.6).
+21. "A write in progress" is "the send path is taken", also when no bytes are with the link at
+    that instant (6.6).
+22. A caller writes at most 16 packets at once on its own thread, then hands the send path to
+    the thread pool (6.6).
+23. A writer that throws ends the connection as a lost connection, logged as event 20 (6.6,
+    6.12).
+24. The queue of waiting deliveries and the exchange records are pooled per server, at most
+    1,024 of each retained, and a queue grown past 64 entries is not retained (6.6).
+25. The count against the receive maximum of 256 is the remembered QoS 2 identifiers plus the
+    answers to the client's publishes not yet handed to the link (6.6).
+26. A failing PUBREC for a delivery already waiting for PUBCOMP is the harmless repetition:
+    PUBREL again, nothing changes (6.6).
+27. A connection that takes its slot after the stop began is aborted by its own run (6.6).
+28. A link starts at most one close frame, whichever side closes first (6.5).
+29. The log's event ids; the remote end point in a line of a connection that has no client id
+    yet; and the two lines of an exception whose close lost the race (6.12).
+
 ## 11. Left to the builder
 
-- Exact names and shapes of the public types, within what 6.2 and 6.3 fix.
-- Whether `State` is an `object` or the server is generic over the host's state type.
-- How the registration and mapping calls look, and how the server joins the host's shutdown.
-- The names and shapes of all internal types, including the link.
-- Buffer sizes, the pool (the shared `ArrayPool` is the default assumption), how the sweep
-  walks the connections, how the admission step is made atomic.
+What was left here, and what step 3 decided:
+
+- Exact names and shapes of the public types, within what 6.2 and 6.3 fix: as 6.2 now shows.
+  The result types are readonly structs with factory members, whose default value accepts.
+- Whether `State` is an `object` or the server is generic over the host's state type: an
+  `object?`, decided by the owner (section 9).
+- How the registration and mapping calls look, and how the server joins the host's shutdown:
+  `AddMqttWireServer<THandler>` registers the server through a factory (it has no public
+  constructor), the handler as a singleton that must not depend on scoped services, and the
+  options with validation (6.2); it throws `InvalidOperationException` when called twice.
+  `MapMqttWire` returns `IEndpointConventionBuilder` and throws `InvalidOperationException`
+  when the server is not registered; a request that arrives without `UseWebSockets()` throws
+  `InvalidOperationException` naming it. An internal `IHostedLifecycleService` starts the sweep
+  in `StartingAsync` and runs the stop in `StoppingAsync`, before any hosted service, Kestrel
+  included, is stopped. The clock is `TimeProvider.System`.
+- The names and shapes of all internal types, including the link: the builder's, as built.
+- Buffer sizes, the pool, how the sweep walks the connections, how the admission step is made
+  atomic: the shared `ArrayPool<byte>`; a first read buffer of 4 KB; every connection has a slot
+  in an array the sweep walks without a lock; the client-id table and the slots share one lock,
+  inside which the admission step runs, `OnAdmit` included (6.6).
 - How waiting control packets and deliveries are stored, below which size a message is copied
-  behind its header, and whether waiting packets are written together in one WebSocket message.
+  behind its header, and whether waiting packets are written together in one WebSocket message:
+  6.6, "Sending" (the control buffer, written as one message; a pooled queue of deliveries;
+  the copy up to 16 KB).
+
+Still left to the builder for the rest of step 3: the shape of the benchmark of 6.14, the
+`GroupChat` sample, and the MQTT.js interop with its CI job.
 
 ## 12. What was checked
 
@@ -1158,7 +1338,12 @@ The MQTT rules and the .NET behaviour this design relies on were checked against
 and the .NET 10 source, as far as they could be reached. Section 13 of
 [the v5 design](2026-11-19-minimal-mqtt-design.md) lists what was confirmed, what could not be
 reached (chapter 4 and chapter 6 of the standard), and the secondary sources used for the
-repeated-identifier rule and for "no re-sending inside a connection". MqttWire itself has not been
-built, so none of its own behaviour or memory has been run or measured yet. What has been measured
+repeated-identifier rule and for "no re-sending inside a connection". What has been measured
 is the starting point: today's idle cost per connection and the bare-WebSocket floor, in
 [the step 0 report](https://github.com/mo-esmp/grainwire/blob/main/docs/step-0-idle-memory.md).
+
+The codec and the client were built and run in steps 1 and 2. The server has now been built and
+run: its unit tests over the in-memory link, and the interops with MQTTnet's client and
+MqttWire's client over Kestrel, at QoS 0, 1 and 2 in both directions. Not yet run: MQTT.js, the
+sample and the benchmark (the rest of step 3), so MqttWire's memory over a real WebSocket has
+not been measured yet.
