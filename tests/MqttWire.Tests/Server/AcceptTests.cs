@@ -86,7 +86,7 @@ public sealed class AcceptTests
         connection.TakeWritten().ShouldBeEmpty();
         connection.Link.IsAborted.ShouldBeFalse();
         await connection.RunEnded();
-        harness.Handler.CallsNow().ShouldBeEmpty();
+        harness.Handler.Calls.ShouldBeEmpty();
         harness.Pool.Outstanding.ShouldBe(0);
     }
 

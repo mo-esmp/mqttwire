@@ -153,6 +153,19 @@ internal static class ServerPackets
         [.. Hex.Parse("50 20 00 01 97 1C 1F 00 19"), .. Encoding.UTF8.GetBytes("The message is too large.")];
 
     /// <summary>
+    /// Builds the UNSUBACK the server answers an UNSUBSCRIBE of one filter with: success, no properties. For packet
+    /// identifier 2 it is <see cref="UnsubAck"/>.
+    /// </summary>
+    /// <param name="packetIdentifier">
+    /// The packet identifier of the UNSUBSCRIBE.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes, fixed header included.
+    /// </returns>
+    public static byte[] UnsubAckFor(ushort packetIdentifier) =>
+        [0xB0, 0x04, (byte)(packetIdentifier >> 8), (byte)packetIdentifier, 0x00, 0x00];
+
+    /// <summary>
     /// Builds an MQTT 5 CONNECT with keep-alive 30 from its connect flags, its properties and its payload, for the
     /// CONNECT packets no constant above covers. The bytes are put together as given, so they may be ones the
     /// codec refuses.

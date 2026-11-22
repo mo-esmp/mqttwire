@@ -18,8 +18,11 @@ namespace MqttWire.Tests.Server;
 /// that disable it, one at a time, so no other test of <c>MqttWire.Tests</c> runs while this one measures. Work a
 /// finished test left behind (a continuation, a finalizer) can still allocate, so, second, each reading follows full
 /// blocking, compacting collections and <see cref="GC.WaitForPendingFinalizers"/>, and the whole measurement is
-/// taken up to <see cref="MaxAttempts"/> times, the smallest figure counting: noise only ever adds bytes, never
-/// removes them, so the smallest figure is the closest to the true cost and the bound is not loosened.
+/// taken up to <see cref="MaxAttempts"/> times, the smallest figure counting. Noise mostly adds bytes (something
+/// else allocated between two readings), so the smallest figure is the closest to the true cost. It can also take
+/// bytes away, when something transient was alive at the baseline reading and gone at the last one; spread over
+/// 2,000 connections that is a few bytes per connection at most, far less than the room between the figure
+/// measured and the bound, so the bound is not loosened by it.
 /// </remarks>
 [Collection(nameof(IdleCostTests))]
 [CollectionDefinition(nameof(IdleCostTests), DisableParallelization = true)]

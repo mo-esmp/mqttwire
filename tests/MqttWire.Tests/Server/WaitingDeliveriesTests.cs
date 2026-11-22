@@ -12,11 +12,6 @@ namespace MqttWire.Tests.Server;
 public sealed class WaitingDeliveriesTests
 {
     /// <summary>
-    /// The topic every delivery carries.
-    /// </summary>
-    private static readonly MqttTopic s_topic = MqttTopic.Create("a/b");
-
-    /// <summary>
     /// Proves that deliveries come out in the order they went in when the ring's positions wrap past its last slot.
     /// </summary>
     [Fact]
@@ -133,9 +128,9 @@ public sealed class WaitingDeliveriesTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
-        server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
-        server.TrySend(s_topic, "m3"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m3"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         int waiting = server.GetCounts().WaitingDeliveries;
 
         // Act
@@ -169,7 +164,7 @@ public sealed class WaitingDeliveriesTests
     {
         for (int i = first; i < first + count; i++)
         {
-            queue.Enqueue(new PendingDelivery(s_topic, new[] { (byte)i }, MqttQoS.AtMostOnce));
+            queue.Enqueue(new PendingDelivery(ServerHarness.Topic, new[] { (byte)i }, MqttQoS.AtMostOnce));
         }
     }
 

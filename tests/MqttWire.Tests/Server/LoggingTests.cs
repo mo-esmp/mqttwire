@@ -70,11 +70,6 @@ public sealed class LoggingTests
     private const string HostReason = "HOST-REASON-MARKER";
 
     /// <summary>
-    /// The topic the host sends to.
-    /// </summary>
-    private static readonly MqttTopic s_topic = MqttTopic.Create("a/b");
-
-    /// <summary>
     /// The remote end point of the requests of the tests that look for it in the log.
     /// </summary>
     private static readonly IPEndPoint s_remote = new(IPAddress.Parse("192.0.2.7"), 50123);
@@ -311,8 +306,8 @@ public sealed class LoggingTests
         publisher.Deliver(ServerPackets.BuildPublish(MqttQoS.AtMostOnce, "a/b"u8, packetIdentifier: 0, properties: [], payload));
         publisher.Deliver(ServerPackets.BuildPublish(MqttQoS.AtLeastOnce, "refused"u8, packetIdentifier: 1, properties: [], payload));
         MqttWireConnection server = receiver.Connection.ShouldNotBeNull();
-        server.TrySend(s_topic, payload, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
-        server.TrySend(s_topic, new byte[1_048_577], MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.TooLarge);
+        server.TrySend(ServerHarness.Topic, payload, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, new byte[1_048_577], MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.TooLarge);
         receiver.Link.EndFromPeer();
         publisher.Deliver(ServerPackets.BuildPublish(MqttQoS.AtLeastOnce, "throws"u8, packetIdentifier: 2, properties: [], payload));
         refused.Deliver(ServerPackets.ConnectFor("c3"));
@@ -651,14 +646,14 @@ public sealed class LoggingTests
             case 8:
                 connection = harness.Connect();
                 connection.Link.HoldWrites();
-                connection.Connection.ShouldNotBeNull().TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
+                connection.Connection.ShouldNotBeNull().TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
                 harness.Advance(TimeSpan.FromSeconds(16));
                 connection.CompleteHeldWrites(new IOException("The socket was aborted."));
                 break;
 
             case 9:
                 connection = harness.Connect();
-                connection.Connection.ShouldNotBeNull().TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
+                connection.Connection.ShouldNotBeNull().TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
                 harness.Advance(ServerLimits.AcknowledgementDeadline);
                 connection.Link.EndFromPeer();
                 break;
@@ -668,7 +663,7 @@ public sealed class LoggingTests
                 connection.Link.HoldWrites();
                 for (int i = 1; i <= 5; i++)
                 {
-                    connection.Connection.ShouldNotBeNull().TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtMostOnce);
+                    connection.Connection.ShouldNotBeNull().TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.AtMostOnce);
                 }
 
                 connection.CompleteHeldWrites(new IOException("The socket was aborted."));
@@ -686,7 +681,7 @@ public sealed class LoggingTests
 
             case 12:
                 connection = harness.Connect();
-                connection.Connection.ShouldNotBeNull().TrySend(s_topic, new byte[1_048_577], MqttQoS.AtMostOnce);
+                connection.Connection.ShouldNotBeNull().TrySend(ServerHarness.Topic, new byte[1_048_577], MqttQoS.AtMostOnce);
                 connection.Link.EndFromPeer();
                 break;
 

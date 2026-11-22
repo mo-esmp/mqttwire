@@ -22,18 +22,6 @@ public sealed class SendHardeningTests
     private const int SendPathFaultedEvent = 20;
 
     /// <summary>
-    /// The topic every test sends to.
-    /// </summary>
-    private static readonly MqttTopic s_topic = MqttTopic.Create("a/b");
-
-    /// <summary>
-    /// What <c>GetCounts</c> reports for a connection that holds nothing and writes nothing.
-    /// </summary>
-    private static readonly ConnectionCounts s_idle = new(IncomingRecords: 0, DeliveryRecords: 0, IncomingInFlight: 0,
-        HoldsRecords: false, WaitingDeliveries: 0,
-        WaitingControlPackets: 0, OutgoingBytes: 0, IsWriting: false, HoldsReadBuffer: false);
-
-    /// <summary>
     /// Proves that a message whose payload memory throws while it is encoded, by the caller that took the send path,
     /// is not taken (the host gets "not open", not the exception), and that the connection ends: the link is aborted,
     /// the run completes, <c>OnClosed</c> reports <see cref="MqttCloseReason.ConnectionLost"/> once, and the fault is
@@ -52,7 +40,7 @@ public sealed class SendHardeningTests
         ThrowingMemory payload = new(length: 10);
 
         // Act
-        MqttSendResult result = server.TrySend(s_topic, payload.Memory, MqttQoS.AtMostOnce);
+        MqttSendResult result = server.TrySend(ServerHarness.Topic, payload.Memory, MqttQoS.AtMostOnce);
         bool aborted = connection.Link.IsAborted;
         await connection.RunEnded();
 
@@ -60,10 +48,10 @@ public sealed class SendHardeningTests
         result.ShouldBe(MqttSendResult.NotOpen);
         aborted.ShouldBeTrue();
         connection.TakeWritten().ShouldBeEmpty();
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
         harness.Log.Entries.ShouldContain(entry => entry.Id.Id == SendPathFaultedEvent
                                                    && entry.Level == LogLevel.Error && entry.Exception == payload.Thrown);
-        server.GetCounts().ShouldBe(s_idle);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Pool.FaultyReturns.ShouldBe(0);
     }
@@ -87,7 +75,7 @@ public sealed class SendHardeningTests
         pool.ThrowOnRent(which: 1);
 
         // Act
-        MqttSendResult result = server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtMostOnce);
+        MqttSendResult result = server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.AtMostOnce);
         await connection.RunEnded();
 
         // Assert
@@ -95,8 +83,8 @@ public sealed class SendHardeningTests
         pool.HasThrown.ShouldBeTrue();
         connection.Link.IsAborted.ShouldBeTrue();
         harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
-        server.GetCounts().ShouldBe(s_idle);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
         pool.Inner.Outstanding.ShouldBe(0);
         pool.Inner.FaultyReturns.ShouldBe(0);
     }
@@ -126,7 +114,7 @@ public sealed class SendHardeningTests
         // Assert
         pool.HasThrown.ShouldBeTrue();
         connection.TakeWritten().ShouldBeEmpty();
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
         harness.Log.Entries.ShouldContain(entry => entry.Id.Id == SendPathFaultedEvent && entry.Exception == pool.Thrown);
         pool.Inner.Outstanding.ShouldBe(0);
         pool.Inner.FaultyReturns.ShouldBe(0);
@@ -148,8 +136,8 @@ public sealed class SendHardeningTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
-        server.TrySend(s_topic, new ThrowingMemory(length: 10).Memory, MqttQoS.AtMostOnce)
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, new ThrowingMemory(length: 10).Memory, MqttQoS.AtMostOnce)
             .ShouldBe(MqttSendResult.Taken);
         WeakReference third = SendHeld(server);
         int waiting = server.GetCounts().WaitingDeliveries;
@@ -166,10 +154,10 @@ public sealed class SendHardeningTests
         // Assert
         waiting.ShouldBe(2);
         aborted.ShouldBeTrue();
-        afterTheFault.ShouldBe(s_idle);
+        afterTheFault.ShouldBe(ServerHarness.Idle);
         third.IsAlive.ShouldBeFalse();
         connection.TakeWritten().ShouldBe(ServerPackets.Delivery("m1"u8));
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Pool.FaultyReturns.ShouldBe(0);
     }
@@ -203,9 +191,9 @@ public sealed class SendHardeningTests
             }
         };
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
-        server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
-        server.TrySend(s_topic, payload.Memory, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, payload.Memory, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         TaskScheduler.UnobservedTaskException += watch;
         try
         {
@@ -228,7 +216,7 @@ public sealed class SendHardeningTests
         harness.Log.Entries.ShouldContain(entry => entry.Id.Id == SendPathFaultedEvent
                                                    && entry.Level == LogLevel.Error && entry.Exception == payload.Thrown);
         connection.TakeWritten().ShouldBe([.. ServerPackets.Delivery("m1"u8), .. ServerPackets.Delivery("m2"u8)]);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -246,7 +234,7 @@ public sealed class SendHardeningTests
         ServerHarness harness = ServerHarness.Create();
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
-        server.TrySend(s_topic, new ThrowingMemory(length: 10).Memory, MqttQoS.AtMostOnce)
+        server.TrySend(ServerHarness.Topic, new ThrowingMemory(length: 10).Memory, MqttQoS.AtMostOnce)
             .ShouldBe(MqttSendResult.NotOpen);
 
         // Act
@@ -277,7 +265,7 @@ public sealed class SendHardeningTests
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
 
         // Act
-        MqttSendResult result = server.TrySend(s_topic, new ThrowingMemory(length: 10).Memory, MqttQoS.AtMostOnce);
+        MqttSendResult result = server.TrySend(ServerHarness.Topic, new ThrowingMemory(length: 10).Memory, MqttQoS.AtMostOnce);
         bool aborted = connection.Link.IsAborted;
         await connection.RunEnded();
 
@@ -286,8 +274,8 @@ public sealed class SendHardeningTests
         aborted.ShouldBeTrue();
         harness.Log.Entries.ShouldContain(entry => entry.Id.Id == SendPathFaultedEvent);
         harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
-        server.GetCounts().ShouldBe(s_idle);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Pool.FaultyReturns.ShouldBe(0);
     }
@@ -310,11 +298,11 @@ public sealed class SendHardeningTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
-        server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
-        server.TrySend(s_topic, new ThrowingMemory(length: 10).Memory, MqttQoS.AtMostOnce)
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, new ThrowingMemory(length: 10).Memory, MqttQoS.AtMostOnce)
             .ShouldBe(MqttSendResult.Taken);
-        server.TrySend(s_topic, "m4"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m4"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         connection.Deliver(ClientPackets.PingReq);
         ConnectionCounts before = server.GetCounts();
 
@@ -328,11 +316,11 @@ public sealed class SendHardeningTests
         before.WaitingDeliveries.ShouldBe(3);
         before.WaitingControlPackets.ShouldBe(1);
         aborted.ShouldBeTrue();
-        afterTheFault.ShouldBe(s_idle);
+        afterTheFault.ShouldBe(ServerHarness.Idle);
         connection.TakeWritten().ShouldBe(
             [.. ServerPackets.Delivery("m1"u8), .. ClientPackets.PingResp, .. ServerPackets.Delivery("m2"u8)]);
         harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Pool.FaultyReturns.ShouldBe(0);
     }
@@ -358,7 +346,7 @@ public sealed class SendHardeningTests
         records.ThrowOnGet = true;
 
         // Act
-        MqttSendResult result = server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
+        MqttSendResult result = server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
         await connection.RunEnded();
 
         // Assert
@@ -367,8 +355,8 @@ public sealed class SendHardeningTests
         connection.TakeWritten().ShouldBeEmpty();
         harness.Log.Entries.ShouldContain(entry => entry.Id.Id == SendPathFaultedEvent && entry.Exception == records.Thrown);
         harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
-        server.GetCounts().ShouldBe(s_idle);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -392,9 +380,9 @@ public sealed class SendHardeningTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         harness.AssertBounds();
-        server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m2"u8.ToArray(), MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
         harness.AssertBounds();
         ConnectionCounts before = server.GetCounts();
         records.ThrowOnGet = true;
@@ -413,8 +401,8 @@ public sealed class SendHardeningTests
         waiting.Outstanding.ShouldBe(0);
         waiting.Distinct.ShouldBe(1);
         harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
-        server.GetCounts().ShouldBe(s_idle);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Pool.FaultyReturns.ShouldBe(0);
     }
@@ -438,8 +426,8 @@ public sealed class SendHardeningTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
-        server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         harness.AssertBounds();
         pool.ThrowOnReturn(which: 1);
 
@@ -457,8 +445,8 @@ public sealed class SendHardeningTests
         harness.Log.Entries.ShouldContain(entry =>
             entry.Id.Id == SendPathFaultedEvent && entry.Exception == pool.ThrownOnReturn);
         harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
-        server.GetCounts().ShouldBe(s_idle);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
         pool.Inner.Outstanding.ShouldBe(1);
         pool.Inner.FaultyReturns.ShouldBe(0);
     }
@@ -492,8 +480,8 @@ public sealed class SendHardeningTests
         connection.TakeWritten().ShouldBeEmpty();
         connection.Link.ClosedWith.ShouldBeNull();
         harness.Log.Entries.ShouldContain(entry => entry.Id.Id == SendPathFaultedEvent && entry.Exception == pool.Thrown);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
-        server.GetCounts().ShouldBe(s_idle);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
         pool.Inner.Outstanding.ShouldBe(0);
         pool.Inner.FaultyReturns.ShouldBe(0);
     }
@@ -527,7 +515,7 @@ public sealed class SendHardeningTests
         connection.TakeWritten().ShouldBeEmpty();
         harness.Handler.Calls.ShouldContain(static call => call.StartsWith("OnAdmit", StringComparison.Ordinal));
         harness.Log.Entries.ShouldContain(entry => entry.Id.Id == SendPathFaultedEvent && entry.Exception == pool.Thrown);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
         harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
         pool.Inner.Outstanding.ShouldBe(0);
         pool.Inner.FaultyReturns.ShouldBe(0);
@@ -547,21 +535,9 @@ public sealed class SendHardeningTests
     private static WeakReference SendHeld(MqttWireConnection server)
     {
         byte[] payload = "m3"u8.ToArray();
-        server.TrySend(s_topic, payload, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, payload, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         return new WeakReference(payload);
     }
-
-    /// <summary>
-    /// Gets the calls of <c>OnClosed</c> the handler recorded, oldest first.
-    /// </summary>
-    /// <param name="harness">
-    /// The harness.
-    /// </param>
-    /// <returns>
-    /// The calls as text.
-    /// </returns>
-    private static List<string> ClosedCalls(ServerHarness harness) =>
-        [.. harness.Handler.Calls.Where(static call => call.StartsWith("OnClosed", StringComparison.Ordinal))];
 
     /// <summary>
     /// The memory of a payload whose bytes cannot be read: its length is known, but every look at its span throws,

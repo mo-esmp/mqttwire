@@ -5,16 +5,26 @@ using MqttWire.Server;
 namespace MqttWire.Tests.Server;
 
 /// <summary>
-/// A handler for the server tests that records every call in <see cref="Calls"/> and answers through settable
+/// A handler for the server tests that records every call (<see cref="Calls"/>) and answers through settable
 /// delegates. A delegate left <see langword="null"/> accepts: the connection, the admission, the subscription at
 /// the QoS asked for, and the publish. Safe to call from several threads at once.
 /// </summary>
 internal sealed class RecordingHandler : IMqttWireHandler
 {
     /// <summary>
-    /// Guards <see cref="Calls"/>, <see cref="Admitted"/> and <see cref="_byContext"/>.
+    /// Guards <see cref="_calls"/>, <see cref="_admitted"/> and <see cref="_byContext"/>.
     /// </summary>
     private readonly Lock _gate = new();
+
+    /// <summary>
+    /// Every call, oldest first.
+    /// </summary>
+    private readonly List<string> _calls = [];
+
+    /// <summary>
+    /// Every connection <see cref="OnAdmit"/> was called with, oldest first.
+    /// </summary>
+    private readonly List<MqttWireConnection> _admitted = [];
 
     /// <summary>
     /// Every connection <see cref="OnAdmit"/> was called with, by the HTTP context of its request, which the
@@ -37,16 +47,36 @@ internal sealed class RecordingHandler : IMqttWireHandler
     public delegate MqttPublishResult PublishCallback(MqttWireConnection connection, in MqttPublish publish);
 
     /// <summary>
-    /// Gets every call, oldest first, as text: <c>"OnConnectAsync c1"</c>, <c>"OnAdmit c1 replaces=-"</c>,
-    /// <c>"OnSubscribe c1 a/b q1"</c>, <c>"OnUnsubscribe c1 a/b"</c>, <c>"OnPublish c1 a/b hi q0 retain=0"</c> and
-    /// <c>"OnClosed c1 TakenOver"</c>.
+    /// Gets a copy of every call so far, oldest first, as text: <c>"OnConnectAsync c1"</c>,
+    /// <c>"OnAdmit c1 replaces=-"</c>, <c>"OnSubscribe c1 a/b q1"</c>, <c>"OnUnsubscribe c1 a/b"</c>,
+    /// <c>"OnPublish c1 a/b hi q0 retain=0"</c> and <c>"OnClosed c1 TakenOver"</c>. Taken under the handler's lock,
+    /// so a test may read it while server threads still add calls.
     /// </summary>
-    public List<string> Calls { get; } = [];
+    public List<string> Calls
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return [.. _calls];
+            }
+        }
+    }
 
     /// <summary>
-    /// Gets every connection <see cref="OnAdmit"/> was called with, oldest first.
+    /// Gets a copy of the connections <see cref="OnAdmit"/> was called with so far, oldest first, taken under the
+    /// handler's lock.
     /// </summary>
-    public List<MqttWireConnection> Admitted { get; } = [];
+    public List<MqttWireConnection> Admitted
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return [.. _admitted];
+            }
+        }
+    }
 
     /// <summary>
     /// Gets or sets the answer to <see cref="OnConnectAsync"/>, or <see langword="null"/> to accept with no state.
@@ -111,27 +141,12 @@ internal sealed class RecordingHandler : IMqttWireHandler
     {
         lock (_gate)
         {
-            Calls.Clear();
-            Calls.TrimExcess();
-            Admitted.Clear();
-            Admitted.TrimExcess();
+            _calls.Clear();
+            _calls.TrimExcess();
+            _admitted.Clear();
+            _admitted.TrimExcess();
             _byContext.Clear();
             _byContext.TrimExcess();
-        }
-    }
-
-    /// <summary>
-    /// Copies <see cref="Calls"/> under the handler's lock, for a test that reads the calls while server threads may
-    /// still add to them.
-    /// </summary>
-    /// <returns>
-    /// Every call so far, oldest first.
-    /// </returns>
-    public List<string> CallsNow()
-    {
-        lock (_gate)
-        {
-            return [.. Calls];
         }
     }
 
@@ -171,7 +186,7 @@ internal sealed class RecordingHandler : IMqttWireHandler
         ArgumentNullException.ThrowIfNull(connection);
         lock (_gate)
         {
-            Admitted.Add(connection);
+            _admitted.Add(connection);
             if (connection.HttpContext is { } httpContext)
             {
                 _byContext[httpContext] = connection;
@@ -261,7 +276,7 @@ internal sealed class RecordingHandler : IMqttWireHandler
     }
 
     /// <summary>
-    /// Adds a call to <see cref="Calls"/>, unless <see cref="RecordsCalls"/> is off.
+    /// Records a call, unless <see cref="RecordsCalls"/> is off.
     /// </summary>
     /// <param name="call">
     /// The call as text.
@@ -275,7 +290,7 @@ internal sealed class RecordingHandler : IMqttWireHandler
 
         lock (_gate)
         {
-            Calls.Add(call);
+            _calls.Add(call);
         }
     }
 }

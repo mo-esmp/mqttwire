@@ -56,11 +56,6 @@ public sealed class ServerBufferTests
     private const byte Mine = 0x11;
 
     /// <summary>
-    /// The topic every test sends to.
-    /// </summary>
-    private static readonly MqttTopic s_topic = MqttTopic.Create("a/b");
-
-    /// <summary>
     /// The payload of the messages the tests send, "hi".
     /// </summary>
     private static readonly byte[] s_hi = "hi"u8.ToArray();
@@ -70,13 +65,6 @@ public sealed class ServerBufferTests
     /// in its buffer, with a read pending, until the rest comes.
     /// </summary>
     private static readonly byte[] s_publishStart = ClientPackets.PublishQoS0[..4];
-
-    /// <summary>
-    /// What <c>GetCounts</c> reports for a connection that holds nothing and writes nothing.
-    /// </summary>
-    private static readonly ConnectionCounts s_idle = new(IncomingRecords: 0, DeliveryRecords: 0, IncomingInFlight: 0,
-        HoldsRecords: false, WaitingDeliveries: 0, WaitingControlPackets: 0, OutgoingBytes: 0, IsWriting: false,
-        HoldsReadBuffer: false);
 
     /// <summary>
     /// A way a connection ends (design 6.8 rule 5: normal completion, a refusal, an overflow, a deadline, an
@@ -236,7 +224,7 @@ public sealed class ServerBufferTests
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Pool.FaultyReturns.ShouldBe(0);
         harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
-        ClosedCalls(harness).ShouldBe(ExpectedClosed(wayOut));
+        harness.ClosedCalls().ShouldBe(ExpectedClosed(wayOut));
         AssertTheWayOutWasTaken(wayOut, ended);
     }
 
@@ -296,7 +284,7 @@ public sealed class ServerBufferTests
         secondsLaterAnswer.ShouldBe(ClientPackets.PingResp);
         pool.IsRented(pending).ShouldBeFalse();
         first.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.AdministrativeAction));
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
         pool.Outstanding.ShouldBe(1);
         pool.FaultyReturns.ShouldBe(0);
     }
@@ -320,7 +308,7 @@ public sealed class ServerBufferTests
         TestConnection first = harness.Connect("c1");
         MqttWireConnection server = first.Connection.ShouldNotBeNull();
         first.Link.HoldWrites();
-        server.TrySend(s_topic, s_hi, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
         harness.AssertBounds();
         ReadOnlyMemory<byte> held = first.Link.HeldWriteBuffer;
 
@@ -349,7 +337,7 @@ public sealed class ServerBufferTests
         secondsAnswer.ShouldBe(ClientPackets.PingResp);
         written.ShouldBe(ClientPackets.PublishQoS1);
         pool.IsRented(held).ShouldBeFalse();
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
         pool.Outstanding.ShouldBe(1);
         pool.FaultyReturns.ShouldBe(0);
     }
@@ -372,14 +360,14 @@ public sealed class ServerBufferTests
         TestConnection abortedBefore = before.Connect();
         MqttWireConnection beforeServer = abortedBefore.Connection.ShouldNotBeNull();
         abortedBefore.Link.HoldWrites();
-        beforeServer.TrySend(s_topic, s_hi, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+        beforeServer.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
         before.AssertBounds();
 
         ServerHarness inside = ServerHarness.Create();
         TestConnection abortedInside = inside.Connect();
         MqttWireConnection insideServer = abortedInside.Connection.ShouldNotBeNull();
         abortedInside.Link.HoldWrites();
-        insideServer.TrySend(s_topic, s_hi, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+        insideServer.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
         inside.AssertBounds();
         MemoryMarshal.TryGetArray(abortedInside.Link.HeldWriteBuffer, out ArraySegment<byte> heldSegment)
             .ShouldBeTrue();
@@ -420,8 +408,8 @@ public sealed class ServerBufferTests
         abortedInside.TakeWritten().ShouldBe(ClientPackets.PublishQoS1);
         inside.Pool.Outstanding.ShouldBe(0);
         inside.Pool.FaultyReturns.ShouldBe(0);
-        ClosedCalls(before).ShouldBe(["OnClosed c1 ClosedByHost"]);
-        ClosedCalls(inside).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        before.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
+        inside.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
     }
 
     /// <summary>
@@ -447,15 +435,15 @@ public sealed class ServerBufferTests
             TestConnection connection = harness.Connect();
             MqttWireConnection server = connection.Connection.ShouldNotBeNull();
             connection.Link.HoldWrites();
-            server.TrySend(s_topic, s_hi, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+            server.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
             int ready = 0;
 
             // The close is otherwise far quicker to reach the send path's lock than the completion: delaying it by a
             // little more in each round moves the moment of the abort across the whole of the completion.
             int closerDelay = round % RaceDelaySteps * RaceDelayStep;
             Thread completer = new(() =>
-                RunAtTheGate(ref ready, threads: 2, delay: 0, () => connection.Link.CompleteHeldWrites()));
-            Thread closer = new(() => RunAtTheGate(ref ready, threads: 2, closerDelay,
+                Gate.Run(ref ready, threads: 2, delay: 0, () => connection.Link.CompleteHeldWrites()));
+            Thread closer = new(() => Gate.Run(ref ready, threads: 2, closerDelay,
                 () => server.Close(MqttReasonCode.AdministrativeAction)));
 
             // Act
@@ -499,7 +487,7 @@ public sealed class ServerBufferTests
         TestConnection first = harness.Connect("c1");
         MqttWireConnection server = first.Connection.ShouldNotBeNull();
         first.Link.HoldWrites();
-        server.TrySend(s_topic, s_hi, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
         harness.AssertBounds();
         ReadOnlyMemory<byte> held = first.Link.HeldWriteBuffer;
         MemoryMarshal.TryGetArray(held, out ArraySegment<byte> heldSegment).ShouldBeTrue();
@@ -544,7 +532,7 @@ public sealed class ServerBufferTests
         secondsAnswer.ShouldBe(ClientPackets.PingResp);
         first.TakeWritten().ShouldBe(ClientPackets.PublishQoS1);
         pool.IsRented(held).ShouldBeFalse();
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
         pool.Outstanding.ShouldBe(0);
         pool.FaultyReturns.ShouldBe(0);
     }
@@ -576,17 +564,17 @@ public sealed class ServerBufferTests
             TestConnection connection = harness.Connect();
             MqttWireConnection server = connection.Connection.ShouldNotBeNull();
             connection.Link.HoldWrites();
-            server.TrySend(s_topic, s_hi, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+            server.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
             ReadOnlyMemory<byte> held = connection.Link.HeldWriteBuffer;
             byte[][] mine = new byte[3][];
             int ready = 0;
             int closerDelay = round % RaceDelaySteps * RaceDelayStep;
             int renterDelay = round * 7 % RaceDelaySteps * RaceDelayStep;
             Thread completer = new(() =>
-                RunAtTheGate(ref ready, threads: 3, delay: 0, () => connection.Link.CompleteHeldWrites()));
-            Thread closer = new(() => RunAtTheGate(ref ready, threads: 3, closerDelay,
+                Gate.Run(ref ready, threads: 3, delay: 0, () => connection.Link.CompleteHeldWrites()));
+            Thread closer = new(() => Gate.Run(ref ready, threads: 3, closerDelay,
                 () => server.Close(MqttReasonCode.AdministrativeAction)));
-            Thread renter = new(() => RunAtTheGate(ref ready, threads: 3, renterDelay, () => RentAndFill(pool, mine,
+            Thread renter = new(() => Gate.Run(ref ready, threads: 3, renterDelay, () => RentAndFill(pool, mine,
                 held.Length)));
             harness.RentedByTheTest = mine.Length;
 
@@ -684,7 +672,7 @@ public sealed class ServerBufferTests
         harness.Handler.Calls.ShouldNotContain(static call => call.StartsWith("OnPublish c1", StringComparison.Ordinal));
         first.TakeWritten().ShouldBe(ClientPackets.PingResp);
         pool.IsRented(pending).ShouldBeFalse();
-        ClosedCalls(harness).ShouldContain("OnClosed c1 ClosedByHost");
+        harness.ClosedCalls().ShouldContain("OnClosed c1 ClosedByHost");
         pool.Outstanding.ShouldBe(1);
         pool.FaultyReturns.ShouldBe(0);
     }
@@ -721,10 +709,10 @@ public sealed class ServerBufferTests
             int aborterDelay = round % RaceDelaySteps * RaceDelayStep;
             int renterDelay = round * 7 % RaceDelaySteps * RaceDelayStep;
             Thread deliverer = new(() =>
-                RunAtTheGate(ref ready, threads: 3, delay: 0, () => connection.Link.Deliver(arriving)));
-            Thread aborter = new(() => RunAtTheGate(ref ready, threads: 3, aborterDelay, connection.Link.Abort));
+                Gate.Run(ref ready, threads: 3, delay: 0, () => connection.Link.Deliver(arriving)));
+            Thread aborter = new(() => Gate.Run(ref ready, threads: 3, aborterDelay, connection.Link.Abort));
             Thread renter = new(() =>
-                RunAtTheGate(ref ready, threads: 3, renterDelay, () => RentAndFill(pool, mine, pending.Length)));
+                Gate.Run(ref ready, threads: 3, renterDelay, () => RentAndFill(pool, mine, pending.Length)));
             harness.RentedByTheTest = mine.Length;
 
             // Act
@@ -768,7 +756,7 @@ public sealed class ServerBufferTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, s_hi, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         harness.AssertBounds();
         connection.Deliver(ClientPackets.PingReq);
         connection.Deliver(ClientPackets.PublishQoS1);
@@ -788,8 +776,8 @@ public sealed class ServerBufferTests
         aborted.ShouldBeTrue();
         outAfterTheAbort.ShouldBe(2);
         connection.TakeWritten().ShouldBeEmpty();
-        server.GetCounts().ShouldBe(s_idle);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Pool.FaultyReturns.ShouldBe(0);
     }
@@ -825,7 +813,7 @@ public sealed class ServerBufferTests
         // Assert
         waiting.WaitingDeliveries.ShouldBe(2);
         payloads.ShouldAllBe(static payload => !payload.IsAlive);
-        server.GetCounts().ShouldBe(s_idle);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Pool.FaultyReturns.ShouldBe(0);
     }
@@ -1017,7 +1005,7 @@ public sealed class ServerBufferTests
                 break;
 
             case WayOut.TooLarge:
-                server.TrySend(s_topic, new byte[65_537], MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.TooLarge);
+                server.TrySend(ServerHarness.Topic, new byte[65_537], MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.TooLarge);
                 harness.AssertBounds();
                 connection.Link.EndFromPeer();
                 break;
@@ -1230,7 +1218,7 @@ public sealed class ServerBufferTests
             .. ClientPackets.PubAck1, .. ClientPackets.PubRec1, .. ClientPackets.PubComp1,
             .. ClientPackets.PublishQoS1,
         ]);
-        server.GetCounts().ShouldBe(s_idle);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
     }
 
     /// <summary>
@@ -1251,7 +1239,7 @@ public sealed class ServerBufferTests
     private static void SendAndAssertBounds(ServerHarness harness, MqttWireConnection server, MqttSendResult expected,
         MqttQoS qos = MqttQoS.AtMostOnce)
     {
-        server.TrySend(s_topic, s_hi, qos).ShouldBe(expected);
+        server.TrySend(ServerHarness.Topic, s_hi, qos).ShouldBe(expected);
         harness.AssertBounds();
     }
 
@@ -1324,7 +1312,7 @@ public sealed class ServerBufferTests
         byte[][] payloads = [new byte[20_000], "small"u8.ToArray(), new byte[30_000]];
         foreach (byte[] payload in payloads)
         {
-            server.TrySend(s_topic, payload, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+            server.TrySend(ServerHarness.Topic, payload, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
             harness.AssertBounds();
         }
 
@@ -1387,35 +1375,6 @@ public sealed class ServerBufferTests
     }
 
     /// <summary>
-    /// Runs an action on the calling thread once every thread of a race is at the gate, so that they start as close
-    /// together as the scheduler allows, after a spin of its own that shifts where in the others' work it lands.
-    /// </summary>
-    /// <param name="ready">
-    /// The number of threads at the gate, shared by all of them.
-    /// </param>
-    /// <param name="threads">
-    /// The number of threads the gate waits for.
-    /// </param>
-    /// <param name="delay">
-    /// How many iterations to spin once the gate is open; 0 for none.
-    /// </param>
-    /// <param name="action">
-    /// What the thread does.
-    /// </param>
-    private static void RunAtTheGate(ref int ready, int threads, int delay, Action action)
-    {
-        Interlocked.Increment(ref ready);
-        SpinWait spin = default;
-        while (Volatile.Read(ref ready) < threads)
-        {
-            spin.SpinOnce(sleep1Threshold: -1);
-        }
-
-        Thread.SpinWait(delay);
-        action();
-    }
-
-    /// <summary>
     /// Rents three arrays, as another connection would, one of the length of the buffer an operation in flight holds
     /// and two of other sizes, and fills each with <see cref="Mine"/>, so that a write into them by that operation
     /// shows.
@@ -1439,18 +1398,6 @@ public sealed class ServerBufferTests
             array.AsSpan().Fill(Mine);
         }
     }
-
-    /// <summary>
-    /// Gets the calls of <c>OnClosed</c> the handler recorded, oldest first.
-    /// </summary>
-    /// <param name="harness">
-    /// The harness.
-    /// </param>
-    /// <returns>
-    /// The calls as text.
-    /// </returns>
-    private static List<string> ClosedCalls(ServerHarness harness) =>
-        [.. harness.Handler.Calls.Where(static call => call.StartsWith("OnClosed", StringComparison.Ordinal))];
 
     /// <summary>
     /// Tells whether memory lies in a given array.

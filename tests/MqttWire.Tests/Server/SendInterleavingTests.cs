@@ -18,11 +18,6 @@ namespace MqttWire.Tests.Server;
 public sealed class SendInterleavingTests
 {
     /// <summary>
-    /// The topic every test sends to.
-    /// </summary>
-    private static readonly MqttTopic s_topic = MqttTopic.Create("a/b");
-
-    /// <summary>
     /// How many messages the tests of the hand-over to the thread pool add behind the first one.
     /// </summary>
     private const int Added = 40;
@@ -39,10 +34,10 @@ public sealed class SendInterleavingTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
 
         // Act
-        MqttSendResult added = server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce);
+        MqttSendResult added = server.TrySend(ServerHarness.Topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce);
         int writesWhenAdded = connection.Link.WriteCount;
         connection.CompleteHeldWrites();
 
@@ -72,13 +67,13 @@ public sealed class SendInterleavingTests
         {
             // The first message's write has ended and its buffer is going back: the drain has not looked yet.
             harness.Pool.Returning = null;
-            added = server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce);
+            added = server.TrySend(ServerHarness.Topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce);
             whenAdded = server.GetCounts();
             writesWhenAdded = connection.Link.WriteCount;
         };
 
         // Act
-        MqttSendResult first = server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
+        MqttSendResult first = server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
 
         // Assert
         first.ShouldBe(MqttSendResult.Taken);
@@ -105,12 +100,12 @@ public sealed class SendInterleavingTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         connection.CompleteHeldWrites();
         bool writingAfterTheDrain = server.GetCounts().IsWriting;
 
         // Act
-        MqttSendResult added = server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce);
+        MqttSendResult added = server.TrySend(ServerHarness.Topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce);
         int writesWhenItReturned = connection.Link.WriteCount;
 
         // Assert
@@ -133,8 +128,8 @@ public sealed class SendInterleavingTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
-        server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         ConnectionCounts whenAdded = default;
         harness.Pool.Returning = _ =>
         {
@@ -171,11 +166,11 @@ public sealed class SendInterleavingTests
         connection.Link.Writing = _ =>
         {
             connection.Link.Writing = null;
-            added = server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce);
+            added = server.TrySend(ServerHarness.Topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce);
         };
 
         // Act
-        MqttSendResult first = server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
+        MqttSendResult first = server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
 
         // Assert
         first.ShouldBe(MqttSendResult.Taken);
@@ -216,7 +211,7 @@ public sealed class SendInterleavingTests
 
             if (written <= Added)
             {
-                server.TrySend(s_topic, new[] { (byte)written }, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+                server.TrySend(ServerHarness.Topic, new[] { (byte)written }, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
             }
         };
         List<byte> expected = [.. ServerPackets.Delivery([0])];
@@ -226,7 +221,7 @@ public sealed class SendInterleavingTests
         }
 
         // Act
-        MqttSendResult first = server.TrySend(s_topic, new byte[1], MqttQoS.AtMostOnce);
+        MqttSendResult first = server.TrySend(ServerHarness.Topic, new byte[1], MqttQoS.AtMostOnce);
 
         // The CONNACK, the first message and the 40 added.
         await connection.Link.WhenWrittenAsync(count: Added + 2);
@@ -280,7 +275,7 @@ public sealed class SendInterleavingTests
             {
                 for (int i = 1; i <= Added; i++)
                 {
-                    server.TrySend(s_topic, new[] { (byte)i }, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+                    server.TrySend(ServerHarness.Topic, new[] { (byte)i }, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
                 }
             }
 
@@ -291,7 +286,7 @@ public sealed class SendInterleavingTests
         };
 
         // Act
-        MqttSendResult first = server.TrySend(s_topic, new byte[1], MqttQoS.AtMostOnce);
+        MqttSendResult first = server.TrySend(ServerHarness.Topic, new byte[1], MqttQoS.AtMostOnce);
 
         // The CONNACK, the first message and the 40 added.
         await inner.WhenWrittenAsync(count: Added + 2);

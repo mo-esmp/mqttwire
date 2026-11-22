@@ -27,11 +27,6 @@ public sealed class StopTests
     private static readonly byte[] s_connAckShuttingDown = ServerPackets.ConnAckRefused(MqttReasonCode.ServerShuttingDown);
 
     /// <summary>
-    /// The topic every test sends to.
-    /// </summary>
-    private static readonly MqttTopic s_topic = MqttTopic.Create("a/b");
-
-    /// <summary>
     /// How far short of the close deadline a test moves the clock before it runs a sweep that must not abort.
     /// </summary>
     private static readonly TimeSpan s_justShort = TimeSpan.FromMilliseconds(1);
@@ -76,7 +71,7 @@ public sealed class StopTests
         }
 
         written.ShouldAllBe(bytes => bytes.SequenceEqual(s_disconnectShuttingDown));
-        ClosedCalls(harness).ShouldBe(
+        harness.ClosedCalls().ShouldBe(
             ["OnClosed c1 ServerStopping", "OnClosed c2 ServerStopping", "OnClosed c3 ServerStopping"],
             ignoreOrder: true);
         harness.Server.ConnectionCount.ShouldBe(0);
@@ -159,7 +154,7 @@ public sealed class StopTests
         completedBeforeTheDeadline.ShouldBeFalse();
         abortedBeforeTheDeadline.ShouldBeFalse();
         connections.ShouldAllBe(connection => connection.Link.IsAborted);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ServerStopping", "OnClosed c2 ServerStopping"], ignoreOrder: true);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ServerStopping", "OnClosed c2 ServerStopping"], ignoreOrder: true);
     }
 
     /// <summary>
@@ -179,7 +174,7 @@ public sealed class StopTests
         TestConnection busy = harness.Connect("c2");
         harness.Connect("c3");
         MqttWireConnection server = busy.Connection.ShouldNotBeNull();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
         harness.Handler.Admit = static (connection, _) => connection.ClientId == "c4"
             ? MqttAdmitResult.Refuse(MqttReasonCode.NotAuthorized)
             : MqttAdmitResult.Accepted;
@@ -197,8 +192,8 @@ public sealed class StopTests
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Pool.FaultyReturns.ShouldBe(0);
         int admitted = harness.Handler.Calls.Count(static call => call.StartsWith("OnAdmit", StringComparison.Ordinal)) - 1;
-        ClosedCalls(harness).Count.ShouldBe(admitted);
-        ClosedCalls(harness).ShouldBe(
+        harness.ClosedCalls().Count.ShouldBe(admitted);
+        harness.ClosedCalls().ShouldBe(
             ["OnClosed c1 ServerStopping", "OnClosed c2 ServerStopping", "OnClosed c3 ServerStopping"],
             ignoreOrder: true);
     }
@@ -245,7 +240,7 @@ public sealed class StopTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
 
         // Act
         Task stop = harness.Server.StopAsync();
@@ -264,7 +259,7 @@ public sealed class StopTests
         completedWhileTheWriteIsHeld.ShouldBeFalse();
         connection.TakeWritten().ShouldBeEmpty();
         connection.Link.ClosedWith.ShouldBeNull();
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ServerStopping"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ServerStopping"]);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -346,7 +341,7 @@ public sealed class StopTests
         replaced.Link.IsAborted.ShouldBeTrue();
         replacement.Link.IsAborted.ShouldBeTrue();
         replaced.TakeWritten().ShouldBeEmpty();
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 TakenOver", "OnClosed c1 ServerStopping"], ignoreOrder: true);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 TakenOver", "OnClosed c1 ServerStopping"], ignoreOrder: true);
         harness.Server.ConnectionCount.ShouldBe(0);
         harness.Pool.Outstanding.ShouldBe(0);
     }
@@ -563,7 +558,7 @@ public sealed class StopTests
         // Assert
         second.ShouldBeSameAs(first);
         connection.TakeWritten().ShouldBe(s_disconnectShuttingDown);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ServerStopping"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ServerStopping"]);
     }
 
     /// <summary>
@@ -595,19 +590,7 @@ public sealed class StopTests
         server.IsStopping.ShouldBeTrue();
         link.IsAborted.ShouldBeTrue();
         link.TakeWritten().ShouldBeEmpty();
-        handler.CallsNow().ShouldBeEmpty();
+        handler.Calls.ShouldBeEmpty();
         server.Registry.Slots.ShouldAllBe(static slot => slot == null);
     }
-
-    /// <summary>
-    /// Lists the <c>OnClosed</c> calls the handler recorded, oldest first.
-    /// </summary>
-    /// <param name="harness">
-    /// The harness whose handler recorded them.
-    /// </param>
-    /// <returns>
-    /// The calls as text.
-    /// </returns>
-    private static List<string> ClosedCalls(ServerHarness harness) =>
-        [.. harness.Handler.Calls.Where(static call => call.StartsWith("OnClosed", StringComparison.Ordinal))];
 }

@@ -1,4 +1,5 @@
 ﻿using System.Buffers;
+using Microsoft.Extensions.Options;
 using MqttWire.Server;
 
 namespace MqttWire.TestHost;
@@ -13,12 +14,20 @@ namespace MqttWire.TestHost;
 /// connections at the same time, so the table of subscriptions, and each connection's own list in its
 /// <see cref="MqttWireConnection.State"/>, are guarded by one lock.
 /// </remarks>
-public sealed class ExactTopicHandler : IMqttWireHandler
+/// <param name="options">
+/// The server's options, for the highest QoS the server grants.
+/// </param>
+public sealed class ExactTopicHandler(IOptions<MqttWireServerOptions> options) : IMqttWireHandler
 {
     /// <summary>
     /// The user name that is refused with <see cref="MqttReasonCode.BadUserNameOrPassword"/>.
     /// </summary>
     public const string RefusedUserName = "refuse-me";
+
+    /// <summary>
+    /// The highest QoS the server grants: a subscription asked for above it is granted, and remembered, at it.
+    /// </summary>
+    private readonly MqttQoS _maxQoS = options.Value.MaxQoS;
 
     /// <summary>
     /// Guards <see cref="_subscribers"/> and every connection's own subscriptions.
@@ -72,9 +81,10 @@ public sealed class ExactTopicHandler : IMqttWireHandler
         MqttAdmitResult.Accepted;
 
     /// <summary>
-    /// Grants a subscription to an exact topic at the QoS asked for and remembers it, in the table and in the
-    /// connection's own list; subscribing again to the same topic replaces the QoS. A filter with a wildcard is
-    /// refused with <see cref="MqttReasonCode.WildcardSubscriptionsNotSupported"/> and changes nothing.
+    /// Grants a subscription to an exact topic at the QoS asked for, or at the server's highest when that is lower,
+    /// and remembers the QoS granted, in the table and in the connection's own list; subscribing again to the same
+    /// topic replaces the QoS. A filter with a wildcard is refused with
+    /// <see cref="MqttReasonCode.WildcardSubscriptionsNotSupported"/> and changes nothing.
     /// </summary>
     /// <param name="connection">
     /// The subscribing connection.
@@ -86,7 +96,8 @@ public sealed class ExactTopicHandler : IMqttWireHandler
     /// The QoS asked for.
     /// </param>
     /// <returns>
-    /// The grant at <paramref name="requested"/>, or the refusal of a wildcard.
+    /// The grant at the lower of <paramref name="requested"/> and the server's highest QoS, or the refusal of a
+    /// wildcard.
     /// </returns>
     public MqttSubscribeResult OnSubscribe(MqttWireConnection connection, string topicFilter, MqttQoS requested)
     {
@@ -96,6 +107,8 @@ public sealed class ExactTopicHandler : IMqttWireHandler
                 "Only exact topics can be subscribed to.");
         }
 
+        // What the server will grant, which is what a later publish may be sent at.
+        MqttQoS granted = requested > _maxQoS ? _maxQoS : requested;
         lock (_gate)
         {
             if (!_subscribers.TryGetValue(topicFilter, out Dictionary<MqttWireConnection, MqttQoS>? members))
@@ -104,11 +117,11 @@ public sealed class ExactTopicHandler : IMqttWireHandler
                 _subscribers.Add(topicFilter, members);
             }
 
-            members[connection] = requested;
-            GetSubscriptions(connection)[topicFilter] = requested;
+            members[connection] = granted;
+            GetSubscriptions(connection)[topicFilter] = granted;
         }
 
-        return MqttSubscribeResult.Granted(requested);
+        return MqttSubscribeResult.Granted(granted);
     }
 
     /// <summary>

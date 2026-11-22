@@ -13,18 +13,6 @@ namespace MqttWire.Tests.Server;
 public sealed class DeliveryQoSTests
 {
     /// <summary>
-    /// The topic every test sends to.
-    /// </summary>
-    private static readonly MqttTopic s_topic = MqttTopic.Create("a/b");
-
-    /// <summary>
-    /// What <c>GetCounts</c> reports for a connection that holds nothing and writes nothing.
-    /// </summary>
-    private static readonly ConnectionCounts s_idle = new(IncomingRecords: 0, DeliveryRecords: 0, IncomingInFlight: 0,
-        HoldsRecords: false, WaitingDeliveries: 0, WaitingControlPackets: 0, OutgoingBytes: 0, IsWriting: false,
-        HoldsReadBuffer: false);
-
-    /// <summary>
     /// Proves that a QoS 1 delivery is written with packet identifier 1, holds one record until the client's PUBACK,
     /// and then holds none and no records object.
     /// </summary>
@@ -37,7 +25,7 @@ public sealed class DeliveryQoSTests
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
 
         // Act
-        MqttSendResult result = server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
+        MqttSendResult result = server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
         byte[] written = connection.TakeWritten();
         ConnectionCounts inFlight = server.GetCounts();
         harness.AssertBounds();
@@ -49,7 +37,7 @@ public sealed class DeliveryQoSTests
         inFlight.DeliveryRecords.ShouldBe(1);
         inFlight.HoldsRecords.ShouldBeTrue();
         connection.TakeWritten().ShouldBeEmpty();
-        server.GetCounts().ShouldBe(s_idle);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -66,7 +54,7 @@ public sealed class DeliveryQoSTests
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
 
         // Act
-        server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
         byte[] publish = connection.TakeWritten();
         connection.Deliver(ClientPackets.PubRec1);
         byte[] pubRel = connection.TakeWritten();
@@ -78,7 +66,7 @@ public sealed class DeliveryQoSTests
         pubRel.ShouldBe(ClientPackets.PubRel1);
         waitingForPubComp.DeliveryRecords.ShouldBe(1);
         connection.TakeWritten().ShouldBeEmpty();
-        server.GetCounts().ShouldBe(s_idle);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -93,19 +81,19 @@ public sealed class DeliveryQoSTests
         ServerHarness harness = ServerHarness.Create();
         TestConnection connection = harness.Connect(connect: ServerPackets.ConnectReceiveMaximum1);
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
-        server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.ExactlyOnce);
+        server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.ExactlyOnce);
         connection.TakeWritten().ShouldBe(ClientPackets.PublishQoS2);
 
         // Act
         connection.Deliver(Hex.Parse("50 03 00 01 87"));
         byte[] afterTheFailure = connection.TakeWritten();
         ConnectionCounts counts = server.GetCounts();
-        server.TrySend(s_topic, "b"u8.ToArray(), MqttQoS.ExactlyOnce);
+        server.TrySend(ServerHarness.Topic, "b"u8.ToArray(), MqttQoS.ExactlyOnce);
         harness.AssertBounds();
 
         // Assert
         afterTheFailure.ShouldBeEmpty();
-        counts.ShouldBe(s_idle);
+        counts.ShouldBe(ServerHarness.Idle);
         connection.TakeWritten().ShouldBe(ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 2, "b"u8));
         connection.Run.IsCompleted.ShouldBeFalse();
     }
@@ -125,7 +113,7 @@ public sealed class DeliveryQoSTests
         // Act
         for (int i = 1; i <= 5; i++)
         {
-            server.TrySend(s_topic, new byte[] { (byte)('0' + i) }, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+            server.TrySend(ServerHarness.Topic, new byte[] { (byte)('0' + i) }, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
             harness.AssertBounds();
         }
 
@@ -167,9 +155,9 @@ public sealed class DeliveryQoSTests
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
 
         // Act
-        server.TrySend(s_topic, "a"u8.ToArray(), MqttQoS.AtLeastOnce);
-        server.TrySend(s_topic, "b"u8.ToArray(), MqttQoS.AtLeastOnce);
-        server.TrySend(s_topic, "c"u8.ToArray(), MqttQoS.AtMostOnce);
+        server.TrySend(ServerHarness.Topic, "a"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(ServerHarness.Topic, "b"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(ServerHarness.Topic, "c"u8.ToArray(), MqttQoS.AtMostOnce);
         harness.AssertBounds();
         byte[] beforeTheAck = connection.TakeWritten();
         ConnectionCounts waiting = server.GetCounts();
@@ -203,7 +191,7 @@ public sealed class DeliveryQoSTests
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         for (int i = 0; i < 4; i++)
         {
-            server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+            server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
             harness.AssertBounds();
         }
 
@@ -211,7 +199,7 @@ public sealed class DeliveryQoSTests
         ConnectionCounts waiting = server.GetCounts();
 
         // Act
-        MqttSendResult fifth = server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
+        MqttSendResult fifth = server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
         connection.Link.EndFromPeer();
         await connection.RunEnded();
 
@@ -222,7 +210,7 @@ public sealed class DeliveryQoSTests
         fifth.ShouldBe(MqttSendResult.Evicted);
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.QuotaExceeded));
         harness.Handler.Calls.ShouldContain("OnClosed c1 OutgoingLimitPassed");
-        server.GetCounts().ShouldBe(s_idle);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -244,14 +232,14 @@ public sealed class DeliveryQoSTests
         byte[] payload = new byte[20_000];
         for (int i = 0; i < 4; i++)
         {
-            server.TrySend(s_topic, payload, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+            server.TrySend(ServerHarness.Topic, payload, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
             harness.AssertBounds();
         }
 
         connection.TakeWritten();
 
         // Act
-        MqttSendResult fifth = server.TrySend(s_topic, payload, MqttQoS.AtLeastOnce);
+        MqttSendResult fifth = server.TrySend(ServerHarness.Topic, payload, MqttQoS.AtLeastOnce);
         connection.Link.EndFromPeer();
         await connection.RunEnded();
 
@@ -259,7 +247,7 @@ public sealed class DeliveryQoSTests
         fifth.ShouldBe(MqttSendResult.Evicted);
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.QuotaExceeded));
         harness.Handler.Calls.ShouldContain("OnClosed c1 OutgoingLimitPassed");
-        server.GetCounts().ShouldBe(s_idle);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -277,7 +265,7 @@ public sealed class DeliveryQoSTests
         ServerHarness harness = ServerHarness.Create();
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
-        server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
         connection.TakeWritten().ShouldBe(ClientPackets.PublishQoS1);
 
         // Act
@@ -310,7 +298,7 @@ public sealed class DeliveryQoSTests
         ServerHarness harness = ServerHarness.Create();
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
-        server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.ExactlyOnce);
+        server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.ExactlyOnce);
         connection.TakeWritten().ShouldBe(ClientPackets.PublishQoS2);
 
         // Act
@@ -345,7 +333,7 @@ public sealed class DeliveryQoSTests
         ServerHarness harness = ServerHarness.Create();
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
-        server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
         connection.TakeWritten();
 
         // Act
@@ -374,7 +362,7 @@ public sealed class DeliveryQoSTests
 
         // Assert
         connection.TakeWritten().ShouldBeEmpty();
-        server.GetCounts().ShouldBe(s_idle);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
         connection.Run.IsCompleted.ShouldBeFalse();
     }
 
@@ -395,7 +383,7 @@ public sealed class DeliveryQoSTests
 
         // Assert
         connection.TakeWritten().ShouldBe(ClientPackets.PubRelNotFound7);
-        server.GetCounts().ShouldBe(s_idle);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
         connection.Run.IsCompleted.ShouldBeFalse();
     }
 
@@ -416,7 +404,7 @@ public sealed class DeliveryQoSTests
 
         // Assert
         connection.TakeWritten().ShouldBeEmpty();
-        server.GetCounts().ShouldBe(s_idle);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
         connection.Run.IsCompleted.ShouldBeFalse();
     }
 
@@ -434,7 +422,7 @@ public sealed class DeliveryQoSTests
         ServerHarness harness = ServerHarness.Create();
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
-        server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.ExactlyOnce);
+        server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.ExactlyOnce);
         connection.TakeWritten();
         connection.Deliver(ClientPackets.PubRec1);
         connection.TakeWritten().ShouldBe(ClientPackets.PubRel1);
@@ -470,10 +458,10 @@ public sealed class DeliveryQoSTests
         ServerHarness harness = ServerHarness.Create();
         TestConnection connection = harness.Connect(connect: ServerPackets.ConnectReceiveMaximum1);
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
-        server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
         harness.AssertBounds();
         connection.Deliver(ClientPackets.PubRec1);
-        server.TrySend(s_topic, "B"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "B"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
         harness.AssertBounds();
         connection.TakeWritten().ShouldBe([.. ClientPackets.PublishQoS2, .. ClientPackets.PubRel1]);
 
@@ -522,7 +510,7 @@ public sealed class DeliveryQoSTests
         ServerHarness harness = ServerHarness.Create();
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
-        server.TrySend(s_topic, "hi"u8.ToArray(), qos);
+        server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), qos);
         harness.AssertBounds();
         if (before.Length > 0)
         {
@@ -555,7 +543,7 @@ public sealed class DeliveryQoSTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
         harness.AssertBounds();
 
         // Act
@@ -567,7 +555,7 @@ public sealed class DeliveryQoSTests
         whileWriting.DeliveryRecords.ShouldBe(0);
         whileWriting.IsWriting.ShouldBeTrue();
         connection.TakeWritten().ShouldBe(ClientPackets.PublishQoS1);
-        server.GetCounts().ShouldBe(s_idle);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
         connection.Run.IsCompleted.ShouldBeFalse();
         harness.Pool.Outstanding.ShouldBe(0);
     }
@@ -583,14 +571,14 @@ public sealed class DeliveryQoSTests
         ServerHarness harness = ServerHarness.Create();
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
-        server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
         connection.TakeWritten().ShouldBe(ClientPackets.PublishQoS1);
         server.SetLastDeliveryIdentifier(65_533);
 
         // Act
-        server.TrySend(s_topic, "x"u8.ToArray(), MqttQoS.AtLeastOnce);
-        server.TrySend(s_topic, "y"u8.ToArray(), MqttQoS.AtLeastOnce);
-        server.TrySend(s_topic, "z"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(ServerHarness.Topic, "x"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(ServerHarness.Topic, "y"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(ServerHarness.Topic, "z"u8.ToArray(), MqttQoS.AtLeastOnce);
 
         // Assert
         connection.TakeWritten().ShouldBe([
@@ -613,8 +601,8 @@ public sealed class DeliveryQoSTests
         ServerHarness harness = ServerHarness.Create();
         TestConnection connection = harness.Connect(connect: ServerPackets.ConnectReceiveMaximum1);
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
-        server.TrySend(s_topic, "a"u8.ToArray(), MqttQoS.AtLeastOnce);
-        server.TrySend(s_topic, "b"u8.ToArray(), MqttQoS.ExactlyOnce);
+        server.TrySend(ServerHarness.Topic, "a"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(ServerHarness.Topic, "b"u8.ToArray(), MqttQoS.ExactlyOnce);
         connection.TakeWritten();
 
         // Act
@@ -627,7 +615,7 @@ public sealed class DeliveryQoSTests
             .. ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 2, "b"u8),
             .. ServerPackets.PubRel(2),
         ]);
-        server.GetCounts().ShouldBe(s_idle);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -645,8 +633,8 @@ public sealed class DeliveryQoSTests
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Deliver(ServerPackets.Subscribe);
         connection.TakeWritten().ShouldBe(ServerPackets.SubAckGrantedQoS1);
-        server.TrySend(s_topic, "a"u8.ToArray(), MqttQoS.AtLeastOnce);
-        server.TrySend(s_topic, "b"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(ServerHarness.Topic, "a"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(ServerHarness.Topic, "b"u8.ToArray(), MqttQoS.AtLeastOnce);
         connection.TakeWritten();
 
         // Act
@@ -672,8 +660,8 @@ public sealed class DeliveryQoSTests
         ServerHarness harness = ServerHarness.Create();
         TestConnection connection = harness.Connect(connect: ServerPackets.ConnectReceiveMaximum1);
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
-        server.TrySend(s_topic, "A"u8.ToArray(), MqttQoS.ExactlyOnce);
-        server.TrySend(s_topic, "B"u8.ToArray(), MqttQoS.ExactlyOnce);
+        server.TrySend(ServerHarness.Topic, "A"u8.ToArray(), MqttQoS.ExactlyOnce);
+        server.TrySend(ServerHarness.Topic, "B"u8.ToArray(), MqttQoS.ExactlyOnce);
         harness.AssertBounds();
         connection.TakeWritten().ShouldBe(ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 1, "A"u8));
 
@@ -699,7 +687,7 @@ public sealed class DeliveryQoSTests
         bInFlight.DeliveryRecords.ShouldBe(1);
         bPubRel.ShouldBe(ServerPackets.PubRel(2));
         connection.TakeWritten().ShouldBeEmpty();
-        server.GetCounts().ShouldBe(s_idle);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
         connection.Run.IsCompleted.ShouldBeFalse();
     }
 
@@ -715,15 +703,15 @@ public sealed class DeliveryQoSTests
         ServerHarness harness = ServerHarness.Create();
         TestConnection connection = harness.Connect(connect: ServerPackets.ConnectReceiveMaximum1);
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
-        server.TrySend(s_topic, "a"u8.ToArray(), MqttQoS.AtLeastOnce);
-        server.TrySend(s_topic, "b"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(ServerHarness.Topic, "a"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(ServerHarness.Topic, "b"u8.ToArray(), MqttQoS.AtLeastOnce);
         connection.TakeWritten();
         connection.Deliver(ServerPackets.PubAck(1));
         connection.TakeWritten().ShouldBe(ServerPackets.Delivery(MqttQoS.AtLeastOnce, packetIdentifier: 2, "b"u8));
 
         // Act
         connection.Deliver(ServerPackets.PubAck(1));
-        server.TrySend(s_topic, "c"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(ServerHarness.Topic, "c"u8.ToArray(), MqttQoS.AtLeastOnce);
         harness.AssertBounds();
         byte[] afterTheDuplicate = connection.TakeWritten();
         ConnectionCounts counts = server.GetCounts();

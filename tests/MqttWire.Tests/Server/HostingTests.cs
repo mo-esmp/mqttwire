@@ -155,7 +155,7 @@ public sealed class HostingTests
         written.ShouldBe(ServerPackets.ConnAck);
         RecordingHandler handler = host.Services.GetRequiredService<IMqttWireHandler>().ShouldBeOfType<RecordingHandler>();
         server.Handler.ShouldBeSameAs(handler);
-        handler.CallsNow().ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-", "OnClosed c1 ConnectionLost"]);
+        handler.Calls.ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-", "OnClosed c1 ConnectionLost"]);
     }
 
     /// <summary>

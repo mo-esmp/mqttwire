@@ -171,7 +171,7 @@ public sealed class WebSocketLinkTests
 
         // Act
         int read = await link.ReadAsync(buffer, CancellationToken.None);
-        WebSocketReceiveResult closeResult = await serverSocket.ReceiveAsync(buffer, CancellationToken.None);
+        WebSocketReceiveResult closeResult = await serverSocket.ReceiveAsync(buffer, CancellationToken.None).Within("The peer's receive");
 
         // Assert
         read.ShouldBe(0);
@@ -202,7 +202,7 @@ public sealed class WebSocketLinkTests
 
         // Act
         await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
-        WebSocketReceiveResult closeResult = await serverSocket.ReceiveAsync(buffer, CancellationToken.None);
+        WebSocketReceiveResult closeResult = await serverSocket.ReceiveAsync(buffer, CancellationToken.None).Within("The peer's receive");
 
         // Assert
         closeResult.MessageType.ShouldBe(WebSocketMessageType.Close);
@@ -246,7 +246,9 @@ public sealed class WebSocketLinkTests
         WebSocketReceiveResult result;
         do
         {
-            result = await serverSocket.ReceiveAsync(new ArraySegment<byte>(buffer, received, buffer.Length - received), CancellationToken.None);
+            result = await serverSocket
+                .ReceiveAsync(new ArraySegment<byte>(buffer, received, buffer.Length - received), CancellationToken.None)
+                .Within("The peer's receive");
             received += result.Count;
         }
         while (result.MessageType == WebSocketMessageType.Binary);
@@ -284,7 +286,7 @@ public sealed class WebSocketLinkTests
 
         // Act
         int read = await link.ReadAsync(buffer, CancellationToken.None);
-        WebSocketReceiveResult closeResult = await serverSocket.ReceiveAsync(buffer, CancellationToken.None);
+        WebSocketReceiveResult closeResult = await serverSocket.ReceiveAsync(buffer, CancellationToken.None).Within("The peer's receive");
 
         // Assert
         read.ShouldBe(0);
@@ -315,7 +317,7 @@ public sealed class WebSocketLinkTests
         // Act
         await link.WaitForDataAsync(CancellationToken.None);
         int read = await link.ReadAsync(buffer, CancellationToken.None);
-        WebSocketReceiveResult closeResult = await serverSocket.ReceiveAsync(buffer, CancellationToken.None);
+        WebSocketReceiveResult closeResult = await serverSocket.ReceiveAsync(buffer, CancellationToken.None).Within("The peer's receive");
 
         // Assert
         read.ShouldBe(0);
@@ -370,7 +372,7 @@ public sealed class WebSocketLinkTests
         // Act
         int read = await link.ReadAsync(buffer, CancellationToken.None);
         await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
-        WebSocketReceiveResult answer = await serverSocket.ReceiveAsync(buffer, CancellationToken.None);
+        WebSocketReceiveResult answer = await serverSocket.ReceiveAsync(buffer, CancellationToken.None).Within("The peer's receive");
 
         // Assert
         read.ShouldBe(0);
@@ -454,7 +456,7 @@ public sealed class WebSocketLinkTests
 
         // Act
         await link.WriteAsync(new byte[] { 0xC0, 0x00 }, CancellationToken.None);
-        WebSocketReceiveResult result = await serverSocket.ReceiveAsync(buffer, CancellationToken.None);
+        WebSocketReceiveResult result = await serverSocket.ReceiveAsync(buffer, CancellationToken.None).Within("The peer's receive");
 
         // Assert
         result.MessageType.ShouldBe(WebSocketMessageType.Binary);
@@ -481,7 +483,7 @@ public sealed class WebSocketLinkTests
 
         // Act
         await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
-        WebSocketReceiveResult result = await serverSocket.ReceiveAsync(buffer, CancellationToken.None);
+        WebSocketReceiveResult result = await serverSocket.ReceiveAsync(buffer, CancellationToken.None).Within("The peer's receive");
 
         // Assert
         result.MessageType.ShouldBe(WebSocketMessageType.Close);

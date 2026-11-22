@@ -1,5 +1,4 @@
 ﻿using System.Text;
-using System.Threading.Channels;
 using MQTTnet;
 using MQTTnet.Protocol;
 
@@ -30,20 +29,20 @@ public sealed class ServerInteropTests
     {
         // Arrange
         await using ServerHost host = await ServerHost.StartAsync();
-        Inbox inbox = new();
-        IMqttClient subscriber = await host.ConnectMqttNetClientAsync("net-sub", inbox.AddAsync);
+        Inbox<MqttQualityOfServiceLevel> inbox = new();
+        IMqttClient subscriber = await host.ConnectMqttNetClientAsync("net-sub", args => AddAsync(inbox, args));
         await subscriber.SubscribeAsync(new MqttTopicFilterBuilder().WithTopic("t/1").WithQualityOfServiceLevel(qos).Build()).WaitAsync(s_failSafe);
         IMqttClient publisher = await host.ConnectMqttNetClientAsync("net-pub");
 
         // Act
         MqttClientPublishResult published = await publisher.PublishAsync(Message("t/1", "hi", qos)).WaitAsync(s_failSafe);
-        Received first = await inbox.NextAsync();
+        Received<MqttQualityOfServiceLevel> first = await inbox.NextAsync();
         await publisher.PublishAsync(Message("t/1", "marker", qos)).WaitAsync(s_failSafe);
-        Received next = await inbox.NextAsync();
+        Received<MqttQualityOfServiceLevel> next = await inbox.NextAsync();
 
         // Assert
         published.IsSuccess.ShouldBeTrue();
-        first.ShouldBe(new Received("t/1", "hi", qos));
+        first.ShouldBe(new Received<MqttQualityOfServiceLevel>("t/1", "hi", qos));
         next.Payload.ShouldBe("marker");
     }
 
@@ -182,8 +181,8 @@ public sealed class ServerInteropTests
     {
         // Arrange
         await using ServerHost host = await ServerHost.StartAsync();
-        Inbox inbox = new();
-        IMqttClient subscriber = await host.ConnectMqttNetClientAsync("net-sub", inbox.AddAsync,
+        Inbox<MqttQualityOfServiceLevel> inbox = new();
+        IMqttClient subscriber = await host.ConnectMqttNetClientAsync("net-sub", args => AddAsync(inbox, args),
             options => options.WithReceiveMaximum(10));
         await subscriber.SubscribeAsync(new MqttTopicFilterBuilder().WithTopic("t/1").WithExactlyOnceQoS().Build()).WaitAsync(s_failSafe);
         IMqttClient publisher = await host.ConnectMqttNetClientAsync("net-pub");
@@ -203,7 +202,7 @@ public sealed class ServerInteropTests
         }
 
         await publisher.PublishAsync(Message("t/1", "marker", MqttQualityOfServiceLevel.ExactlyOnce)).WaitAsync(s_failSafe);
-        Received next = await inbox.NextAsync();
+        Received<MqttQualityOfServiceLevel> next = await inbox.NextAsync();
 
         // Assert
         results.ShouldAllBe(result => result.ReasonCode == MqttClientPublishReasonCode.Success);
@@ -234,51 +233,22 @@ public sealed class ServerInteropTests
             .Build();
 
     /// <summary>
-    /// A message an MQTTnet client received.
+    /// Adds a message an MQTTnet client received to an inbox; the client's message event.
     /// </summary>
-    /// <param name="Topic">
-    /// The topic it arrived on.
+    /// <param name="inbox">
+    /// The inbox.
     /// </param>
-    /// <param name="Payload">
-    /// The payload as text.
+    /// <param name="args">
+    /// The event's arguments.
     /// </param>
-    /// <param name="QoS">
-    /// The QoS it was delivered at.
-    /// </param>
-    private readonly record struct Received(string Topic, string Payload, MqttQualityOfServiceLevel QoS);
-
-    /// <summary>
-    /// The messages a client received, in order, for a test to wait on.
-    /// </summary>
-    private sealed class Inbox
+    /// <returns>
+    /// A completed task.
+    /// </returns>
+    private static Task AddAsync(Inbox<MqttQualityOfServiceLevel> inbox, MqttApplicationMessageReceivedEventArgs args)
     {
-        /// <summary>
-        /// The queue the client's event writes and the test reads.
-        /// </summary>
-        private readonly Channel<Received> _messages = Channel.CreateUnbounded<Received>();
-
-        /// <summary>
-        /// Adds a message; the client's message event.
-        /// </summary>
-        /// <param name="args">
-        /// The event's arguments.
-        /// </param>
-        /// <returns>
-        /// A completed task.
-        /// </returns>
-        public Task AddAsync(MqttApplicationMessageReceivedEventArgs args)
-        {
-            MqttApplicationMessage message = args.ApplicationMessage;
-            _messages.Writer.TryWrite(new Received(message.Topic, Encoding.UTF8.GetString(message.Payload), message.QualityOfServiceLevel));
-            return Task.CompletedTask;
-        }
-
-        /// <summary>
-        /// Waits for the next message, failing the test after the fail-safe time.
-        /// </summary>
-        /// <returns>
-        /// The next message in arrival order.
-        /// </returns>
-        public async Task<Received> NextAsync() => await _messages.Reader.ReadAsync().AsTask().WaitAsync(s_failSafe);
+        MqttApplicationMessage message = args.ApplicationMessage;
+        inbox.Add(new Received<MqttQualityOfServiceLevel>(message.Topic, Encoding.UTF8.GetString(message.Payload),
+            message.QualityOfServiceLevel));
+        return Task.CompletedTask;
     }
 }

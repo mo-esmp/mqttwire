@@ -40,6 +40,30 @@ internal static class BoundedWaits
     }
 
     /// <summary>
+    /// Waits for a task and its result, at most <see cref="Limit"/>.
+    /// </summary>
+    /// <typeparam name="T">
+    /// The type of the result.
+    /// </typeparam>
+    /// <param name="task">
+    /// The task.
+    /// </param>
+    /// <param name="what">
+    /// What the task is, for the message of the timeout.
+    /// </param>
+    /// <returns>
+    /// The task's result.
+    /// </returns>
+    /// <exception cref="TimeoutException">
+    /// The task did not complete within <see cref="Limit"/>; the message names what was awaited.
+    /// </exception>
+    public static async Task<T> Within<T>(this Task<T> task, string what)
+    {
+        await ((Task)task).Within(what);
+        return await task;
+    }
+
+    /// <summary>
     /// Waits for a thread to end, at most <see cref="Limit"/>.
     /// </summary>
     /// <param name="thread">

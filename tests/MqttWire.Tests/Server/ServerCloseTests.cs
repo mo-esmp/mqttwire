@@ -16,11 +16,6 @@ namespace MqttWire.Tests.Server;
 public sealed class ServerCloseTests
 {
     /// <summary>
-    /// The topic every test sends to.
-    /// </summary>
-    private static readonly MqttTopic s_topic = MqttTopic.Create("a/b");
-
-    /// <summary>
     /// Proves that the host's <c>Close</c> on a connection with no write in progress writes DISCONNECT with its code
     /// and then closes the WebSocket with status 1000, without waiting for the peer, and that <c>OnClosed</c> reports
     /// <see cref="MqttCloseReason.ClosedByHost"/> once the peer has ended the link.
@@ -41,7 +36,7 @@ public sealed class ServerCloseTests
         byte[] written = connection.TakeWritten();
         WebSocketCloseStatus? closedWith = connection.Link.ClosedWith;
         bool endedBeforeThePeer = connection.Run.IsCompleted;
-        int closedBeforeThePeer = ClosedCalls(harness).Count;
+        int closedBeforeThePeer = harness.ClosedCalls().Count;
         connection.Link.EndFromPeer();
         await connection.RunEnded();
 
@@ -51,7 +46,7 @@ public sealed class ServerCloseTests
         connection.Link.IsAborted.ShouldBeFalse();
         endedBeforeThePeer.ShouldBeFalse();
         closedBeforeThePeer.ShouldBe(0);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
         connection.TakeWritten().ShouldBeEmpty();
         harness.Pool.Outstanding.ShouldBe(0);
     }
@@ -76,14 +71,14 @@ public sealed class ServerCloseTests
 
         // Act
         server.Close(MqttReasonCode.AdministrativeAction);
-        MqttSendResult sent = server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
+        MqttSendResult sent = server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
 
         // Assert
         heldWhileOpen.ShouldBeTrue();
         server.HttpContext.ShouldBeNull();
         sent.ShouldBe(MqttSendResult.NotOpen);
         connection.Link.AbortCalls.ShouldBe(0);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
     }
 
     /// <summary>
@@ -147,8 +142,8 @@ public sealed class ServerCloseTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
-        server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
 
         // Act
         server.Close(MqttReasonCode.AdministrativeAction);
@@ -162,7 +157,7 @@ public sealed class ServerCloseTests
         abortedAtOnce.ShouldBeTrue();
         connection.TakeWritten().ShouldBe(ServerPackets.Delivery("m1"u8));
         connection.Link.ClosedWith.ShouldBeNull();
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
         server.GetCounts().WaitingDeliveries.ShouldBe(0);
         server.GetCounts().OutgoingBytes.ShouldBe(0);
         harness.Pool.Outstanding.ShouldBe(0);
@@ -190,7 +185,7 @@ public sealed class ServerCloseTests
         };
 
         // Act
-        MqttSendResult result = server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
+        MqttSendResult result = server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
         await connection.RunEnded();
 
         // Assert
@@ -198,7 +193,7 @@ public sealed class ServerCloseTests
         connection.Link.IsAborted.ShouldBeTrue();
         connection.Link.ClosedWith.ShouldBeNull();
         connection.TakeWritten().ShouldBeEmpty();
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -233,7 +228,7 @@ public sealed class ServerCloseTests
         closedAfterwards.ShouldBe(WebSocketCloseStatus.NormalClosure);
         connection.Link.IsAborted.ShouldBeFalse();
         connection.TakeWritten().ShouldBe(Hex.Parse("E0 01 98"));
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -275,7 +270,7 @@ public sealed class ServerCloseTests
         written[2].ShouldBeOneOf((byte)MqttReasonCode.AdministrativeAction, (byte)MqttReasonCode.ServerShuttingDown);
         connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
         connection.Link.IsAborted.ShouldBeFalse();
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -306,7 +301,7 @@ public sealed class ServerCloseTests
         endedAtOnce.ShouldBeFalse();
         connection.Link.IsAborted.ShouldBeTrue();
         connection.TakeWritten().ShouldBe(Hex.Parse("E0 01 98"));
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
         server.StateNow.ShouldBe(ConnectionState.Closed);
         harness.Pool.Outstanding.ShouldBe(0);
     }
@@ -327,7 +322,7 @@ public sealed class ServerCloseTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         int outstandingWhileWriting = harness.Pool.Outstanding;
 
         // Act
@@ -352,7 +347,7 @@ public sealed class ServerCloseTests
         server.StateNow.ShouldBe(ConnectionState.Closed);
         harness.Server.Registry.WhenEmptyAsync().IsCompleted.ShouldBeTrue();
         harness.Pool.FaultyReturns.ShouldBe(0);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
     }
 
     /// <summary>
@@ -370,13 +365,13 @@ public sealed class ServerCloseTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
 
         // Act
         connection.Link.EndFromPeer();
         ConnectionState stateWhileWriting = server.StateNow;
         bool endedWhileWriting = connection.Run.IsCompleted;
-        int closedWhileWriting = ClosedCalls(harness).Count;
+        int closedWhileWriting = harness.ClosedCalls().Count;
         bool slotHeldWhileWriting = harness.Server.Registry.Slots.Contains(server);
         connection.CompleteHeldWrites(new IOException("The socket is gone."));
         await connection.RunEnded();
@@ -388,7 +383,7 @@ public sealed class ServerCloseTests
         slotHeldWhileWriting.ShouldBeTrue();
         connection.Link.IsAborted.ShouldBeTrue();
         server.StateNow.ShouldBe(ConnectionState.Closed);
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
         harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
         harness.Pool.Outstanding.ShouldBe(0);
     }
@@ -431,7 +426,7 @@ public sealed class ServerCloseTests
         second.Link.ClosedWith.ShouldBeNull();
         second.TakeWritten().ShouldBeEmpty();
         first.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.SessionTakenOver));
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -464,7 +459,7 @@ public sealed class ServerCloseTests
         outstandingAfterTheAbort.ShouldBe(1);
         connection.TakeWritten().ShouldBe(ServerPackets.ConnAck);
         connection.Link.ClosedWith.ShouldBeNull();
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -484,8 +479,8 @@ public sealed class ServerCloseTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
-        server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         connection.Deliver(ClientPackets.PingReq);
 
         // Act
@@ -509,7 +504,7 @@ public sealed class ServerCloseTests
         heldAt16.WaitingControlPackets.ShouldBe(1);
         connection.TakeWritten().ShouldBeEmpty();
         connection.Link.ClosedWith.ShouldBeNull();
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 WriteTimedOut"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 WriteTimedOut"]);
         ConnectionCounts afterwards = server.GetCounts();
         afterwards.WaitingDeliveries.ShouldBe(0);
         afterwards.WaitingControlPackets.ShouldBe(0);
@@ -530,13 +525,13 @@ public sealed class ServerCloseTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         harness.Advance(TimeSpan.FromSeconds(10));
         connection.CompleteHeldWrites();
 
         // Act
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         harness.Advance(TimeSpan.FromSeconds(10));
         bool aborted = connection.Link.IsAborted;
         ConnectionState state = server.StateNow;
@@ -566,14 +561,14 @@ public sealed class ServerCloseTests
         connection.Link.FailWrites(new WebSocketException("The socket is gone."));
 
         // Act
-        MqttSendResult result = server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
+        MqttSendResult result = server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
         await connection.RunEnded();
 
         // Assert
         result.ShouldBe(MqttSendResult.Taken);
         connection.TakeWritten().ShouldBeEmpty();
         connection.Link.IsAborted.ShouldBeTrue();
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
         server.GetCounts().IsWriting.ShouldBeFalse();
         server.GetCounts().OutgoingBytes.ShouldBe(0);
         harness.Pool.Outstanding.ShouldBe(0);
@@ -597,14 +592,14 @@ public sealed class ServerCloseTests
         connection.Link.Writing = static _ => throw new ObjectDisposedException("socket");
 
         // Act
-        MqttSendResult result = server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
+        MqttSendResult result = server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
         await connection.RunEnded();
 
         // Assert
         result.ShouldBe(MqttSendResult.Taken);
         connection.TakeWritten().ShouldBeEmpty();
         connection.Link.IsAborted.ShouldBeTrue();
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
         server.GetCounts().IsWriting.ShouldBeFalse();
         harness.Pool.Outstanding.ShouldBe(0);
     }
@@ -624,8 +619,8 @@ public sealed class ServerCloseTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
-        server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         connection.Deliver(ClientPackets.PingReq);
 
         // Act
@@ -635,7 +630,7 @@ public sealed class ServerCloseTests
         // Assert
         connection.TakeWritten().ShouldBeEmpty();
         connection.Link.IsAborted.ShouldBeTrue();
-        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
         ConnectionCounts afterwards = server.GetCounts();
         afterwards.WaitingDeliveries.ShouldBe(0);
         afterwards.WaitingControlPackets.ShouldBe(0);
@@ -664,16 +659,4 @@ public sealed class ServerCloseTests
         connection.Link.IsAborted.ShouldBeFalse();
         harness.Pool.Outstanding.ShouldBe(0);
     }
-
-    /// <summary>
-    /// Gets the calls of <c>OnClosed</c> the handler recorded, oldest first.
-    /// </summary>
-    /// <param name="harness">
-    /// The harness.
-    /// </param>
-    /// <returns>
-    /// The calls as text.
-    /// </returns>
-    private static List<string> ClosedCalls(ServerHarness harness) =>
-        [.. harness.Handler.Calls.Where(static call => call.StartsWith("OnClosed", StringComparison.Ordinal))];
 }

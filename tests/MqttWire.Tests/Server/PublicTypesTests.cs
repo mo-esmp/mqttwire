@@ -308,7 +308,7 @@ public sealed class PublicTypesTests
 
         // Assert
         written.ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.NotAuthorized));
-        harness.Handler.CallsNow().ShouldBe(["OnConnectAsync c1"]);
+        harness.Handler.Calls.ShouldBe(["OnConnectAsync c1"]);
         harness.Server.ConnectionCount.ShouldBe(0);
     }
 
@@ -335,7 +335,7 @@ public sealed class PublicTypesTests
 
         // Assert
         written.ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.NotAuthorized));
-        harness.Handler.CallsNow().ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-"]);
+        harness.Handler.Calls.ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-"]);
         harness.Server.ConnectionCount.ShouldBe(0);
     }
 

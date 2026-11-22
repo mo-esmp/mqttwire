@@ -46,11 +46,6 @@ public sealed class ServerStressTests
     private const int RacingMessages = 50;
 
     /// <summary>
-    /// The topic every test sends to.
-    /// </summary>
-    private static readonly MqttTopic s_topic = MqttTopic.Create("a/b");
-
-    /// <summary>
     /// Proves that eight threads calling <c>TrySend</c> at once on one connection, 5,000 QoS 0 messages each, while a
     /// ninth thread holds the link's writes and releases them again and again, get every message written exactly once
     /// and, for each thread, in the order of its calls: 40,000 PUBLISH packets, whose payloads, the sender's number and
@@ -84,13 +79,13 @@ public sealed class ServerStressTests
             int number = sender;
             senders[sender] = new Thread(() =>
             {
-                WaitAtTheGate(ref ready, Senders + 1);
+                Gate.Wait(ref ready, Senders + 1);
                 for (int sequence = 0; sequence < MessagesPerSender; sequence++)
                 {
                     byte[] payload = new byte[PayloadLength];
                     BinaryPrimitives.WriteInt32LittleEndian(payload, number);
                     BinaryPrimitives.WriteInt32LittleEndian(payload.AsSpan(4), sequence);
-                    if (server.TrySend(s_topic, payload, MqttQoS.AtMostOnce) != MqttSendResult.Taken)
+                    if (server.TrySend(ServerHarness.Topic, payload, MqttQoS.AtMostOnce) != MqttSendResult.Taken)
                     {
                         Interlocked.Increment(ref notTaken);
                     }
@@ -112,7 +107,7 @@ public sealed class ServerStressTests
         };
         Thread toggler = new(() =>
         {
-            WaitAtTheGate(ref ready, Senders + 1);
+            Gate.Wait(ref ready, Senders + 1);
             for (int turn = 0; Volatile.Read(ref sendersDone) < Senders; turn++)
             {
                 // Held for a varying while, then released: the writes held meanwhile complete on this thread.
@@ -229,14 +224,14 @@ public sealed class ServerStressTests
             {
                 // A write the link has held for just under the write deadline when the race begins: the sweeper's
                 // first steps take it past the deadline while the others send and close.
-                server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+                server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
                 taken = 1;
                 harness.Time.Advance(ServerLimits.WriteDeadline - TimeSpan.FromMilliseconds(500));
             }
             int raceOver = 0;
             Thread sweeper = new(() =>
             {
-                WaitAtTheGate(ref ready, RacingSenders + 2);
+                Gate.Wait(ref ready, RacingSenders + 2);
                 while (Volatile.Read(ref raceOver) == 0)
                 {
                     if (clockStep > TimeSpan.Zero)
@@ -254,10 +249,10 @@ public sealed class ServerStressTests
             {
                 threads[sender] = new Thread(() =>
                 {
-                    WaitAtTheGate(ref ready, RacingSenders + 2);
+                    Gate.Wait(ref ready, RacingSenders + 2);
                     for (int i = 0; i < RacingMessages; i++)
                     {
-                        if (server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtMostOnce) != MqttSendResult.Taken)
+                        if (server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.AtMostOnce) != MqttSendResult.Taken)
                         {
                             break;
                         }
@@ -272,10 +267,10 @@ public sealed class ServerStressTests
 
             threads[RacingSenders] = new Thread(() =>
             {
-                WaitAtTheGate(ref ready, RacingSenders + 2);
+                Gate.Wait(ref ready, RacingSenders + 2);
                 Thread.SpinWait(closerDelay);
                 server.Close(MqttReasonCode.AdministrativeAction);
-                afterTheClose = server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtMostOnce);
+                afterTheClose = server.TrySend(ServerHarness.Topic, "hi"u8.ToArray(), MqttQoS.AtMostOnce);
             });
 
             // Act
@@ -318,26 +313,6 @@ public sealed class ServerStressTests
         }
 
         failures.ShouldBeEmpty();
-    }
-
-    /// <summary>
-    /// Counts a thread in at the gate and spins until every thread of the test is there, so that they start as close
-    /// together as the scheduler allows.
-    /// </summary>
-    /// <param name="ready">
-    /// The number of threads at the gate, shared by all of them.
-    /// </param>
-    /// <param name="threads">
-    /// The number of threads the gate waits for.
-    /// </param>
-    private static void WaitAtTheGate(ref int ready, int threads)
-    {
-        Interlocked.Increment(ref ready);
-        SpinWait spin = default;
-        while (Volatile.Read(ref ready) < threads)
-        {
-            spin.SpinOnce(sleep1Threshold: -1);
-        }
     }
 
     /// <summary>

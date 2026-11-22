@@ -15,18 +15,6 @@ namespace MqttWire.Tests.Server;
 public sealed class WindowDeadlockTests
 {
     /// <summary>
-    /// The topic every test sends to.
-    /// </summary>
-    private static readonly MqttTopic s_topic = MqttTopic.Create("a/b");
-
-    /// <summary>
-    /// What <c>GetCounts</c> reports for a connection that holds nothing and writes nothing.
-    /// </summary>
-    private static readonly ConnectionCounts s_idle = new(IncomingRecords: 0, DeliveryRecords: 0, IncomingInFlight: 0,
-        HoldsRecords: false, WaitingDeliveries: 0, WaitingControlPackets: 0, OutgoingBytes: 0, IsWriting: false,
-        HoldsReadBuffer: false);
-
-    /// <summary>
     /// Proves that with the window full the PUBREL for A is written at once although B waits, that A's PUBCOMP lets B
     /// out, and that B's exchange leaves the connection idle.
     /// </summary>
@@ -40,12 +28,12 @@ public sealed class WindowDeadlockTests
 
         // Act
         // 1: A is written.
-        MqttSendResult a = server.TrySend(s_topic, "A"u8.ToArray(), MqttQoS.ExactlyOnce);
+        MqttSendResult a = server.TrySend(ServerHarness.Topic, "A"u8.ToArray(), MqttQoS.ExactlyOnce);
         harness.AssertBounds();
         byte[] step1 = connection.TakeWritten();
 
         // 2: B is taken and waits for the window.
-        MqttSendResult b = server.TrySend(s_topic, "B"u8.ToArray(), MqttQoS.ExactlyOnce);
+        MqttSendResult b = server.TrySend(ServerHarness.Topic, "B"u8.ToArray(), MqttQoS.ExactlyOnce);
         harness.AssertBounds();
         byte[] step2 = connection.TakeWritten();
         ConnectionCounts afterStep2 = server.GetCounts();
@@ -78,7 +66,7 @@ public sealed class WindowDeadlockTests
         step4.ShouldBe(ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 2, "B"u8));
         step5PubRel.ShouldBe(ServerPackets.PubRel(2));
         step5End.ShouldBeEmpty();
-        server.GetCounts().ShouldBe(s_idle);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -150,9 +138,9 @@ public sealed class WindowDeadlockTests
         TestConnection connection = harness.Connect(connect: ServerPackets.ConnectReceiveMaximum1);
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "A"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "A"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
         harness.AssertBounds();
-        server.TrySend(s_topic, "B"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "B"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
         harness.AssertBounds();
 
         // Act
@@ -191,9 +179,9 @@ public sealed class WindowDeadlockTests
         ServerHarness harness = ServerHarness.Create();
         TestConnection connection = harness.Connect(connect: ServerPackets.ConnectReceiveMaximum1);
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
-        server.TrySend(s_topic, "A"u8.ToArray(), MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "A"u8.ToArray(), MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
         harness.AssertBounds();
-        server.TrySend(s_topic, "B"u8.ToArray(), MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "B"u8.ToArray(), MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
         harness.AssertBounds();
         byte[] beforeTheHold = connection.TakeWritten();
         connection.Link.HoldWrites();
@@ -238,10 +226,10 @@ public sealed class WindowDeadlockTests
     private static void FillTheWindowAndWait(ServerHarness harness, TestConnection connection,
         MqttWireConnection server)
     {
-        server.TrySend(s_topic, "A"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "A"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
         harness.AssertBounds();
         connection.TakeWritten().ShouldBe(ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 1, "A"u8));
-        server.TrySend(s_topic, "B"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "B"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
         harness.AssertBounds();
         connection.TakeWritten().ShouldBeEmpty();
         ConnectionCounts counts = server.GetCounts();

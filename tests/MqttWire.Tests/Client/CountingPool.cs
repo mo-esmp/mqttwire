@@ -109,12 +109,14 @@ internal sealed class CountingPool : ArrayPool<byte>, IPoolCounts
 
     /// <summary>
     /// Waits until every rented buffer is back, for buffers that writes running on the thread pool return after
-    /// the test has moved on. It completes on the return that empties the pool; the 30-second limit is only a
-    /// fail-safe, so that a leak fails the test instead of hanging the run, and no outcome depends on it.
+    /// the test has moved on. It completes on the return that empties the pool; the limit of
+    /// <see cref="BoundedWaits"/> is only a fail-safe, so that a leak fails the test instead of hanging the run, and
+    /// no outcome depends on it.
     /// </summary>
     /// <returns>
     /// A task that completes, never inline, once no buffer is out; at once when none is out now. It fails with
-    /// <see cref="TimeoutException"/> when a buffer is still out after 30 seconds.
+    /// <see cref="TimeoutException"/>, naming the wait, when a buffer is still out after
+    /// <see cref="BoundedWaits.Limit"/>.
     /// </returns>
     public Task WhenNoneOutstandingAsync()
     {
@@ -126,7 +128,7 @@ internal sealed class CountingPool : ArrayPool<byte>, IPoolCounts
             }
 
             _noneOutstanding ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            return _noneOutstanding.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            return _noneOutstanding.Task.Within("The return of every rented buffer");
         }
     }
 

@@ -68,11 +68,6 @@ public sealed class ServerAllocationTests
     private static readonly byte[] s_hi = "hi"u8.ToArray();
 
     /// <summary>
-    /// The topic every test sends to.
-    /// </summary>
-    private static readonly MqttTopic s_topic = MqttTopic.Create("a/b");
-
-    /// <summary>
     /// Whether the server's assembly was built with optimizations, as it ships. A Debug build compiles every async
     /// method's state machine as a class, which the read loop then allocates, so there these tests check only what
     /// was sent and handled; CI runs them in Release.
@@ -262,7 +257,7 @@ public sealed class ServerAllocationTests
         (_, TestConnection connection, MqttWireConnection server) = Connect(connect: null);
         MemoryLink link = connection.Link;
         byte[] payload = ServerPackets.Letters('x', LargePayloadLength);
-        server.TrySend(s_topic, payload, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, payload, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         link.TakeWritten().ShouldBe(ServerPackets.Delivery(payload));
         link.DiscardsWritten = true;
         SendEach(server, payload, MqttQoS.AtMostOnce);
@@ -450,7 +445,7 @@ public sealed class ServerAllocationTests
             TestConnection connection = harness.Connect($"c{i}");
             if (holdRecords)
             {
-                connection.Connection.ShouldNotBeNull().TrySend(s_topic, s_hi, MqttQoS.AtLeastOnce)
+                connection.Connection.ShouldNotBeNull().TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtLeastOnce)
                     .ShouldBe(MqttSendResult.Taken);
             }
         }
@@ -506,7 +501,7 @@ public sealed class ServerAllocationTests
     {
         for (int i = 0; i < Iterations; i++)
         {
-            server.TrySend(s_topic, payload, qos);
+            server.TrySend(ServerHarness.Topic, payload, qos);
         }
     }
 
@@ -529,7 +524,7 @@ public sealed class ServerAllocationTests
     {
         for (int i = 0; i < Iterations; i++)
         {
-            server.TrySend(s_topic, s_hi, MqttQoS.AtLeastOnce);
+            server.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtLeastOnce);
             link.Deliver(pubAcks[first + i]);
         }
     }
@@ -554,8 +549,8 @@ public sealed class ServerAllocationTests
     {
         for (int i = 0; i < Iterations; i++)
         {
-            server.TrySend(s_topic, s_hi, MqttQoS.AtLeastOnce);
-            server.TrySend(s_topic, s_hi, MqttQoS.AtLeastOnce);
+            server.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtLeastOnce);
+            server.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtLeastOnce);
             link.Deliver(pubAcks[first + (2 * i)]);
             link.Deliver(pubAcks[first + (2 * i) + 1]);
         }
@@ -581,11 +576,11 @@ public sealed class ServerAllocationTests
         for (int hold = 0; hold < Iterations / DeliveriesPerHold; hold++)
         {
             connection.Link.HoldWrites();
-            server.TrySend(s_topic, s_hi, MqttQoS.AtMostOnce);
+            server.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtMostOnce);
             long before = GC.GetAllocatedBytesForCurrentThread();
             for (int i = 0; i < DeliveriesPerHold; i++)
             {
-                server.TrySend(s_topic, s_hi, MqttQoS.AtMostOnce);
+                server.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtMostOnce);
             }
 
             allocated += GC.GetAllocatedBytesForCurrentThread() - before;
@@ -616,7 +611,7 @@ public sealed class ServerAllocationTests
         for (int hold = 0; hold < Iterations / AnswersPerHold; hold++)
         {
             link.HoldWrites();
-            server.TrySend(s_topic, s_hi, MqttQoS.AtMostOnce);
+            server.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtMostOnce);
             long before = GC.GetAllocatedBytesForCurrentThread();
             for (int i = 0; i < AnswersPerHold; i++)
             {

@@ -275,7 +275,7 @@ public sealed class ServerConnectTests
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.ConnAck);
-        harness.Handler.CallsNow().ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-"]);
+        harness.Handler.Calls.ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-"]);
     }
 
     /// <summary>

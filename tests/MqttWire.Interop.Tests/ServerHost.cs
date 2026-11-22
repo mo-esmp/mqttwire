@@ -285,7 +285,17 @@ internal sealed class ServerHost : IAsyncDisposable
         }
 
         setup.ConfigureApp?.Invoke(app);
-        await app.StartAsync().ConfigureAwait(false);
+        try
+        {
+            await app.StartAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // A start that failed leaves nobody to dispose the application.
+            await app.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
         return new ServerHost(app, logs, scheme);
     }
 

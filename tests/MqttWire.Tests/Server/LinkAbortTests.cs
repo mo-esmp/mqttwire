@@ -23,11 +23,6 @@ public sealed class LinkAbortTests
     private const int ConnectTimedOutEvent = 5;
 
     /// <summary>
-    /// The topic every test sends to.
-    /// </summary>
-    private static readonly MqttTopic s_topic = MqttTopic.Create("a/b");
-
-    /// <summary>
     /// Proves that a link whose abort throws at the connect deadline does not stop the sweep: the next connection is
     /// aborted in the same sweep, the throw is logged as a fault, and the connection ends at the close deadline.
     /// </summary>
@@ -111,7 +106,7 @@ public sealed class LinkAbortTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         ObjectDisposedException thrown = new("HttpContext");
         connection.Link.FailNextAbort(thrown);
 
@@ -148,7 +143,7 @@ public sealed class LinkAbortTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         ObjectDisposedException thrown = new("HttpContext");
         connection.Link.FailNextAbort(thrown);
 
@@ -180,14 +175,14 @@ public sealed class LinkAbortTests
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         connection.Link.HoldWrites();
-        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
-        server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(ServerHarness.Topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         ObjectDisposedException thrown = new("HttpContext");
         connection.Link.FailNextAbort(thrown);
 
         // Act
         MqttSendResult result = MqttSendResult.Taken;
-        Should.NotThrow(() => result = server.TrySend(s_topic, "m3"u8.ToArray(), MqttQoS.AtMostOnce));
+        Should.NotThrow(() => result = server.TrySend(ServerHarness.Topic, "m3"u8.ToArray(), MqttQoS.AtMostOnce));
         harness.Advance(ServerLimits.CloseDeadline);
         connection.CompleteHeldWrites(new IOException("The socket was aborted."));
         await connection.RunEnded();
@@ -214,7 +209,7 @@ public sealed class LinkAbortTests
         ServerHarness harness = ServerHarness.Create();
         TestConnection old = harness.Connect();
         old.Link.HoldWrites();
-        old.Connection.ShouldNotBeNull().TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce)
+        old.Connection.ShouldNotBeNull().TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce)
             .ShouldBe(MqttSendResult.Taken);
         ObjectDisposedException thrown = new("HttpContext");
         old.Link.FailNextAbort(thrown);
@@ -255,7 +250,7 @@ public sealed class LinkAbortTests
         TestConnection alsoSilent = harness.Accept();
         TestConnection writing = harness.Connect();
         writing.Link.HoldWrites();
-        writing.Connection.ShouldNotBeNull().TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce)
+        writing.Connection.ShouldNotBeNull().TrySend(ServerHarness.Topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce)
             .ShouldBe(MqttSendResult.Taken);
         silent.Link.FailNextAbort(new ObjectDisposedException("HttpContext"));
         writing.Link.FailNextAbort(new ObjectDisposedException("HttpContext"));

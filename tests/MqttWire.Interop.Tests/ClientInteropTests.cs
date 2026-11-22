@@ -1,5 +1,4 @@
 using System.Text;
-using System.Threading.Channels;
 using MQTTnet;
 using MQTTnet.Protocol;
 using MQTTnet.Server;
@@ -107,7 +106,7 @@ public sealed class ClientInteropTests
     {
         // Arrange
         await using MqttNetBroker broker = await MqttNetBroker.StartAsync();
-        Inbox inbox = new();
+        Inbox<MqttQoS> inbox = new();
         await using MqttWireClient client = CreateClient(broker, "wire-1", inbox);
         (await client.ConnectAsync().WaitAsync(s_failSafe)).IsConnected.ShouldBeTrue();
         (await client.SubscribeAsync("a/b", qos).AsTask().WaitAsync(s_failSafe)).IsSuccess.ShouldBeTrue();
@@ -119,10 +118,10 @@ public sealed class ClientInteropTests
             .WithPayload("hi"u8.ToArray())
             .WithQualityOfServiceLevel((MqttQualityOfServiceLevel)(byte)qos)
             .Build());
-        Received message = await inbox.NextAsync();
+        Received<MqttQoS> message = await inbox.NextAsync();
 
         // Assert
-        message.ShouldBe(new Received("a/b", "hi", qos));
+        message.ShouldBe(new Received<MqttQoS>("a/b", "hi", qos));
     }
 
     /// <summary>
@@ -140,7 +139,7 @@ public sealed class ClientInteropTests
     {
         // Arrange
         await using MqttNetBroker broker = await MqttNetBroker.StartAsync();
-        Inbox inbox = new();
+        Inbox<MqttQoS> inbox = new();
         await using MqttWireClient client = CreateClient(broker, "wire-1", inbox);
         (await client.ConnectAsync().WaitAsync(s_failSafe)).IsConnected.ShouldBeTrue();
         (await client.SubscribeAsync("a/#", qos).AsTask().WaitAsync(s_failSafe)).IsSuccess.ShouldBeTrue();
@@ -148,14 +147,14 @@ public sealed class ClientInteropTests
         // Act
         MqttRequestResult first = await client.PublishAsync("a/b", "one"u8.ToArray(), qos).AsTask().WaitAsync(s_failSafe);
         MqttRequestResult second = await client.PublishAsync("a/c", "two"u8.ToArray(), qos).AsTask().WaitAsync(s_failSafe);
-        Received firstMessage = await inbox.NextAsync();
-        Received secondMessage = await inbox.NextAsync();
+        Received<MqttQoS> firstMessage = await inbox.NextAsync();
+        Received<MqttQoS> secondMessage = await inbox.NextAsync();
 
         // Assert
         first.IsSuccess.ShouldBeTrue();
         second.IsSuccess.ShouldBeTrue();
-        firstMessage.ShouldBe(new Received("a/b", "one", qos));
-        secondMessage.ShouldBe(new Received("a/c", "two", qos));
+        firstMessage.ShouldBe(new Received<MqttQoS>("a/b", "one", qos));
+        secondMessage.ShouldBe(new Received<MqttQoS>("a/c", "two", qos));
     }
 
     /// <summary>
@@ -167,7 +166,7 @@ public sealed class ClientInteropTests
     {
         // Arrange
         await using MqttNetBroker broker = await MqttNetBroker.StartAsync();
-        Inbox inbox = new();
+        Inbox<MqttQoS> inbox = new();
         await using MqttWireClient client = CreateClient(broker, "wire-1", inbox);
         (await client.ConnectAsync().WaitAsync(s_failSafe)).IsConnected.ShouldBeTrue();
         (await client.SubscribeAsync("a/#", MqttQoS.AtLeastOnce).AsTask().WaitAsync(s_failSafe)).IsSuccess.ShouldBeTrue();
@@ -179,11 +178,11 @@ public sealed class ClientInteropTests
         MqttRequestResult unsubscribed = await client.UnsubscribeAsync("a/#").AsTask().WaitAsync(s_failSafe);
         await client.PublishAsync("a/b", "after"u8.ToArray(), MqttQoS.AtLeastOnce).AsTask().WaitAsync(s_failSafe);
         await client.PublishAsync("z/y", "marker"u8.ToArray(), MqttQoS.AtLeastOnce).AsTask().WaitAsync(s_failSafe);
-        Received next = await inbox.NextAsync();
+        Received<MqttQoS> next = await inbox.NextAsync();
 
         // Assert
         unsubscribed.IsSuccess.ShouldBeTrue();
-        next.ShouldBe(new Received("z/y", "marker", MqttQoS.AtLeastOnce));
+        next.ShouldBe(new Received<MqttQoS>("z/y", "marker", MqttQoS.AtLeastOnce));
     }
 
     /// <summary>
@@ -216,7 +215,7 @@ public sealed class ClientInteropTests
     {
         // Arrange
         await using MqttNetBroker broker = await MqttNetBroker.StartAsync();
-        Inbox inbox = new();
+        Inbox<MqttQoS> inbox = new();
         await using MqttWireClient client = CreateClient(broker, "wire-1", inbox, keepAlive: TimeSpan.FromSeconds(1));
         (await client.ConnectAsync().WaitAsync(s_failSafe)).IsConnected.ShouldBeTrue();
         (await client.SubscribeAsync("a/#", MqttQoS.AtLeastOnce).AsTask().WaitAsync(s_failSafe)).IsSuccess.ShouldBeTrue();
@@ -224,7 +223,7 @@ public sealed class ClientInteropTests
         // Act
         await Task.Delay(TimeSpan.FromSeconds(3));
         MqttRequestResult result = await client.PublishAsync("a/b", "alive"u8.ToArray(), MqttQoS.AtLeastOnce).AsTask().WaitAsync(s_failSafe);
-        Received message = await inbox.NextAsync();
+        Received<MqttQoS> message = await inbox.NextAsync();
 
         // Assert
         client.IsConnected.ShouldBeTrue();
@@ -260,7 +259,7 @@ public sealed class ClientInteropTests
     private static MqttWireClient CreateClient(
         MqttNetBroker broker,
         string clientId,
-        Inbox? inbox,
+        Inbox<MqttQoS>? inbox,
         string? userName = null,
         string? password = null,
         TimeSpan? keepAlive = null)
@@ -272,49 +271,8 @@ public sealed class ClientInteropTests
             UserName = userName,
             Password = password,
             KeepAlive = keepAlive ?? TimeSpan.FromSeconds(15),
-            OnMessage = (in MqttPublish message) => inbox?.Add(new Received(message.GetTopic(), Encoding.UTF8.GetString(message.Payload), message.QoS)),
+            OnMessage = (in MqttPublish message) => inbox?.Add(new Received<MqttQoS>(message.GetTopic(), Encoding.UTF8.GetString(message.Payload), message.QoS)),
         };
         return new MqttWireClient(options);
-    }
-
-    /// <summary>
-    /// A message the client received, copied out of the read loop's buffer.
-    /// </summary>
-    /// <param name="Topic">
-    /// The topic it arrived on.
-    /// </param>
-    /// <param name="Payload">
-    /// The payload as text.
-    /// </param>
-    /// <param name="QoS">
-    /// The QoS it was delivered at.
-    /// </param>
-    private readonly record struct Received(string Topic, string Payload, MqttQoS QoS);
-
-    /// <summary>
-    /// The messages a client received, in order, for a test to wait on.
-    /// </summary>
-    private sealed class Inbox
-    {
-        /// <summary>
-        /// The queue the read loop writes and the test reads.
-        /// </summary>
-        private readonly Channel<Received> _messages = Channel.CreateUnbounded<Received>();
-
-        /// <summary>
-        /// Adds a message; called from the client's callback.
-        /// </summary>
-        /// <param name="message">
-        /// The message.
-        /// </param>
-        public void Add(Received message) => _messages.Writer.TryWrite(message);
-
-        /// <summary>
-        /// Waits for the next message, failing the test after the fail-safe time.
-        /// </summary>
-        /// <returns>
-        /// The next message in arrival order.
-        /// </returns>
-        public async Task<Received> NextAsync() => await _messages.Reader.ReadAsync().AsTask().WaitAsync(s_failSafe);
     }
 }

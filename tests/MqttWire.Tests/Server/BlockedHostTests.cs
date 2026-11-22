@@ -61,7 +61,7 @@ public sealed class BlockedHostTests
         connection.Link.ClosedWith.ShouldBeNull();
         harness.Log.EntriesNow().ShouldContain(static entry =>
             entry.Id.Id == AuthenticationTimedOutEvent && entry.Level == LogLevel.Error);
-        harness.Handler.CallsNow().ShouldBe(["OnConnectAsync c1"]);
+        harness.Handler.Calls.ShouldBe(["OnConnectAsync c1"]);
         harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
         harness.Pool.Outstanding.ShouldBe(0);
     }
@@ -103,7 +103,7 @@ public sealed class BlockedHostTests
         line.Level.ShouldBe(LogLevel.Error);
         line.Message.ShouldContain("c1");
         line.Message.ShouldContain(nameof(IMqttWireHandler.OnConnectAsync));
-        harness.Handler.CallsNow().ShouldBe(["OnConnectAsync c1"]);
+        harness.Handler.Calls.ShouldBe(["OnConnectAsync c1"]);
         harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
         harness.Pool.Outstanding.ShouldBe(0);
     }

@@ -86,6 +86,19 @@ internal sealed class ServerHarness
     }
 
     /// <summary>
+    /// Gets the topic the tests send to, "a/b".
+    /// </summary>
+    public static MqttTopic Topic { get; } = MqttTopic.Create("a/b");
+
+    /// <summary>
+    /// Gets the counts of a connection that holds nothing: no record, nothing waiting, no byte counted, no write in
+    /// progress and no read buffer.
+    /// </summary>
+    public static ConnectionCounts Idle { get; } = new(IncomingRecords: 0, DeliveryRecords: 0, IncomingInFlight: 0,
+        HoldsRecords: false, WaitingDeliveries: 0, WaitingControlPackets: 0, OutgoingBytes: 0, IsWriting: false,
+        HoldsReadBuffer: false);
+
+    /// <summary>
     /// Gets the server.
     /// </summary>
     public MqttWireServer Server { get; }
@@ -240,7 +253,7 @@ internal sealed class ServerHarness
     /// The calls as text, for example <c>"OnClosed c1 TakenOver"</c>; a copy.
     /// </returns>
     public List<string> ClosedCalls() =>
-        [.. Handler.CallsNow().Where(static call => call.StartsWith("OnClosed", StringComparison.Ordinal))];
+        [.. Handler.Calls.Where(static call => call.StartsWith("OnClosed", StringComparison.Ordinal))];
 
     /// <summary>
     /// Moves the fake clock forward in steps of the sweep interval, so that every sweep in between runs, and asserts
