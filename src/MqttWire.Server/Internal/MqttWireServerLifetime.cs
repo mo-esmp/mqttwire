@@ -3,9 +3,11 @@
 namespace MqttWire.Server.Internal;
 
 /// <summary>
-/// Ties the server to the host's lifetime (plan decision 16): starts the sweep when the host starts, and stops the
-/// server in <see cref="StoppingAsync"/>, which the host calls on every lifecycle service before it stops any hosted
-/// service, so the web server is never left waiting on open WebSockets.
+/// Ties the server to the host's lifetime (plan decision 16): starts the sweep in <see cref="StartingAsync"/>, which
+/// the host calls on every lifecycle service before it starts any hosted service, so the sweep exists before the web
+/// server (whose hosted service is registered before the host's own) accepts a connection; and stops the server in
+/// <see cref="StoppingAsync"/>, which the host calls on every lifecycle service before it stops any hosted service,
+/// so the web server is never left waiting on open WebSockets.
 /// </summary>
 /// <param name="server">
 /// The server.
@@ -13,18 +15,7 @@ namespace MqttWire.Server.Internal;
 internal sealed class MqttWireServerLifetime(MqttWireServer server) : IHostedLifecycleService
 {
     /// <summary>
-    /// Does nothing.
-    /// </summary>
-    /// <param name="cancellationToken">
-    /// Not used.
-    /// </param>
-    /// <returns>
-    /// A completed task.
-    /// </returns>
-    public Task StartingAsync(CancellationToken cancellationToken) => Task.CompletedTask;
-
-    /// <summary>
-    /// Starts the server's sweep.
+    /// Starts the server's sweep, before any hosted service, the web server's included, is started.
     /// </summary>
     /// <param name="cancellationToken">
     /// Not used: the start completes at once.
@@ -35,11 +26,22 @@ internal sealed class MqttWireServerLifetime(MqttWireServer server) : IHostedLif
     /// <exception cref="InvalidOperationException">
     /// The server was already started, or has been stopped.
     /// </exception>
-    public Task StartAsync(CancellationToken cancellationToken)
+    public Task StartingAsync(CancellationToken cancellationToken)
     {
         server.Start();
         return Task.CompletedTask;
     }
+
+    /// <summary>
+    /// Does nothing: the server was started in <see cref="StartingAsync"/>.
+    /// </summary>
+    /// <param name="cancellationToken">
+    /// Not used.
+    /// </param>
+    /// <returns>
+    /// A completed task.
+    /// </returns>
+    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
     /// <summary>
     /// Does nothing.

@@ -14,15 +14,10 @@ namespace MqttWire.Server;
 public sealed class MqttWireServer
 {
     /// <summary>
-    /// The one timer that runs <see cref="Sweep"/>, or <see langword="null"/> before <see cref="Start"/>.
+    /// The one timer that runs <see cref="Sweep"/>, or <see langword="null"/> before <see cref="Start"/>; written
+    /// and read under <see cref="ConnectionRegistry.Gate"/>.
     /// </summary>
     private ITimer? _sweepTimer;
-
-    /// <summary>
-    /// <see langword="true"/> from the first call of <see cref="StopAsync"/>; set under
-    /// <see cref="ConnectionRegistry.Gate"/>, read with or without it.
-    /// </summary>
-    private volatile bool _isStopping;
 
     /// <summary>
     /// Completes when the stop has ended, or <see langword="null"/> before the first call of
@@ -112,11 +107,11 @@ public sealed class MqttWireServer
     /// <summary>
     /// Gets a value indicating whether the server is stopping: from the first call of <see cref="StopAsync"/> on, the
     /// admission step lets no connection in, the connect phase refuses a CONNECT with <c>0x8B</c> before asking the
-    /// host, and the endpoint answers a new request with HTTP 503. It is set under
-    /// <see cref="ConnectionRegistry.Gate"/>, so an admission, which runs under the same lock, either precedes it or
-    /// sees it; read without the lock, it may be a moment late.
+    /// host, a connection that takes its slot is aborted at once, and the endpoint answers a new request with HTTP
+    /// 503. It is set under <see cref="ConnectionRegistry.Gate"/>, so an admission and the taking of a slot, which run
+    /// under the same lock, either precede it or see it; read without the lock, it may be a moment late.
     /// </summary>
-    internal bool IsStopping => _isStopping;
+    internal bool IsStopping => Registry.IsStopping;
 
     /// <summary>
     /// Gets <see cref="ServerLimits.ConnectDeadline"/> in units of <see cref="Time"/>'s timestamps.
@@ -179,19 +174,22 @@ public sealed class MqttWireServer
     /// </exception>
     internal void Start()
     {
-        if (_sweepTimer is not null)
+        lock (Registry.Gate)
         {
-            throw new InvalidOperationException("The server was already started.");
-        }
+            if (_sweepTimer is not null)
+            {
+                throw new InvalidOperationException("The server was already started.");
+            }
 
-        if (_isStopping)
-        {
-            throw new InvalidOperationException("The server was stopped.");
-        }
+            if (Registry.IsStopping)
+            {
+                throw new InvalidOperationException("The server was stopped.");
+            }
 
-        // The state is always this server, passed just below.
-        _sweepTimer = Time.CreateTimer(static state => ((MqttWireServer)state!).Sweep(), this,
-            ServerLimits.SweepInterval, ServerLimits.SweepInterval);
+            // The state is always this server, passed just below.
+            _sweepTimer = Time.CreateTimer(static state => ((MqttWireServer)state!).Sweep(), this,
+                ServerLimits.SweepInterval, ServerLimits.SweepInterval);
+        }
     }
 
     /// <summary>
@@ -199,9 +197,11 @@ public sealed class MqttWireServer
     /// <see cref="ConnectionRegistry.Gate"/>, so that no admission can follow; then ends every connection that has a
     /// slot, each as its state calls for (see <see cref="MqttWireConnection.BeginStop"/>): an Active one is closed
     /// with <c>0x8B</c>, an Accepted one is aborted, an Authenticating one has its host's token cancelled and is
-    /// answered with CONNACK <c>0x8B</c>, and a Closing one is left to its own close. A connection that takes a slot
-    /// after the walk finds <see cref="IsStopping"/> set and is refused when its CONNECT arrives, or aborted at the
-    /// connect deadline. The stop then waits until no slot is taken, which is after every
+    /// answered with CONNACK <c>0x8B</c>, and a Closing one is left to its own close. A connection that takes its
+    /// slot after the flag was set learns it in the same hold of the lock (<see cref="ConnectionRegistry.Add"/>) and
+    /// is aborted at once by its own run, so every connection is either found by the walk or aborts itself, and none
+    /// needs the sweep to end; this holds also for one that takes its slot after the stop has completed. The stop
+    /// then waits until no slot is taken, which is after every
     /// <see cref="IMqttWireHandler.OnClosed"/> has returned and every buffer is back; the sweep keeps running
     /// meanwhile and aborts every link still open at its close deadline, so the wait is bounded and never on a peer.
     /// Last, it disposes the sweep's timer: a sweep already running finishes harmlessly, and none starts afterwards.
@@ -214,6 +214,7 @@ public sealed class MqttWireServer
     internal Task StopAsync()
     {
         TaskCompletionSource stopped;
+        ITimer? sweepTimer;
         lock (Registry.Gate)
         {
             if (_stopped is not null)
@@ -221,11 +222,12 @@ public sealed class MqttWireServer
                 return _stopped.Task;
             }
 
-            _isStopping = true;
+            Registry.MarkStopping();
             _stopped = stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            sweepTimer = _sweepTimer;
         }
 
-        if (_sweepTimer is null)
+        if (sweepTimer is null)
         {
             stopped.SetResult();
             return stopped.Task;
@@ -237,7 +239,7 @@ public sealed class MqttWireServer
             Volatile.Read(ref slots[i])?.BeginStop();
         }
 
-        _ = CompleteStopAsync(_sweepTimer, stopped);
+        _ = CompleteStopAsync(sweepTimer, stopped);
         return stopped.Task;
     }
 

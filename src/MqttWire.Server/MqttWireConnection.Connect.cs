@@ -235,8 +235,9 @@ public sealed partial class MqttWireConnection
     /// with a token that fires at the authentication deadline or when the request is aborted. The cancellation
     /// source exists only for this call. A refusal, a handler that throws, the deadline, the server's stop and an
     /// abort each begin the close here: CONNACK with the host's code, <c>0x83</c>, <c>0x88</c>, <c>0x8B</c>, and
-    /// nothing, respectively. When the server is stopping already, which is the case of a connection that took its
-    /// slot after the stop's walk, the host is not asked: CONNACK <c>0x8B</c>. A host task abandoned to the token is
+    /// nothing, respectively. When the server is stopping already (the stop's walk, which ends this connection, has
+    /// begun but has not reached it yet), the host is not asked: CONNACK <c>0x8B</c>, or the walk's abort, whichever
+    /// comes first. A host task abandoned to the token is
     /// observed later and its outcome logged and discarded.
     /// </summary>
     /// <param name="request">
@@ -475,9 +476,9 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Begins the close with CONNACK 0x8B when the server is stopping. Read after the connection took its slot, so a
-    /// stop whose walk missed the connection has set the flag by then; a stop that begins after this read finds the
-    /// connection Accepted or Authenticating, and ends it from there.
+    /// Begins the close with CONNACK 0x8B when the server is stopping. The connection had its slot before the stop
+    /// began (one that took it after aborts itself), so the stop's walk ends it too: whichever comes first wins, and
+    /// a stop that begins after this read finds the connection Accepted or Authenticating, and ends it from there.
     /// </summary>
     /// <returns>
     /// <see langword="true"/> when the server is stopping and the close has begun; <see langword="false"/> when it

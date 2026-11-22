@@ -41,7 +41,13 @@ public sealed partial class MqttWireConnection
     {
         _link = link ?? await AcceptWebSocketAsync().ConfigureAwait(false);
         Volatile.Write(ref _stateEnteredAt, _server.Time.GetTimestamp());
-        _server.Registry.Add(this);
+        if (_server.Registry.Add(this))
+        {
+            // The server's stop had begun when the slot was taken, so its walk may have missed this connection: it
+            // ends itself, Accepted, with its link aborted, and the read below fails at once.
+            BeginStop();
+        }
+
         try
         {
             bool open = await ConnectPhaseAsync().ConfigureAwait(false);
@@ -75,8 +81,8 @@ public sealed partial class MqttWireConnection
     /// an Active one begins its close with DISCONNECT <c>0x8B</c>; a Closing or Closed one is left as it is. A
     /// connection that moves on while this looks at it is looked at again in its new state. An Authenticating
     /// connection whose host has answered already is refused by the admission step, which sees the server stopping.
-    /// Called by <see cref="MqttWireServer.StopAsync"/>, after <see cref="MqttWireServer.IsStopping"/> was set; safe
-    /// from any thread, and never throws.
+    /// Called by <see cref="MqttWireServer.StopAsync"/>, after <see cref="MqttWireServer.IsStopping"/> was set, and by
+    /// the run of a connection that took its slot after that; safe from any thread, and never throws.
     /// </summary>
     internal void BeginStop()
     {

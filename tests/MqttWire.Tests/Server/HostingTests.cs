@@ -10,6 +10,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using MqttWire.Server;
 using MqttWire.Server.Internal;
+using MqttWire.Tests.Client;
 
 namespace MqttWire.Tests.Server;
 
@@ -115,6 +116,32 @@ public sealed class HostingTests
         // Assert
         stoppingWhenStarted.ShouldBeFalse();
         recorder.WasServerStopping.ShouldBe(true);
+    }
+
+    /// <summary>
+    /// Proves that the lifetime service creates the sweep's timer in <c>StartingAsync</c>, which the host calls before
+    /// it starts any hosted service, and that <c>StartAsync</c> creates no other.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task StartingAsync_Lifetime_CreatesTheSweepTimer()
+    {
+        // Arrange
+        CountingTimeProvider timers = new(new FakeTimeProvider());
+        MqttWireServer server = new(new RecordingHandler(), new MqttWireServerOptions(), new RecordingLogger(), timers,
+            ArrayPool<byte>.Shared);
+        MqttWireServerLifetime lifetime = new(server);
+
+        // Act
+        await lifetime.StartingAsync(CancellationToken.None);
+        int timersAfterStarting = timers.PeriodicTimers().Count;
+        await lifetime.StartAsync(CancellationToken.None);
+
+        // Assert
+        timersAfterStarting.ShouldBe(1);
+        timers.PeriodicTimers().ShouldHaveSingleItem().Period.ShouldBe(ServerLimits.SweepInterval);
     }
 
     /// <summary>

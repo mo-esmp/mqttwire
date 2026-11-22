@@ -30,6 +30,11 @@ public sealed class StopTests
     private static readonly MqttTopic s_topic = MqttTopic.Create("a/b");
 
     /// <summary>
+    /// How far short of the close deadline a test moves the clock before it runs a sweep that must not abort.
+    /// </summary>
+    private static readonly TimeSpan s_justShort = TimeSpan.FromMilliseconds(1);
+
+    /// <summary>
     /// Proves that the stop writes DISCONNECT 0x8B to every Active connection, closes its WebSocket with status 1000,
     /// and reports each one closed with <see cref="MqttCloseReason.ServerStopping"/> once its peer has ended the link.
     /// </summary>
@@ -69,8 +74,9 @@ public sealed class StopTests
     }
 
     /// <summary>
-    /// Proves that the stop does not wait on peers that never answer the close: it is not complete before the close
-    /// deadline, and completes once the sweep has aborted every link at it.
+    /// Proves that the stop does not wait on peers that never answer the close: a sweep just short of the close
+    /// deadline aborts nothing and the stop is not complete, and the stop completes once the sweep at the deadline
+    /// has aborted every link.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -82,11 +88,13 @@ public sealed class StopTests
         ServerHarness harness = ServerHarness.Create();
         TestConnection[] connections = [harness.Connect("c1"), harness.Connect("c2")];
         Task stop = harness.Server.StopAsync();
+        harness.Advance(ServerLimits.CloseDeadline - s_justShort);
+        harness.Server.Sweep();
         bool completedBeforeTheDeadline = stop.IsCompleted;
         bool abortedBeforeTheDeadline = connections.Any(static connection => connection.Link.IsAborted);
 
         // Act
-        harness.Advance(ServerLimits.CloseDeadline);
+        harness.Advance(s_justShort);
         await stop;
 
         // Assert
@@ -184,13 +192,17 @@ public sealed class StopTests
         // Act
         Task stop = harness.Server.StopAsync();
         bool abortedAtOnce = connection.Link.IsAborted;
-        harness.Advance(ServerLimits.CloseDeadline + ServerLimits.SweepInterval);
+        harness.Advance(ServerLimits.CloseDeadline - s_justShort);
+        harness.Server.Sweep();
+        bool completedBeforeTheDeadline = stop.IsCompleted;
+        harness.Advance(s_justShort + ServerLimits.SweepInterval);
         bool completedWhileTheWriteIsHeld = stop.IsCompleted;
         connection.CompleteHeldWrites(new IOException("The socket is gone."));
         await stop;
 
         // Assert
         abortedAtOnce.ShouldBeTrue();
+        completedBeforeTheDeadline.ShouldBeFalse();
         completedWhileTheWriteIsHeld.ShouldBeFalse();
         connection.TakeWritten().ShouldBeEmpty();
         connection.Link.ClosedWith.ShouldBeNull();
@@ -266,14 +278,15 @@ public sealed class StopTests
     }
 
     /// <summary>
-    /// Proves that a connection that registers after the stop began is refused with CONNACK 0x8B when its CONNECT
-    /// arrives, without asking the host, and that the stop waits for it too.
+    /// Proves that a connection that takes its slot after the stop began, which the stop's walk may have missed, is
+    /// aborted at once by its own run, without a write or a handler call, and that the stop completes with no time
+    /// advanced.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
     /// </returns>
     [Fact]
-    public async Task StopAsync_NewConnectAfterTheStopBegan_IsRefusedWith0x8B()
+    public async Task StopAsync_ConnectionAcceptedAfterTheStopBegan_IsAbortedAtOnce()
     {
         // Arrange
         ServerHarness harness = ServerHarness.Create();
@@ -282,17 +295,74 @@ public sealed class StopTests
 
         // Act
         TestConnection late = harness.Accept();
-        late.Deliver(ServerPackets.ConnectFor("c2"));
-        byte[] written = late.TakeWritten();
-        harness.Advance(ServerLimits.CloseDeadline);
+        bool abortedAtOnce = late.Link.IsAborted;
+        first.Link.EndFromPeer();
         await stop;
 
         // Assert
-        written.ShouldBe(s_connAckShuttingDown);
-        late.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
+        abortedAtOnce.ShouldBeTrue();
         late.Run.IsCompleted.ShouldBeTrue();
-        first.Run.IsCompleted.ShouldBeTrue();
+        late.TakeWritten().ShouldBeEmpty();
+        late.Link.ClosedWith.ShouldBeNull();
         harness.Handler.Calls.ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-", "OnClosed c1 ServerStopping"]);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a connection Accepted before the stop began, with part of its CONNECT already arrived, is aborted
+    /// by the stop's walk: nothing is written, the host is not asked, and the rest of the CONNECT changes nothing.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task StopAsync_AcceptedWithItsConnectInFlight_IsAbortedByTheWalk()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Accept();
+        int half = ServerPackets.Connect.Length / 2;
+        connection.Deliver(ServerPackets.Connect.AsSpan(0, half));
+
+        // Act
+        Task stop = harness.Server.StopAsync();
+        bool abortedAtOnce = connection.Link.IsAborted;
+        connection.Link.Deliver(ServerPackets.Connect.AsSpan(half));
+        await stop;
+
+        // Assert
+        abortedAtOnce.ShouldBeTrue();
+        connection.Run.IsCompleted.ShouldBeTrue();
+        connection.TakeWritten().ShouldBeEmpty();
+        harness.Handler.Calls.ShouldBeEmpty();
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a connection that takes its slot after the stop has completed, when no sweep runs any more, is
+    /// aborted at once and holds no slot afterwards.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task StopAsync_ConnectionRegistersAfterTheStopCompleted_IsAbortedAndHoldsNoSlot()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        await harness.Server.StopAsync();
+        CountingTimeProvider.CountedTimer timer = harness.Timers.PeriodicTimers().ShouldHaveSingleItem();
+
+        // Act
+        TestConnection late = harness.Accept();
+
+        // Assert
+        timer.IsDisposed.ShouldBeTrue();
+        late.Link.IsAborted.ShouldBeTrue();
+        late.Run.IsCompleted.ShouldBeTrue();
+        late.TakeWritten().ShouldBeEmpty();
+        harness.Server.Registry.Slots.ShouldAllBe(slot => slot == null);
+        harness.Handler.Calls.ShouldBeEmpty();
         harness.Pool.Outstanding.ShouldBe(0);
     }
 

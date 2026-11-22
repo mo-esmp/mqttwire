@@ -100,7 +100,9 @@ public interface IMqttWireHandler
 
     /// <summary>
     /// Tells the host that a connection ended. Called exactly once for every connection that
-    /// <see cref="OnAdmit"/> accepted, after the last other call for that connection has returned.
+    /// <see cref="OnAdmit"/> accepted, after the last other call for that connection has returned. It must not wait
+    /// on the server's stop, or on a shutdown of the host's own that waits for it: the stop waits for every
+    /// <see cref="OnClosed"/> to return.
     /// </summary>
     /// <param name="connection">
     /// The connection that ended.

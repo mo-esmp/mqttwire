@@ -1,8 +1,10 @@
 namespace MqttWire.Server;
 
 /// <summary>
-/// The options of the MQTT server. They are checked when the host starts; an invalid value makes the host's start
-/// fail with <see cref="Microsoft.Extensions.Options.OptionsValidationException"/>, and the server does not start.
+/// The options of the MQTT server. An invalid value throws
+/// <see cref="Microsoft.Extensions.Options.OptionsValidationException"/> when the server is first resolved (in a
+/// <c>WebApplication</c>, that is the call to <c>MapMqttWire</c>) or, at the latest, when the host starts, which then
+/// does not start.
 /// </summary>
 public sealed class MqttWireServerOptions
 {

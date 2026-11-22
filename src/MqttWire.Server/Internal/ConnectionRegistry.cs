@@ -51,6 +51,11 @@ internal sealed class ConnectionRegistry
     private TaskCompletionSource? _empty;
 
     /// <summary>
+    /// <see langword="true"/> once the server's stop has begun; written only under <see cref="Gate"/>.
+    /// </summary>
+    private volatile bool _stopping;
+
+    /// <summary>
     /// Gets the lock that guards the slots and the table; admission runs inside it.
     /// </summary>
     public Lock Gate { get; } = new();
@@ -70,18 +75,31 @@ internal sealed class ConnectionRegistry
     }
 
     /// <summary>
+    /// Gets a value indicating whether the server's stop has begun. Set under <see cref="Gate"/> by
+    /// <see cref="MarkStopping"/>; read without the lock, it may be a moment late, and under it, it is exact.
+    /// </summary>
+    public bool IsStopping => _stopping;
+
+    /// <summary>
     /// Gets the slot array, read without the lock. An entry may be <see langword="null"/>, and a connection in an
     /// array that has since been replaced may already have ended; a reader must accept both.
     /// </summary>
     public MqttWireConnection?[] Slots => Volatile.Read(ref _slots);
 
     /// <summary>
-    /// Gives a connection a slot, growing the array when every slot is taken.
+    /// Gives a connection a slot, growing the array when every slot is taken, and reports, in the same hold of
+    /// <see cref="Gate"/>, whether the server's stop has begun. So a connection is either in the slots before the
+    /// stop begins, where the stop's walk finds it, or learns here that the stop has begun, never neither.
     /// </summary>
     /// <param name="connection">
     /// The connection, which must not have a slot yet.
     /// </param>
-    public void Add(MqttWireConnection connection)
+    /// <returns>
+    /// <see langword="false"/> when the server is not stopping. <see langword="true"/> when its stop has begun: the
+    /// slot is taken all the same, the stop's walk may not have seen the connection, and the caller must end it,
+    /// which frees the slot.
+    /// </returns>
+    public bool Add(MqttWireConnection connection)
     {
         lock (Gate)
         {
@@ -89,7 +107,18 @@ internal sealed class ConnectionRegistry
             connection.Slot = slot;
             _taken++;
             Volatile.Write(ref _slots[slot], connection);
+            return _stopping;
         }
+    }
+
+    /// <summary>
+    /// Records that the server's stop has begun, so that every later <see cref="Add"/> reports it. The caller holds
+    /// <see cref="Gate"/>, so an admission, which runs under it, either precedes this or sees it.
+    /// </summary>
+    public void MarkStopping()
+    {
+        Debug.Assert(Gate.IsHeldByCurrentThread, "The caller holds the gate.");
+        _stopping = true;
     }
 
     /// <summary>

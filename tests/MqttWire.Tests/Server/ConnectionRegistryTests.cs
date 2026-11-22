@@ -65,6 +65,34 @@ public sealed class ConnectionRegistryTests
     }
 
     /// <summary>
+    /// Proves that taking a slot reports whether the stop has begun: not before <c>MarkStopping</c>, and after it,
+    /// with the slot taken all the same.
+    /// </summary>
+    [Fact]
+    public void Add_AfterMarkStopping_ReportsTheStopAndTakesTheSlot()
+    {
+        // Arrange
+        MqttWireServer server = ServerHarness.Create().Server;
+        ConnectionRegistry registry = new();
+        MqttWireConnection before = NewConnection(server, "a");
+        MqttWireConnection after = NewConnection(server, "b");
+        bool stoppingBefore = registry.Add(before);
+        lock (registry.Gate)
+        {
+            registry.MarkStopping();
+        }
+
+        // Act
+        bool stoppingAfter = registry.Add(after);
+
+        // Assert
+        stoppingBefore.ShouldBeFalse();
+        stoppingAfter.ShouldBeTrue();
+        registry.IsStopping.ShouldBeTrue();
+        registry.Slots.ShouldContain(after);
+    }
+
+    /// <summary>
     /// Proves that removing a connection whose client id was taken over leaves the one that replaced it in the table.
     /// </summary>
     [Fact]

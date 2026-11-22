@@ -14,19 +14,22 @@ public static class MqttWireServiceCollectionExtensions
 {
     /// <summary>
     /// Registers the MQTT server: <typeparamref name="THandler"/> as the one <see cref="IMqttWireHandler"/>, the
-    /// options, checked when the host starts, one <see cref="MqttWireServer"/>, and the service that starts it with
+    /// options, one <see cref="MqttWireServer"/>, and the service that starts it with
     /// the host and stops it, closing every connection, when the host stops. Map its endpoint with
     /// <see cref="MqttWireEndpointRouteBuilderExtensions.MapMqttWire"/>.
     /// </summary>
     /// <typeparam name="THandler">
-    /// The host's handler, created once by dependency injection and called for every connection.
+    /// The host's handler, registered as a singleton: created once by dependency injection and called for every
+    /// connection. It must not depend on scoped services.
     /// </typeparam>
     /// <param name="services">
     /// The service collection.
     /// </param>
     /// <param name="configure">
-    /// Changes the default options, or <see langword="null"/> to keep them. An invalid value makes the host's start
-    /// fail with <see cref="OptionsValidationException"/>.
+    /// Changes the default options, or <see langword="null"/> to keep them. An invalid value throws
+    /// <see cref="OptionsValidationException"/> when the server is first resolved (in a <c>WebApplication</c>, that is
+    /// the call to <see cref="MqttWireEndpointRouteBuilderExtensions.MapMqttWire"/>) or, at the latest, when the host
+    /// starts, which then does not start.
     /// </param>
     /// <returns>
     /// <paramref name="services"/>, for chaining.
