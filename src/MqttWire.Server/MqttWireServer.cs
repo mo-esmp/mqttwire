@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using MqttWire.Link;
 using MqttWire.Server.Internal;
@@ -13,6 +14,18 @@ namespace MqttWire.Server;
 /// </summary>
 public sealed class MqttWireServer
 {
+    /// <summary>
+    /// The services the handler is resolved from when the server starts, or <see langword="null"/> for a server
+    /// that was given its handler.
+    /// </summary>
+    private readonly IServiceProvider? _services;
+
+    /// <summary>
+    /// The host's handler; <see langword="null"/> until it is resolved from <see cref="_services"/>, by
+    /// <see cref="Start"/> or by whoever needs it first.
+    /// </summary>
+    private IMqttWireHandler? _handler;
+
     /// <summary>
     /// The one timer that runs <see cref="Sweep"/>, or <see langword="null"/> before <see cref="Start"/>; written
     /// and read under <see cref="ConnectionRegistry.Gate"/>.
@@ -49,8 +62,55 @@ public sealed class MqttWireServer
     /// </param>
     internal MqttWireServer(IMqttWireHandler handler, MqttWireServerOptions options, ILogger<MqttWireServer> logger,
         TimeProvider time, ArrayPool<byte> pool, ServerPools? pools = null)
+        : this(options, logger, time, pool, pools) =>
+        _handler = handler;
+
+    /// <summary>
+    /// Creates the server the registration builds: without its handler, which is resolved from
+    /// <paramref name="services"/> when the server starts. So the handler may itself take the server in its
+    /// constructor, to look connections up, without the two waiting for each other.
+    /// </summary>
+    /// <param name="services">
+    /// The services that hold the one <see cref="IMqttWireHandler"/>.
+    /// </param>
+    /// <param name="options">
+    /// The options, already validated.
+    /// </param>
+    /// <param name="logger">
+    /// The logger.
+    /// </param>
+    /// <param name="time">
+    /// The clock every deadline is measured on, and that runs the sweep's timer.
+    /// </param>
+    /// <param name="pool">
+    /// The pool every buffer is rented from.
+    /// </param>
+    internal MqttWireServer(IServiceProvider services, MqttWireServerOptions options, ILogger<MqttWireServer> logger,
+        TimeProvider time, ArrayPool<byte> pool)
+        : this(options, logger, time, pool, pools: null) =>
+        _services = services;
+
+    /// <summary>
+    /// Creates the server but for its handler.
+    /// </summary>
+    /// <param name="options">
+    /// The options, already validated.
+    /// </param>
+    /// <param name="logger">
+    /// The logger.
+    /// </param>
+    /// <param name="time">
+    /// The clock every deadline is measured on, and that runs the sweep's timer.
+    /// </param>
+    /// <param name="pool">
+    /// The pool every buffer is rented from.
+    /// </param>
+    /// <param name="pools">
+    /// The pools of the queues and exchange records, or <see langword="null"/> for the server's own.
+    /// </param>
+    private MqttWireServer(MqttWireServerOptions options, ILogger<MqttWireServer> logger, TimeProvider time,
+        ArrayPool<byte> pool, ServerPools? pools)
     {
-        Handler = handler;
         Options = options;
         Logger = logger;
         Time = time;
@@ -70,9 +130,13 @@ public sealed class MqttWireServer
     public int ConnectionCount => Registry.ActiveCount;
 
     /// <summary>
-    /// Gets the host's handler.
+    /// Gets the host's handler. <see cref="Start"/> resolves it, and so does the first connection of a server that
+    /// was not started, so every later read is that of a field.
     /// </summary>
-    internal IMqttWireHandler Handler { get; }
+    /// <exception cref="Exception">
+    /// The handler was not resolved yet and could not be: its constructor threw, or it is not registered.
+    /// </exception>
+    internal IMqttWireHandler Handler => _handler ?? ResolveHandler();
 
     /// <summary>
     /// Gets the options.
@@ -166,14 +230,20 @@ public sealed class MqttWireServer
     }
 
     /// <summary>
-    /// Creates the one timer that runs the sweep every <see cref="ServerLimits.SweepInterval"/>, from
-    /// <see cref="Time"/>.
+    /// Resolves the host's handler, when the server was not given it, and creates the one timer that runs the sweep
+    /// every <see cref="ServerLimits.SweepInterval"/>, from <see cref="Time"/>. The host calls it before the web
+    /// server accepts a connection, so the handler exists before the first connection needs it.
     /// </summary>
     /// <exception cref="InvalidOperationException">
     /// The server was already started, or has been stopped; nothing changes.
     /// </exception>
+    /// <exception cref="Exception">
+    /// The handler could not be resolved: its constructor threw, or it is not registered. The server is not started.
+    /// </exception>
     internal void Start()
     {
+        // Outside the lock: the handler's constructor is the host's code and may call the server.
+        _ = Handler;
         lock (Registry.Gate)
         {
             if (_sweepTimer is not null)
@@ -276,10 +346,34 @@ public sealed class MqttWireServer
     /// A task that completes when the connection is Closed. It does not fail for anything the client does; it
     /// fails only when the WebSocket cannot be accepted.
     /// </returns>
+    /// <exception cref="Exception">
+    /// The server was not started and its handler could not be resolved; no connection is created.
+    /// </exception>
     internal Task RunConnectionAsync(HttpContext httpContext, IMqttLink? link)
     {
+        // A server that was not started resolves its handler here, before the connection can reach any lock.
+        _ = Handler;
         MqttWireConnection connection = new(this, httpContext);
         return connection.RunAsync(link);
+    }
+
+    /// <summary>
+    /// Resolves the host's handler from the services the registration gave the server. The container creates the
+    /// singleton once, whatever the number of threads that ask, so every caller gets the same handler and no lock is
+    /// needed here.
+    /// </summary>
+    /// <returns>
+    /// The handler.
+    /// </returns>
+    /// <exception cref="Exception">
+    /// The handler's constructor threw, or no handler is registered; nothing is kept, and a later call tries again.
+    /// </exception>
+    private IMqttWireHandler ResolveHandler()
+    {
+        // A server without a handler was given the services to resolve it from: the two constructors set one or the other.
+        IMqttWireHandler handler = _services!.GetRequiredService<IMqttWireHandler>();
+        Volatile.Write(ref _handler, handler);
+        return handler;
     }
 
     /// <summary>

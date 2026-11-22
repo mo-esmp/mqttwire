@@ -215,6 +215,11 @@ public sealed class MqttWireServer
 
 **The rules for a handler**
 
+- The handler is a singleton that dependency injection creates when the host starts, before
+  the first connection. The server is built without it and resolves it at its start, so a
+  handler may take `MqttWireServer` in its constructor, to look connections up with
+  `TryGetConnection`. A handler whose constructor throws makes the host's start fail with that
+  exception.
 - `OnSubscribe`, `OnUnsubscribe` and `OnPublish` are called from the connection's read path:
   for one connection one at a time, in the order the packets arrived; for different
   connections at the same time. They are synchronous and must return quickly. Work that takes
@@ -1383,6 +1388,8 @@ owner:
     2 s after the token was cancelled; the stop then no longer waits for that connection and
     logs event 22; its slot and a read buffer kept behind the CONNECT stay held until the call
     returns (6.6, 6.12).
+34. The server resolves its handler when it starts, not when it is built, so a handler may take
+    `MqttWireServer` in its constructor (6.2).
 
 ## 11. Left to the builder
 
@@ -1394,8 +1401,9 @@ What was left here, and what step 3 decided:
   `object?`, decided by the owner (section 9).
 - How the registration and mapping calls look, and how the server joins the host's shutdown:
   `AddMqttWireServer<THandler>` registers the server through a factory (it has no public
-  constructor), the handler as a singleton that must not depend on scoped services, and the
-  options with validation (6.2); it throws `InvalidOperationException` when called twice.
+  constructor), the handler as a singleton that must not depend on scoped services and that the
+  server resolves when it starts, and the options with validation (6.2); it throws
+  `InvalidOperationException` when called twice.
   `MapMqttWire` returns `IEndpointConventionBuilder` and throws `InvalidOperationException`
   when the server is not registered; a request that arrives without `UseWebSockets()` throws
   `InvalidOperationException` naming it. An internal `IHostedLifecycleService` starts the sweep

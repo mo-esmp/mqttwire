@@ -19,8 +19,10 @@ public static class MqttWireServiceCollectionExtensions
     /// <see cref="MqttWireEndpointRouteBuilderExtensions.MapMqttWire"/>.
     /// </summary>
     /// <typeparam name="THandler">
-    /// The host's handler, registered as a singleton: created once by dependency injection and called for every
-    /// connection. It must not depend on scoped services.
+    /// The host's handler, registered as a singleton: created once by dependency injection, when the host starts,
+    /// and called for every connection. It must not depend on scoped services. It may take
+    /// <see cref="MqttWireServer"/> in its constructor, to look connections up. A constructor that throws makes the
+    /// host's start fail with that exception.
     /// </typeparam>
     /// <param name="services">
     /// The service collection.
@@ -66,8 +68,9 @@ public static class MqttWireServiceCollectionExtensions
         options.ValidateOnStart();
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IValidateOptions<MqttWireServerOptions>, MqttWireServerOptionsValidator>());
+        // The handler is not resolved here but when the server starts, so that it may take the server itself.
         services.AddSingleton(static provider => new MqttWireServer(
-            provider.GetRequiredService<IMqttWireHandler>(),
+            provider,
             provider.GetRequiredService<IOptions<MqttWireServerOptions>>().Value,
             provider.GetRequiredService<ILogger<MqttWireServer>>(),
             TimeProvider.System,

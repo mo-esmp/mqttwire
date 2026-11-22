@@ -11,6 +11,7 @@ using Microsoft.Extensions.Time.Testing;
 using MqttWire.Server;
 using MqttWire.Server.Internal;
 using MqttWire.Tests.Client;
+using MqttWire.Tests.Link;
 
 namespace MqttWire.Tests.Server;
 
@@ -70,6 +71,91 @@ public sealed class HostingTests
         first.Time.ShouldBeSameAs(TimeProvider.System);
         first.Pool.ShouldBeSameAs(ArrayPool<byte>.Shared);
         host.Services.GetServices<IHostedService>().OfType<MqttWireServerLifetime>().ShouldHaveSingleItem();
+    }
+
+    /// <summary>
+    /// Proves that a handler that takes <see cref="MqttWireServer"/> in its constructor, as a host does that looks
+    /// connections up, resolves: the host starts, the handler was given the one server, and the server calls that
+    /// handler.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task StartAsync_HandlerTakesTheServerInItsConstructor_StartsWithTheSameServer()
+    {
+        // Arrange
+        HostApplicationBuilder builder = Host.CreateEmptyApplicationBuilder(settings: null);
+        builder.Services.AddMqttWireServer<ServerTakingHandler>();
+        using IHost host = builder.Build();
+
+        // Act: on another thread, so that a resolution that never returns fails the test instead of hanging it.
+        await Task.Run(() => host.StartAsync(CancellationToken.None)).Within("The host's start");
+        MqttWireServer server = host.Services.GetRequiredService<MqttWireServer>();
+        IMqttWireHandler handler = host.Services.GetRequiredService<IMqttWireHandler>();
+        await host.StopAsync(CancellationToken.None).Within("The host's stop");
+
+        // Assert
+        handler.ShouldBeOfType<ServerTakingHandler>().Server.ShouldBeSameAs(server);
+        server.Handler.ShouldBeSameAs(handler);
+    }
+
+    /// <summary>
+    /// Proves that a handler whose constructor throws makes the host's start fail with that exception, and the host
+    /// never reaches the started state.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task StartAsync_HandlerConstructorThrows_FailsTheStartWithThatException()
+    {
+        // Arrange
+        HostApplicationBuilder builder = Host.CreateEmptyApplicationBuilder(settings: null);
+        builder.Services.AddMqttWireServer<FailingHandler>();
+        using IHost host = builder.Build();
+        IHostApplicationLifetime lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>();
+        MqttWireServer resolvedBeforeTheStart = host.Services.GetRequiredService<MqttWireServer>();
+
+        // Act
+        InvalidOperationException thrown =
+            await Should.ThrowAsync<InvalidOperationException>(() => host.StartAsync(CancellationToken.None));
+
+        // Assert
+        thrown.Message.ShouldBe(FailingHandler.Message);
+        resolvedBeforeTheStart.ShouldNotBeNull();
+        lifetime.ApplicationStarted.IsCancellationRequested.ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// Proves that a connection that reaches a server the host has not started yet still finds the handler: it is
+    /// resolved then, once, and called.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task RunConnectionAsync_BeforeTheHostStarted_ResolvesTheHandlerAndCallsIt()
+    {
+        // Arrange
+        HostApplicationBuilder builder = Host.CreateEmptyApplicationBuilder(settings: null);
+        builder.Services.AddMqttWireServer<RecordingHandler>();
+        using IHost host = builder.Build();
+        MqttWireServer server = host.Services.GetRequiredService<MqttWireServer>();
+        MemoryLink link = new();
+
+        // Act
+        Task run = server.RunConnectionAsync(new DefaultHttpContext(), link);
+        link.Deliver(ServerPackets.Connect);
+        byte[] written = link.TakeWritten();
+        link.EndFromPeer();
+        await run.Within("The connection's run");
+
+        // Assert
+        written.ShouldBe(ServerPackets.ConnAck);
+        RecordingHandler handler = host.Services.GetRequiredService<IMqttWireHandler>().ShouldBeOfType<RecordingHandler>();
+        server.Handler.ShouldBeSameAs(handler);
+        handler.CallsNow().ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-", "OnClosed c1 ConnectionLost"]);
     }
 
     /// <summary>
@@ -393,6 +479,135 @@ public sealed class HostingTests
         {
             WasServerStopping = server.IsStopping;
             return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>
+    /// A handler that takes the server in its constructor, as a host does that looks connections up.
+    /// </summary>
+    /// <param name="server">
+    /// The server, from dependency injection.
+    /// </param>
+    private sealed class ServerTakingHandler(MqttWireServer server) : AcceptingHandler
+    {
+        /// <summary>
+        /// Gets the server the handler was given.
+        /// </summary>
+        public MqttWireServer Server { get; } = server;
+    }
+
+    /// <summary>
+    /// A handler whose constructor throws.
+    /// </summary>
+    private sealed class FailingHandler : AcceptingHandler
+    {
+        /// <summary>
+        /// The message of the exception the constructor throws.
+        /// </summary>
+        public const string Message = "The handler cannot be created.";
+
+        /// <summary>
+        /// Throws, as a handler does whose own dependencies are missing.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">
+        /// Always.
+        /// </exception>
+        public FailingHandler() => throw new InvalidOperationException(Message);
+    }
+
+    /// <summary>
+    /// A handler that accepts everything and keeps nothing, the base of the handlers of these tests, which differ
+    /// only in their constructors.
+    /// </summary>
+    private abstract class AcceptingHandler : IMqttWireHandler
+    {
+        /// <summary>
+        /// Accepts the connection with no state.
+        /// </summary>
+        /// <param name="request">
+        /// The CONNECT.
+        /// </param>
+        /// <param name="cancellationToken">
+        /// Not used.
+        /// </param>
+        /// <returns>
+        /// An acceptance.
+        /// </returns>
+        public ValueTask<MqttConnectResult> OnConnectAsync(MqttConnectRequest request,
+            CancellationToken cancellationToken) => ValueTask.FromResult(MqttConnectResult.Accept());
+
+        /// <summary>
+        /// Admits the connection.
+        /// </summary>
+        /// <param name="connection">
+        /// The new connection.
+        /// </param>
+        /// <param name="replaces">
+        /// The connection that has the client id now, or <see langword="null"/>.
+        /// </param>
+        /// <returns>
+        /// An acceptance.
+        /// </returns>
+        public MqttAdmitResult OnAdmit(MqttWireConnection connection, MqttWireConnection? replaces) =>
+            MqttAdmitResult.Accepted;
+
+        /// <summary>
+        /// Grants the subscription at the QoS asked for.
+        /// </summary>
+        /// <param name="connection">
+        /// The subscribing connection.
+        /// </param>
+        /// <param name="topicFilter">
+        /// The topic filter.
+        /// </param>
+        /// <param name="requested">
+        /// The QoS asked for.
+        /// </param>
+        /// <returns>
+        /// A grant of <paramref name="requested"/>.
+        /// </returns>
+        public MqttSubscribeResult OnSubscribe(MqttWireConnection connection, string topicFilter, MqttQoS requested) =>
+            MqttSubscribeResult.Granted(requested);
+
+        /// <summary>
+        /// Does nothing.
+        /// </summary>
+        /// <param name="connection">
+        /// The connection that unsubscribed.
+        /// </param>
+        /// <param name="topicFilter">
+        /// The topic filter removed.
+        /// </param>
+        public void OnUnsubscribe(MqttWireConnection connection, string topicFilter)
+        {
+        }
+
+        /// <summary>
+        /// Accepts the publish.
+        /// </summary>
+        /// <param name="connection">
+        /// The publishing connection.
+        /// </param>
+        /// <param name="publish">
+        /// The message.
+        /// </param>
+        /// <returns>
+        /// An acceptance.
+        /// </returns>
+        public MqttPublishResult OnPublish(MqttWireConnection connection, in MqttPublish publish) =>
+            MqttPublishResult.Accepted;
+
+        /// <summary>
+        /// Does nothing.
+        /// </summary>
+        /// <param name="connection">
+        /// The connection that ended.
+        /// </param>
+        /// <param name="reason">
+        /// Why it ended.
+        /// </param>
+        public void OnClosed(MqttWireConnection connection, MqttCloseReason reason)
+        {
         }
     }
 }

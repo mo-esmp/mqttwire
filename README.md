@@ -89,8 +89,9 @@ public sealed class EchoHandler : IMqttWireHandler
 - `TrySend` returns at once, whatever the network does: `Taken`, `NotOpen`, `TooLarge` or
   `Evicted`. It does not copy the topic or the payload, so one payload can go to any number of
   connections; do not change it afterwards. Keep an `MqttTopic` you send to often.
-- `MqttWireServer` (from dependency injection) finds a connection by client id with
-  `TryGetConnection` and counts the connections with `ConnectionCount`. Both include a
+- `MqttWireServer` (from dependency injection; your handler may take it in its constructor)
+  finds a connection by client id with `TryGetConnection` and counts the connections with
+  `ConnectionCount`. Both include a
   connection that is closing, until it has closed; `TrySend` on one that is closing answers
   `NotOpen`. `connection.Close(reasonCode)` ends a connection.
 
@@ -109,7 +110,8 @@ app.Run();
 ```
 
 `AddMqttWireServer<THandler>` registers your handler as a singleton (it must not depend on scoped
-services), the options and the server, and ties the server to the host: when the host stops,
+services; it is created when the host starts), the options and the server, and ties the server
+to the host: when the host stops,
 every connection is closed with `0x8B` (server shutting down), and the server waits for the
 connections to end, every `OnClosed` included, before the web server stops. `MapMqttWire` maps
 the endpoint and returns its `IEndpointConventionBuilder`, so you can add authorization and other
