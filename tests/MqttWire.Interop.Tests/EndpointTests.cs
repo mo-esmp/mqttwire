@@ -1,10 +1,8 @@
-﻿using System.Diagnostics;
-using System.Net;
+﻿using System.Net;
 using System.Net.Http;
 using System.Net.Quic;
 using System.Net.Sockets;
 using System.Net.WebSockets;
-using System.Reflection;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Builder;
@@ -135,30 +133,6 @@ public sealed class EndpointTests(ITestOutputHelper output)
         response.Version.ShouldBe(HttpVersion.Version30);
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
         host.Logs.Entries.ShouldNotContain(entry => entry.Exception != null);
-    }
-
-    /// <summary>
-    /// Proves a WebSocket request that arrives while the server stops is answered with HTTP 503: the stop is held open
-    /// by a client that does not answer the server's close, so Kestrel still takes requests.
-    /// </summary>
-    [Fact]
-    public async Task Request_WhileTheServerStops_IsAnsweredWith503()
-    {
-        // Arrange
-        await using ServerHost host = await ServerHost.StartAsync();
-        await using RawWebSocket silent = await host.ConnectRawAsync();
-        Task stopped = host.StopAsync();
-        (await silent.ReceiveAsync().WaitAsync(s_failSafe)).Payload.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ServerShuttingDown));
-        using ClientWebSocket late = new();
-        late.Options.CollectHttpResponseDetails = true;
-        late.Options.AddSubProtocol("mqtt");
-
-        // Act
-        await Should.ThrowAsync<WebSocketException>(() => late.ConnectAsync(host.WebSocketUri, CancellationToken.None).WaitAsync(s_failSafe));
-        await stopped.WaitAsync(s_failSafe);
-
-        // Assert
-        late.HttpStatusCode.ShouldBe(HttpStatusCode.ServiceUnavailable);
     }
 
     /// <summary>
@@ -345,66 +319,6 @@ public sealed class EndpointTests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// Proves the host's stop with ten open connections, five of MQTTnet's client and five of MqttWire's, ends within
-    /// five seconds, and every client is told "server shutting down" (0x8B) with a DISCONNECT.
-    /// </summary>
-    [Fact]
-    public async Task StopAsync_HostWithOpenConnections_EndsWithinFiveSeconds()
-    {
-        // Arrange
-        await using ServerHost host = await ServerHost.StartAsync();
-        List<Task<MqttClientDisconnectedEventArgs>> netEnds = [];
-        List<Task<MqttClientCloseInfo>> wireEnds = [];
-        List<MqttWireClient> wireClients = [];
-        try
-        {
-            for (int i = 0; i < 5; i++)
-            {
-                IMqttClient netClient = await host.ConnectMqttNetClientAsync($"net-{i}");
-                TaskCompletionSource<MqttClientDisconnectedEventArgs> netEnd = new(TaskCreationOptions.RunContinuationsAsynchronously);
-                netClient.DisconnectedAsync += args =>
-                {
-                    netEnd.TrySetResult(args);
-                    return Task.CompletedTask;
-                };
-                netEnds.Add(netEnd.Task);
-
-                TaskCompletionSource<MqttClientCloseInfo> wireEnd = new(TaskCreationOptions.RunContinuationsAsynchronously);
-                MqttWireClient wireClient = new(new MqttWireClientOptions
-                {
-                    Uri = host.WebSocketUri, ClientId = $"wire-{i}", OnClosed = info => wireEnd.TrySetResult(info),
-                });
-                wireClients.Add(wireClient);
-                wireEnds.Add(wireEnd.Task);
-                (await wireClient.ConnectAsync().WaitAsync(s_failSafe)).IsConnected.ShouldBeTrue();
-            }
-
-            host.Server.ConnectionCount.ShouldBe(10);
-            Stopwatch watch = Stopwatch.StartNew();
-
-            // Act
-            await host.StopAsync().WaitAsync(s_failSafe);
-            watch.Stop();
-            MqttClientDisconnectedEventArgs[] netResults = await Task.WhenAll(netEnds).WaitAsync(s_failSafe);
-            MqttClientCloseInfo[] wireResults = await Task.WhenAll(wireEnds).WaitAsync(s_failSafe);
-
-            // Assert
-            watch.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(5));
-            host.Server.ConnectionCount.ShouldBe(0);
-            netResults.ShouldAllBe(args => args.Reason == MqttClientDisconnectReason.ServerShuttingDown);
-            wireResults.ShouldAllBe(info => info.Reason == MqttClientCloseReason.ServerDisconnected
-                                            && info.ReasonCode == MqttReasonCode.ServerShuttingDown);
-        }
-        finally
-        {
-            foreach (MqttWireClient wireClient in wireClients)
-            {
-                await wireClient.DisposeAsync();
-            }
-        }
-    }
-
-    /// <summary>
     /// Proves an application that maps the endpoint but never calls <c>UseWebSockets()</c> fails a WebSocket request
     /// with HTTP 500, and the error logged names the missing call.
     /// </summary>
@@ -429,45 +343,55 @@ public sealed class EndpointTests(ITestOutputHelper output)
 
     /// <summary>
     /// Proves that when the sweep aborts a link at the close deadline (the client does not answer the server's
-    /// close), the host's <see cref="IMqttWireHandler.OnClosed"/> does not run on the sweep's thread: the aborted read
-    /// ends on a thread-pool thread of Kestrel's, so no frame of the sweep, or of the abort, is on its stack.
+    /// close), the host's <see cref="IMqttWireHandler.OnClosed"/> does not run inside that abort, on the sweep's
+    /// thread. The sweep's timer thread cannot be wrapped by a test, so the abort itself is: the application wraps
+    /// every WebSocket it accepts (<see cref="AbortWatch"/>), which marks whichever thread aborts for as long as the
+    /// abort lasts, and <c>OnClosed</c> records whether its own thread carries that mark.
     /// </summary>
     [Fact]
-    public async Task OnClosed_LinkAbortedAtTheCloseDeadline_DoesNotRunOnTheSweepsThread()
+    public async Task OnClosed_LinkAbortedAtTheCloseDeadline_DoesNotRunInsideTheSweepsAbort()
     {
         // Arrange
-        await using ServerHost host = await ServerHost.StartAsync<StackRecordingHandler>(new ServerHost.Setup());
-        StackRecordingHandler handler = (StackRecordingHandler)host.Services.GetRequiredService<IMqttWireHandler>();
+        AbortWatch watch = new();
+        await using ServerHost host = await ServerHost.StartAsync<ClosedRecordingHandler>(new ServerHost.Setup
+        {
+            ConfigureBuilder = builder => builder.Services.AddSingleton(watch), ConfigureApp = watch.Use,
+        });
+        ClosedRecordingHandler handler = (ClosedRecordingHandler)host.Services.GetRequiredService<IMqttWireHandler>();
         await using RawWebSocket client = await host.ConnectRawAsync();
         host.Server.TryGetConnection("c1", out MqttWireConnection? connection).ShouldBeTrue();
         connection.Close(MqttReasonCode.AdministrativeAction);
-        (await client.ReceiveAsync().WaitAsync(s_failSafe)).Payload.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.AdministrativeAction));
+        (await client.ReceiveAsync().WaitAsync(s_failSafe)).Payload
+            .ShouldBe(ServerPackets.Disconnect(MqttReasonCode.AdministrativeAction));
         (await client.ReceiveAsync().WaitAsync(s_failSafe)).Opcode.ShouldBe(RawWebSocket.Close);
 
         // Act: the client does not answer the close, so the sweep aborts the link 2 to 4 seconds later.
-        string[] stack = await handler.Closed.WaitAsync(s_failSafe);
+        (MqttCloseReason Reason, bool InsideAnAbort) closed = await handler.Closed.WaitAsync(s_failSafe);
 
         // Assert
-        stack.ShouldNotContain(frame => frame == nameof(MqttWireServer) + ".Sweep");
-        stack.ShouldNotContain(frame => frame.EndsWith(".CheckDeadlines", StringComparison.Ordinal));
-        stack.ShouldNotContain(frame => frame.EndsWith(".Abort", StringComparison.Ordinal));
-        stack.ShouldContain("ThreadPoolWorkQueue.Dispatch");
+        closed.Reason.ShouldBe(MqttCloseReason.ClosedByHost);
+        watch.Aborts.ShouldBeGreaterThan(0);
+        closed.InsideAnAbort.ShouldBeFalse();
     }
 
     /// <summary>
     /// Proves that when the host's stop aborts a link whose write is pending, the host's
-    /// <see cref="IMqttWireHandler.OnClosed"/> does not run on the thread that called the stop: no frame of the stop,
-    /// or of the abort, is on its stack.
+    /// <see cref="IMqttWireHandler.OnClosed"/> does not run inside that abort, on the thread that stops the server:
+    /// the application wraps every WebSocket it accepts (<see cref="AbortWatch"/>), which marks whichever thread
+    /// aborts for as long as the abort lasts, and <c>OnClosed</c> records whether its own thread carries that mark.
     /// </summary>
     [Fact]
-    public async Task OnClosed_LinkAbortedByTheStop_DoesNotRunOnTheStoppingThread()
+    public async Task OnClosed_LinkAbortedByTheStop_DoesNotRunInsideTheStopsAbort()
     {
         // Arrange
-        await using ServerHost host = await ServerHost.StartAsync<StackRecordingHandler>(new ServerHost.Setup
+        AbortWatch watch = new();
+        await using ServerHost host = await ServerHost.StartAsync<ClosedRecordingHandler>(new ServerHost.Setup
         {
             ConfigureServer = options => options.MaxOutgoingBytes = 64 << 20,
+            ConfigureBuilder = builder => builder.Services.AddSingleton(watch),
+            ConfigureApp = watch.Use,
         });
-        StackRecordingHandler handler = (StackRecordingHandler)host.Services.GetRequiredService<IMqttWireHandler>();
+        ClosedRecordingHandler handler = (ClosedRecordingHandler)host.Services.GetRequiredService<IMqttWireHandler>();
         await using RawWebSocket client = await host.ConnectRawAsync(receiveBufferSize: 1024);
         host.Server.TryGetConnection("c1", out MqttWireConnection? connection).ShouldBeTrue();
         for (int i = 0; i < 200; i++)
@@ -479,22 +403,23 @@ public sealed class EndpointTests(ITestOutputHelper output)
 
         // Act
         Task stopped = host.StopAsync();
-        string[] stack = await handler.Closed.WaitAsync(s_failSafe);
+        (MqttCloseReason Reason, bool InsideAnAbort) closed = await handler.Closed.WaitAsync(s_failSafe);
         await stopped.WaitAsync(s_failSafe);
 
         // Assert
-        stack.ShouldNotContain(frame => frame.EndsWith(".BeginStop", StringComparison.Ordinal));
-        stack.ShouldNotContain(frame => frame.EndsWith(".Abort", StringComparison.Ordinal));
-        stack.ShouldContain("ThreadPoolWorkQueue.Dispatch");
+        closed.Reason.ShouldBe(MqttCloseReason.ServerStopping);
+        watch.Aborts.ShouldBeGreaterThan(0);
+        closed.InsideAnAbort.ShouldBeFalse();
     }
 
     /// <summary>
-    /// Tells whether a failed read of the raw client is how the abort of the link reaches it on this platform: a reset
-    /// (<see cref="SocketError.ConnectionReset"/>) on every platform, which is what Windows shows (it resets the
-    /// connection, and drops what the client had not read yet); and, on other platforms only, also the end of the
-    /// stream with no close frame, because Kestrel ends an aborted connection with a shutdown, after which Linux sends
-    /// what its send buffer holds and then a FIN, which can come in the middle of a frame. A close frame never takes
-    /// this path, so an end with a close of another status than 1003 still fails the test.
+    /// Tells whether a failed read of the raw client is how the abort of the link reaches it: a reset
+    /// (<see cref="SocketError.ConnectionReset"/>, or <see cref="SocketError.ConnectionAborted"/>, which Windows
+    /// reports when the reset meets a pending send of the client's own); or the end of the stream with no close
+    /// frame, on every platform, because an abort that finds no send outstanding at the socket ends the connection
+    /// with a shutdown: the client reads what was already sent and then the end, which can come in the middle of a
+    /// frame. A stream cut short is not a corrupted stream: corruption is a close frame or foreign bytes inside a
+    /// frame, which the checks of each frame still fail on, as does a close frame with another status than 1003.
     /// </summary>
     /// <param name="exception">
     /// What the read threw.
@@ -503,8 +428,11 @@ public sealed class EndpointTests(ITestOutputHelper output)
     /// <see langword="true"/> when the read ended because the server aborted the link.
     /// </returns>
     private static bool IsAbortSeenByTheClient(IOException exception) =>
-        exception.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionReset }
-        || (!OperatingSystem.IsWindows() && exception is EndOfStreamException);
+        exception is EndOfStreamException
+        || exception.InnerException is SocketException
+        {
+            SocketErrorCode: SocketError.ConnectionReset or SocketError.ConnectionAborted
+        };
 
     /// <summary>
     /// Sends a GET to the endpoint at an exact HTTP version, accepting any server certificate.
@@ -618,20 +546,25 @@ public sealed class EndpointTests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// A handler that accepts everything and records, in <see cref="IMqttWireHandler.OnClosed"/>, the frames of the
-    /// stack it is called on.
+    /// A handler that accepts everything and records, in <see cref="IMqttWireHandler.OnClosed"/>, why the connection
+    /// ended and whether the call runs inside an abort of a WebSocket, on the thread that aborts.
     /// </summary>
-    private sealed class StackRecordingHandler : IMqttWireHandler
+    /// <param name="watch">
+    /// The watch of the application's WebSockets.
+    /// </param>
+    private sealed class ClosedRecordingHandler(AbortWatch watch) : IMqttWireHandler
     {
         /// <summary>
-        /// Completed by the first <see cref="OnClosed"/> with its stack, each frame as "Type.Method".
+        /// Completed by the first <see cref="OnClosed"/>.
         /// </summary>
-        private readonly TaskCompletionSource<string[]> _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<(MqttCloseReason Reason, bool InsideAnAbort)> _closed =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         /// <summary>
-        /// Gets a task that completes with the stack of the first <see cref="OnClosed"/>.
+        /// Gets a task that completes with the reason of the first <see cref="OnClosed"/> and whether it ran inside
+        /// an abort.
         /// </summary>
-        public Task<string[]> Closed => _closed.Task;
+        public Task<(MqttCloseReason Reason, bool InsideAnAbort)> Closed => _closed.Task;
 
         /// <summary>
         /// Accepts every client.
@@ -708,7 +641,7 @@ public sealed class EndpointTests(ITestOutputHelper output)
         public MqttPublishResult OnPublish(MqttWireConnection connection, in MqttPublish publish) => MqttPublishResult.Accepted;
 
         /// <summary>
-        /// Records the frames of the stack this call runs on.
+        /// Records why the connection ended and whether this call runs inside an abort.
         /// </summary>
         /// <param name="connection">
         /// The connection that ended.
@@ -716,17 +649,7 @@ public sealed class EndpointTests(ITestOutputHelper output)
         /// <param name="reason">
         /// Why it ended.
         /// </param>
-        public void OnClosed(MqttWireConnection connection, MqttCloseReason reason)
-        {
-            StackFrame[] frames = new StackTrace().GetFrames();
-            string[] names = new string[frames.Length];
-            for (int i = 0; i < frames.Length; i++)
-            {
-                MethodBase? method = frames[i].GetMethod();
-                names[i] = $"{method?.DeclaringType?.Name}.{method?.Name}";
-            }
-
-            _closed.TrySetResult(names);
-        }
+        public void OnClosed(MqttWireConnection connection, MqttCloseReason reason) =>
+            _closed.TrySetResult((reason, watch.IsCurrentThreadAborting));
     }
 }

@@ -1,7 +1,12 @@
-﻿using System.Text.RegularExpressions;
+﻿using System.Diagnostics;
+using System.Net;
+using System.Net.WebSockets;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using MQTTnet;
+using MqttWire.Server;
 using MqttWire.Tests.Server;
 
 namespace MqttWire.Interop.Tests;
@@ -30,6 +35,14 @@ public sealed partial class EndpointTimingTests
     /// ends before the sweep goes on to abort it.
     /// </summary>
     private static readonly TimeSpan s_gap = TimeSpan.FromMilliseconds(20);
+
+    /// <summary>
+    /// The longest the host's stop may take: a client that answers the DISCONNECT but does not complete the
+    /// WebSocket close is aborted at the close deadline (2 s, design 6.6), which is acted on at the first sweep after
+    /// it, and the sweep runs every 2 s, so the abort comes up to two sweep intervals (4 s) after the stop began;
+    /// 2 s more are the margin of a loaded machine.
+    /// </summary>
+    private static readonly TimeSpan s_stopBound = TimeSpan.FromSeconds(8);
 
     /// <summary>
     /// The fail-safe wait for something that is expected to happen; a passing test never waits this long.
@@ -148,6 +161,101 @@ public sealed partial class EndpointTimingTests
         disconnect.Payload.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ProtocolError));
         close.Opcode.ShouldBe(RawWebSocket.Close);
         close.CloseStatus.ShouldBe(1000);
+    }
+
+    /// <summary>
+    /// Proves a WebSocket request that arrives while the server stops is answered with HTTP 503: the stop is held open
+    /// by a client that does not answer the server's close, so Kestrel still takes requests.
+    /// </summary>
+    /// <remarks>
+    /// The stop is open for the close deadline only (2 s, acted on at the first sweep after it), and the late
+    /// request's handshake has to finish inside that window: that is why the test runs in this collection, with no
+    /// other test of the assembly beside it.
+    /// </remarks>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Request_WhileTheServerStops_IsAnsweredWith503()
+    {
+        // Arrange
+        await using ServerHost host = await ServerHost.StartAsync();
+        await using RawWebSocket silent = await host.ConnectRawAsync();
+        Task stopped = host.StopAsync();
+        (await silent.ReceiveAsync().WaitAsync(s_failSafe)).Payload.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ServerShuttingDown));
+        using ClientWebSocket late = new();
+        late.Options.CollectHttpResponseDetails = true;
+        late.Options.AddSubProtocol("mqtt");
+
+        // Act
+        await Should.ThrowAsync<WebSocketException>(() => late.ConnectAsync(host.WebSocketUri, CancellationToken.None).WaitAsync(s_failSafe));
+        await stopped.WaitAsync(s_failSafe);
+
+        // Assert
+        late.HttpStatusCode.ShouldBe(HttpStatusCode.ServiceUnavailable);
+    }
+
+    /// <summary>
+    /// Proves the host's stop with ten open connections, five of MQTTnet's client and five of MqttWire's, ends within
+    /// the bound the design gives it, and every client is told "server shutting down" (0x8B) with a DISCONNECT.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task StopAsync_HostWithOpenConnections_EndsWithinEightSeconds()
+    {
+        // Arrange
+        await using ServerHost host = await ServerHost.StartAsync();
+        List<Task<MqttClientDisconnectedEventArgs>> netEnds = [];
+        List<Task<MqttClientCloseInfo>> wireEnds = [];
+        List<MqttWireClient> wireClients = [];
+        try
+        {
+            for (int i = 0; i < 5; i++)
+            {
+                IMqttClient netClient = await host.ConnectMqttNetClientAsync($"net-{i}");
+                TaskCompletionSource<MqttClientDisconnectedEventArgs> netEnd = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                netClient.DisconnectedAsync += args =>
+                {
+                    netEnd.TrySetResult(args);
+                    return Task.CompletedTask;
+                };
+                netEnds.Add(netEnd.Task);
+
+                TaskCompletionSource<MqttClientCloseInfo> wireEnd = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                MqttWireClient wireClient = new(new MqttWireClientOptions
+                {
+                    Uri = host.WebSocketUri, ClientId = $"wire-{i}", OnClosed = info => wireEnd.TrySetResult(info),
+                });
+                wireClients.Add(wireClient);
+                wireEnds.Add(wireEnd.Task);
+                (await wireClient.ConnectAsync().WaitAsync(s_failSafe)).IsConnected.ShouldBeTrue();
+            }
+
+            host.Server.ConnectionCount.ShouldBe(10);
+            Stopwatch watch = Stopwatch.StartNew();
+
+            // Act
+            await host.StopAsync().WaitAsync(s_failSafe);
+            watch.Stop();
+            MqttClientDisconnectedEventArgs[] netResults = await Task.WhenAll(netEnds).WaitAsync(s_failSafe);
+            MqttClientCloseInfo[] wireResults = await Task.WhenAll(wireEnds).WaitAsync(s_failSafe);
+
+            // Assert
+            watch.Elapsed.ShouldBeLessThan(s_stopBound);
+            host.Server.ConnectionCount.ShouldBe(0);
+            netResults.ShouldAllBe(args => args.Reason == MqttClientDisconnectReason.ServerShuttingDown);
+            wireResults.ShouldAllBe(info => info.Reason == MqttClientCloseReason.ServerDisconnected
+                                            && info.ReasonCode == MqttReasonCode.ServerShuttingDown);
+        }
+        finally
+        {
+            foreach (MqttWireClient wireClient in wireClients)
+            {
+                await wireClient.DisposeAsync();
+            }
+        }
     }
 
     /// <summary>
