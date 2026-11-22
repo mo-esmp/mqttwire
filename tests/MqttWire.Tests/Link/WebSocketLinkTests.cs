@@ -24,6 +24,35 @@ public sealed class WebSocketLinkTests
         => socket.SendAsync(bytes, WebSocketMessageType.Binary, true, CancellationToken.None);
 
     /// <summary>
+    /// Sends one binary message over a pair created inline, with the receiver carrying on from the message on this
+    /// thread before the send has returned. The test runner's synchronization context is taken off the thread
+    /// meanwhile: with it, .NET would queue what follows the receive to the thread pool, and a test could not tell
+    /// when it has run.
+    /// </summary>
+    /// <param name="socket">
+    /// The sending socket.
+    /// </param>
+    /// <param name="bytes">
+    /// The message payload.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the message has been sent.
+    /// </returns>
+    private static Task SendBinaryInlineAsync(WebSocket socket, byte[] bytes)
+    {
+        SynchronizationContext? context = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(syncContext: null);
+        try
+        {
+            return SendBinaryAsync(socket, bytes);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(context);
+        }
+    }
+
+    /// <summary>
     /// Reads from the link until the given number of bytes has arrived or the link ends.
     /// </summary>
     /// <param name="link">
@@ -373,6 +402,37 @@ public sealed class WebSocketLinkTests
 
         // Assert
         completedBeforeData.ShouldBeFalse();
+        bytes.ShouldBe(new byte[] { 0xC0, 0x00 });
+    }
+
+    /// <summary>
+    /// Proves an empty binary message, which a zero-byte receive takes whole, does not complete the wait for data,
+    /// and that the message with bytes that follows it does.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task WaitForDataAsync_EmptyBinaryMessage_GoesOnWaitingUntilDataArrives()
+    {
+        // Arrange
+        (WebSocket client, WebSocket server) = WebSocketPair.Create(inline: true);
+        using WebSocket clientSocket = client;
+        using WebSocket serverSocket = server;
+        WebSocketLink link = new(clientSocket);
+        ValueTask wait = link.WaitForDataAsync(CancellationToken.None);
+
+        // Act: over the inline pair the link has seen a message by the time its send returns.
+        await SendBinaryInlineAsync(serverSocket, []);
+        bool completedByTheEmptyMessage = wait.IsCompleted;
+        await SendBinaryInlineAsync(serverSocket, [0xC0, 0x00]);
+        bool completedByTheData = wait.IsCompleted;
+        await wait;
+        byte[] bytes = await ReadExactlyAsync(link, 2);
+
+        // Assert
+        completedByTheEmptyMessage.ShouldBeFalse();
+        completedByTheData.ShouldBeTrue();
         bytes.ShouldBe(new byte[] { 0xC0, 0x00 });
     }
 

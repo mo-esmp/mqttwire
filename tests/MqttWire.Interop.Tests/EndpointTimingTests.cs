@@ -25,6 +25,11 @@ public sealed partial class EndpointTimingTests
     private const int SilentSockets = 24;
 
     /// <summary>
+    /// A CONNECT with client id "c1" and keep-alive 30.
+    /// </summary>
+    private static readonly byte[] s_connect = Convert.FromHexString("100F00044D5154540502001E0000026331");
+
+    /// <summary>
     /// How long the logger holds the sweep after it has closed a socket, so that the server's run of that connection
     /// ends before the sweep goes on to abort it.
     /// </summary>
@@ -119,6 +124,37 @@ public sealed partial class EndpointTimingTests
         lines.Where(static line => line.Level >= LogLevel.Warning).ShouldBeEmpty();
         Volatile.Read(ref ended).ShouldBe(SilentSockets);
         later.StatusCode.ShouldBe(StatusCodes.Status101SwitchingProtocols);
+    }
+
+    /// <summary>
+    /// Proves, over Kestrel, that a WebSocket frame whose header announces a payload the client then withholds does
+    /// not pin a read buffer until the keep-alive deadline: the server closes the connection with DISCONNECT
+    /// <c>0x82</c> at the partial-packet deadline (10 s, acted on at the first sweep after it), long before the 45 s
+    /// of the client's keep-alive.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Frame_PayloadWithheld_ClosesWith0x82AtThePartialPacketDeadline()
+    {
+        // Arrange
+        await using ServerHost host = await ServerHost.StartAsync();
+        await using RawWebSocket client = await RawWebSocket.ConnectAsync(host.WebSocketUri);
+        await client.SendAsync(RawWebSocket.Binary, s_connect);
+        RawWebSocket.Frame connAck = await client.ReceiveAsync().WaitAsync(s_failSafe);
+
+        // Act: a final binary frame, masked, of two bytes, of which only the header and the mask are sent.
+        await client.SendRawAsync(new byte[] { 0x82, 0x82, 0x01, 0x02, 0x03, 0x04 });
+        RawWebSocket.Frame disconnect = await client.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(20));
+        RawWebSocket.Frame close = await client.ReceiveAsync().WaitAsync(s_failSafe);
+
+        // Assert
+        connAck.Payload[0].ShouldBe((byte)0x20);
+        disconnect.Opcode.ShouldBe(RawWebSocket.Binary);
+        disconnect.Payload.ShouldBe(new byte[] { 0xE0, 0x01, 0x82 });
+        close.Opcode.ShouldBe(RawWebSocket.Close);
+        close.CloseStatus.ShouldBe(1000);
     }
 
     /// <summary>

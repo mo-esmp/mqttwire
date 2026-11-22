@@ -28,25 +28,39 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
 
     /// <summary>
     /// Waits with a zero-byte receive, which completes when data is available and consumes nothing but the type of
-    /// the message it reports, which is remembered when it is text. It uses the pooling builder, so a wait that
+    /// the message it reports, which is remembered when it is text. An empty binary message is consumed whole by
+    /// that receive and brings no bytes, so it does not end the wait: the wait goes on, and a peer cannot make the
+    /// caller rent a buffer for a read that then has nothing to read. It uses the pooling builder, so a wait that
     /// suspends, as every idle wait does, allocates nothing in steady state.
     /// </summary>
     /// <param name="cancellationToken">
     /// Cancels the wait.
     /// </param>
     /// <returns>
-    /// A task that completes when a read would not wait. A close from the peer also completes it: the socket then
-    /// records the close, and the next <see cref="ReadAsync"/> returns 0.
+    /// A task that completes when a message has begun to arrive: a read then finds its bytes, or waits for them when
+    /// the peer sent the start of a message and withholds the rest, which the link cannot tell apart. A close from
+    /// the peer also completes it: the socket then records the close, and the next <see cref="ReadAsync"/> returns
+    /// 0.
     /// </returns>
     [AsyncMethodBuilder(builderType: typeof(PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask WaitForDataAsync(CancellationToken cancellationToken)
     {
-        ValueWebSocketReceiveResult result =
-            await webSocket.ReceiveAsync(buffer: Memory<byte>.Empty, cancellationToken: cancellationToken)
-                .ConfigureAwait(continueOnCapturedContext: false);
-        if (result.MessageType == WebSocketMessageType.Text)
+        while (true)
         {
-            _textReceived = true;
+            ValueWebSocketReceiveResult result =
+                await webSocket.ReceiveAsync(buffer: Memory<byte>.Empty, cancellationToken: cancellationToken)
+                    .ConfigureAwait(continueOnCapturedContext: false);
+            if (result.MessageType == WebSocketMessageType.Text)
+            {
+                _textReceived = true;
+                return;
+            }
+
+            // A zero-byte receive says "end of message" for a binary message only when the message is empty.
+            if (result.MessageType != WebSocketMessageType.Binary || !result.EndOfMessage)
+            {
+                return;
+            }
         }
     }
 

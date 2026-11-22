@@ -137,6 +137,49 @@ public sealed class ReadTests
     }
 
     /// <summary>
+    /// Proves that a read buffer rented for a wait that ended with nothing to read (a WebSocket frame whose payload
+    /// the peer withholds) is not held until the keep-alive deadline: the connection is closed with DISCONNECT 0x82
+    /// and <see cref="MqttCloseReason.PartialPacketTimedOut"/> ten seconds after the buffer was rented, and the
+    /// buffer comes back when the link ends at the close deadline.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Read_WaitEndsWithNothingToRead_ClosesWith0x82AtThePartialPacketDeadline()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+
+        // The wait after this PINGREQ completes at once, and the read that follows it waits, holding its buffer.
+        connection.Link.SkipWaits();
+        connection.Deliver(ClientPackets.PingReq);
+        byte[] pingResp = connection.TakeWritten();
+        bool held = server.GetCounts().HoldsReadBuffer;
+
+        // Act
+        harness.Advance(TimeSpan.FromSeconds(8));
+        byte[] writtenAt8 = connection.TakeWritten();
+        harness.Advance(TimeSpan.FromSeconds(2));
+        byte[] writtenAt10 = connection.TakeWritten();
+        int outstandingAt10 = harness.Pool.Outstanding;
+        harness.Advance(ServerLimits.CloseDeadline);
+        await connection.RunEnded();
+
+        // Assert
+        pingResp.ShouldBe(ClientPackets.PingResp);
+        held.ShouldBeTrue();
+        writtenAt8.ShouldBeEmpty();
+        writtenAt10.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ProtocolError));
+        outstandingAt10.ShouldBe(1);
+        connection.Link.IsAborted.ShouldBeTrue();
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 PartialPacketTimedOut"]);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves that a client with keep-alive 30 that sends nothing is still open after 44 seconds and is closed with
     /// DISCONNECT 0x8D and <see cref="MqttCloseReason.KeepAliveTimedOut"/> once 45 have passed.
     /// </summary>

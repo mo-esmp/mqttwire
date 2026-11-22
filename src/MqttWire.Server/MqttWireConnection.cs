@@ -48,9 +48,10 @@ public sealed partial class MqttWireConnection
     private PublishSkip _publishSkip = default;
 
     /// <summary>
-    /// When the first byte of a packet that is not complete yet was read, a timestamp of the server's clock; 0 when
-    /// no packet is incomplete. Written by the code that reads, read by the sweep for the partial-packet deadline;
-    /// it covers a packet that is being skipped.
+    /// When the read buffer was rented for a packet that is not complete yet, or, for a packet that follows a
+    /// complete one in the same read, when that read ended; a timestamp of the server's clock, and 0 when no buffer
+    /// is held for a packet. Written by the code that reads, read by the sweep for the partial-packet deadline; it
+    /// covers a packet that is being skipped, and a read that waits for bytes that never come.
     /// </summary>
     private long _partialPacketAt;
 

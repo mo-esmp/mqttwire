@@ -205,6 +205,12 @@ public sealed partial class MqttWireConnection
     /// skipped. While the connection is Closing, what is read is thrown away. The buffer is back in the pool before
     /// it returns, on every way out. It uses the pooling builder, so no state of it outlives the call.
     /// </summary>
+    /// <remarks>
+    /// The partial-packet deadline starts when the buffer is rented, not when the first byte is read: the wait can
+    /// end with nothing to read yet (a WebSocket frame whose payload the peer withholds), and the read would then
+    /// hold the buffer with no deadline but the keep-alive. So a rented read buffer is never held for longer than the
+    /// partial-packet deadline without a complete packet.
+    /// </remarks>
     /// <returns>
     /// <see langword="true"/> when every byte read was handled, or thrown away because the connection is Closing,
     /// and the connection waits for more; <see langword="false"/> when the peer ended the link or the handling of a
@@ -224,6 +230,10 @@ public sealed partial class MqttWireConnection
             if (mustRead)
             {
                 _readBuffer.Rent(_server.Pool, ServerLimits.FirstReadBufferBytes);
+                if (Volatile.Read(ref _partialPacketAt) == 0)
+                {
+                    Volatile.Write(ref _partialPacketAt, _server.Time.GetTimestamp());
+                }
             }
 
             while (true)
@@ -266,8 +276,9 @@ public sealed partial class MqttWireConnection
     /// <summary>
     /// Frames what is in the read buffer, in order: feeds a packet being skipped, hands each complete packet to
     /// <see cref="HandlePacket"/>, and starts the skip of a PUBLISH too large to be read whole. Then it stamps the
-    /// deadlines of reading: the last packet when one was completed, and the partial packet when one is left
-    /// incomplete (from the first byte of that packet, so a packet completed in this call clears the older stamp).
+    /// deadlines of reading: the last packet when one was completed, which also clears the stamp of the partial
+    /// packet, set when the buffer was rented (<see cref="HandleAvailableAsync"/>); and the partial packet anew when
+    /// one is left incomplete behind a packet completed in this call.
     /// </summary>
     /// <returns>
     /// What is left in the buffer.

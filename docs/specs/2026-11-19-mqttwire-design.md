@@ -452,6 +452,10 @@ Rules for the WebSocket implementation, both sides:
   was in progress, in which case the close rule of 6.6 aborts the link and the peer may see a
   reset instead.
 - A link starts at most one close frame, whichever side closes first.
+- An empty binary message carries no bytes and does not end the wait for data: the wait goes
+  on. What the link cannot see is a frame whose header has arrived and whose payload the peer
+  withholds: the wait ends and the read that follows waits, which on the server is bounded by
+  the partial-packet deadline (6.6).
 - **MQTT packets are not aligned to WebSocket messages.** One message may hold several packets
   or part of one. The receiver treats the incoming messages as one byte stream.
 - The server turns the WebSocket's own keep-alive pings off for this endpoint. MQTT has its
@@ -487,7 +491,7 @@ Authenticating state.
 |---|---|---|
 | Connect | 10 s from accept until a complete CONNECT has arrived | abort |
 | Authentication | 10 s for `OnConnectAsync` to answer | CONNACK `0x88` (server unavailable) if it can be written, then close |
-| Partial packet | 10 s from the first byte of a packet to its last | close (`0x82`) |
+| Partial packet | 10 s from the moment the read buffer is rented for a packet (the wait for data has ended) to the packet's last byte; for a packet that follows another in the same read, from that read | close (`0x82`) |
 | Keep-alive | 1.5 times the connection's keep-alive without a packet from the client, counted from the move to Active until the first packet, so a slow `OnConnectAsync` or `OnAdmit` does not use it up | close (`0x8D`) |
 | Write | 15 s for one piece of at most 64 KB handed to the link to complete | abort |
 | Acknowledgement | 30 s for each phase of a QoS 1 or 2 exchange | close (`0x82`) |
@@ -605,6 +609,11 @@ loop:
   it ends right after its identifier (at QoS 0, right after its topic) with no property length.
   An identifier of 0 is a protocol error (`0x82`), as in a PUBLISH read whole.
 - Any packet other than PUBLISH that is longer than 16 KB closes the connection with `0x95`.
+- **A rented read buffer is never held for longer than the partial-packet deadline without a
+  complete packet.** The deadline runs from the rent, not from the first byte read: the wait
+  can end with nothing to read yet (a WebSocket frame whose payload the peer withholds), and
+  the read would otherwise hold its buffer until the keep-alive deadline. In the Accepted
+  state the connect deadline is that bound.
 - The connection uses the request's own cancellation (`HttpContext.RequestAborted`) and
   `Abort()` on the link to stop a parked read.
 - **What the parked read keeps alive is part of the idle cost.** In C#, every local variable of
@@ -721,7 +730,7 @@ and the connection is closed with `0x95`.
 | What | Bound |
 |---|---|
 | Before CONNECT is complete | one read buffer of at most 16 KB, for at most 10 s; when packets came behind the CONNECT in it, the same buffer through Authenticating, for at most 10 s more |
-| Read buffer while a packet is arriving | `MaxPublishPayloadBytes` + 5 KiB, for at most 10 s per packet |
+| Read buffer while a packet is arriving | `MaxPublishPayloadBytes` + 5 KiB, for at most 10 s without a complete packet |
 | On the way out | `MaxOutgoingBytes` (1 MiB), plus one encoding buffer of at most 64 KB |
 | QoS exchange records | 256 for what the client sends, 256 for what the server sends, a few bytes each |
 | Waiting control packets | 1,024 and 64 KB, counted in `MaxOutgoingBytes` |
@@ -1349,6 +1358,8 @@ owner:
 31. A link that throws when it is aborted, and a sweep's check that throws, are logged as event
     20; the first ends nothing, the second ends that connection as a lost connection (6.6,
     6.12).
+32. The partial-packet deadline runs from the rent of the read buffer, and an empty binary
+    message does not end the link's wait for data, on the client too (6.5, 6.6).
 
 ## 11. Left to the builder
 

@@ -12,13 +12,17 @@ internal static class WebSocketPair
     /// <summary>
     /// Creates a connected client and server socket that speak the <c>mqtt</c> sub-protocol with keep-alive off.
     /// </summary>
+    /// <param name="inline">
+    /// Whether what follows a receive runs on the thread that sends, before the send returns, so that a test knows
+    /// that the receiver has seen a message once its send has returned; <see langword="false"/> by default.
+    /// </param>
     /// <returns>
     /// The client socket and the server socket; what one sends the other receives.
     /// </returns>
-    public static (WebSocket Client, WebSocket Server) Create()
+    public static (WebSocket Client, WebSocket Server) Create(bool inline = false)
     {
-        Pipe clientToServer = new();
-        Pipe serverToClient = new();
+        Pipe clientToServer = CreatePipe(inline);
+        Pipe serverToClient = CreatePipe(inline);
         WebSocket client = WebSocket.CreateFromStream(
             new PipeStream(serverToClient.Reader, clientToServer.Writer),
             CreateOptions(isServer: false));
@@ -27,6 +31,19 @@ internal static class WebSocketPair
             CreateOptions(isServer: true));
         return (client, server);
     }
+
+    /// <summary>
+    /// Creates the pipe of one direction.
+    /// </summary>
+    /// <param name="inline">
+    /// Whether what follows a read runs on the thread that writes, before the write returns.
+    /// </param>
+    /// <returns>
+    /// The pipe.
+    /// </returns>
+    private static Pipe CreatePipe(bool inline) => inline
+        ? new Pipe(new PipeOptions(readerScheduler: PipeScheduler.Inline, useSynchronizationContext: false))
+        : new Pipe();
 
     /// <summary>
     /// Creates the options shared by both ends.
@@ -102,7 +119,7 @@ internal static class WebSocketPair
         {
             while (true)
             {
-                ReadResult result = await reader.ReadAsync(cancellationToken);
+                ReadResult result = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
                 if (result.IsCanceled && _disposed)
                 {
                     throw new ObjectDisposedException(nameof(PipeStream));

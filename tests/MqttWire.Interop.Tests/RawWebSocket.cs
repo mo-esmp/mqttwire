@@ -180,6 +180,18 @@ internal sealed class RawWebSocket : IAsyncDisposable
     }
 
     /// <summary>
+    /// Sends bytes as they are, for a test that sends part of a frame.
+    /// </summary>
+    /// <param name="bytes">
+    /// The bytes.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the bytes have been handed to the socket.
+    /// </returns>
+    public async Task SendRawAsync(ReadOnlyMemory<byte> bytes) =>
+        await _stream.WriteAsync(bytes).ConfigureAwait(false);
+
+    /// <summary>
     /// Receives the next frame whole, control frames included.
     /// </summary>
     /// <returns>
