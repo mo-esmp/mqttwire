@@ -622,4 +622,45 @@ public sealed class AdmissionTests
         harness.Server.ConnectionCount.ShouldBe(0);
         harness.Pool.Outstanding.ShouldBe(0);
     }
+
+    /// <summary>
+    /// Proves that a connection closed after its admission was found Active but before its CONNACK's write was
+    /// started is handed no CONNACK: whether the connection is still Active is decided in the hold of the send path's
+    /// lock that starts the write. The window is reached deterministically: the host closes the connection when the
+    /// CONNACK's buffer is rented, which is the first rent after the admission.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Admit_ClosedWhileItsConnAckIsEncoded_StartsNoWrite()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        harness.Handler.Admit = (admitted, _) =>
+        {
+            harness.Pool.Renting = _ =>
+            {
+                harness.Pool.Renting = null;
+                admitted.Close(MqttReasonCode.AdministrativeAction);
+            };
+            return MqttAdmitResult.Accepted;
+        };
+        TestConnection connection = harness.Accept();
+        int writesStarted = 0;
+        connection.Link.Writing = _ => writesStarted++;
+
+        // Act
+        connection.Deliver(ServerPackets.Connect);
+        await connection.RunEnded();
+
+        // Assert
+        writesStarted.ShouldBe(0);
+        connection.TakeWritten().ShouldBeEmpty();
+        connection.Link.IsAborted.ShouldBeTrue();
+        connection.Link.ClosedWith.ShouldBeNull();
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ClosedByHost"]);
+        harness.Server.ConnectionCount.ShouldBe(0);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
 }

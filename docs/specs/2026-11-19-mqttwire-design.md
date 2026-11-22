@@ -584,7 +584,9 @@ of the admission step, and the CONNACK is its first write. A host's `TrySend` be
 admission and the CONNACK is taken and waits behind it. A connection that is closed in that
 window (a takeover, the stop, the host closing it from inside `OnAdmit`) finds a write in
 progress, so its link is aborted: it gets no CONNACK and no DISCONNECT, and `OnClosed` is still
-called once.
+called once. The window ends in the step, under the lock of the send path, that finds the
+connection still Active and starts the CONNACK's write: a close before that step means no
+CONNACK is handed to the link; a close after it meets a write in progress like any other.
 
 The host decides in `OnAdmit` whether a replacement is allowed (for example only for the same
 user) and does its own accounting there (for example connections per user). Because the step is
@@ -1402,6 +1404,8 @@ owner:
     change of behaviour for a host that returned `default` to accept.
 36. Event 21: an exception that ends a connection's run and is not a failure of its link is
     logged as an error, and still reported to `OnClosed` as a lost connection (6.12).
+37. A connection closed after its admission gets no CONNACK up to the step, under the lock of
+    the send path, that starts the CONNACK's write (6.6).
 
 ## 11. Left to the builder
 

@@ -31,6 +31,12 @@ internal sealed class CountingPool : ArrayPool<byte>
     public Action<byte[]>? Returning { get; set; }
 
     /// <summary>
+    /// Gets or sets a callback that runs before each rent, with the length asked for, on the renting thread, so a
+    /// test can act at the moment a buffer is rented; or <see langword="null"/>.
+    /// </summary>
+    public Action<int>? Renting { get; set; }
+
+    /// <summary>
     /// Gets the number of buffers rented and not yet returned.
     /// </summary>
     public int Outstanding
@@ -135,6 +141,7 @@ internal sealed class CountingPool : ArrayPool<byte>
     /// </returns>
     public override byte[] Rent(int minimumLength)
     {
+        Renting?.Invoke(minimumLength);
         byte[] array = Shared.Rent(minimumLength);
         lock (_gate)
         {

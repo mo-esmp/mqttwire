@@ -125,7 +125,11 @@ public sealed partial class MqttWireConnection
     /// waits: a write that does not complete at once is awaited elsewhere. A failed write ends the connection with
     /// <see cref="MqttCloseReason.ConnectionLost"/>, and so does a fault inside MqttWire, such as a pool that throws
     /// (<see cref="FaultSendPath"/>). A host's user property that cannot be carried ends it as the host's bug
-    /// (<see cref="RefuseUnencodableConnAck"/>). It never throws; the caller then finds the connection Closing.
+    /// (<see cref="RefuseUnencodableConnAck"/>). A connection that was closed since its admission gets no CONNACK
+    /// (design 6.6, "Admission and takeover"): whether it is still Active is decided in a hold of the send path's
+    /// lock, under which every move to Closing is made, immediately before the write is started, so a close either
+    /// came first, and nothing is written, or comes after the CONNACK was decided on, finds a write in progress and
+    /// aborts. It never throws; the caller then finds the connection Closing.
     /// </summary>
     /// <param name="fields">
     /// The fields to encode.
@@ -155,6 +159,20 @@ public sealed partial class MqttWireConnection
         {
             // The send path is reserved for this CONNACK: the fault gives it up, with the buffer if one was rented.
             FaultSendPath(exception, unsent);
+            return;
+        }
+
+        bool active;
+        lock (_sendLock)
+        {
+            active = _state == ConnectionState.Active;
+        }
+
+        if (!active)
+        {
+            // Closed while the CONNACK was encoded: that close found the path reserved and aborted the link. The
+            // buffer was never handed to the link, so it goes back here, and the path is given up.
+            ContinueSending(returned: unsent, failed: false, InlineWrites);
             return;
         }
 
