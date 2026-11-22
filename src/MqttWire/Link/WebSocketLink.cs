@@ -121,21 +121,31 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
             cancellationToken: cancellationToken);
 
     /// <summary>
-    /// Sends a close message and does not wait for the peer's reply, so it is safe beside a pending read.
+    /// Sends a close message and does not wait for the peer's reply, so it is safe beside a pending read. When a close
+    /// message has already gone out, which is what <see cref="ReadAsync"/> does for a text message, nothing is sent
+    /// and the close completes at once: a WebSocket sends one close message, and a second would fail, which would make
+    /// the caller abort the link and could reset the connection before the peer has read the first.
     /// </summary>
     /// <param name="status">
-    /// The close status the peer sees.
+    /// The close status the peer sees; ignored when a close message has already gone out.
     /// </param>
     /// <param name="cancellationToken">
     /// Cancels the close.
     /// </param>
     /// <returns>
-    /// A task that completes when the close message has been sent.
+    /// A task that completes when the close message has been sent, or at once when one had been.
     /// </returns>
     public async ValueTask CloseAsync(WebSocketCloseStatus status, CancellationToken cancellationToken)
-        => await webSocket
+    {
+        if (webSocket.State is WebSocketState.CloseSent or WebSocketState.Closed)
+        {
+            return;
+        }
+
+        await webSocket
             .CloseOutputAsync(closeStatus: status, statusDescription: null, cancellationToken: cancellationToken)
             .ConfigureAwait(continueOnCapturedContext: false);
+    }
 
     /// <summary>
     /// Aborts the socket.

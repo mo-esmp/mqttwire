@@ -151,6 +151,37 @@ public sealed class WebSocketLinkTests
     }
 
     /// <summary>
+    /// Proves the close a caller hands to the link after a text message ended it, as the server's close of that
+    /// connection does, completes without sending a second close and without failing: the link's own close with 1003
+    /// already went out, and a failed close would make the caller abort the link, which can reset the connection before
+    /// the peer has read the 1003.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task CloseAsync_AfterATextMessageClosedTheLink_CompletesWithoutSendingAgain()
+    {
+        // Arrange
+        (WebSocket client, WebSocket server) = WebSocketPair.Create();
+        using WebSocket clientSocket = client;
+        using WebSocket serverSocket = server;
+        WebSocketLink link = new(clientSocket);
+        await serverSocket.SendAsync("x"u8.ToArray(), WebSocketMessageType.Text, true, CancellationToken.None);
+        byte[] buffer = new byte[16];
+        (await link.ReadAsync(buffer, CancellationToken.None)).ShouldBe(0);
+
+        // Act
+        await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
+        WebSocketReceiveResult closeResult = await serverSocket.ReceiveAsync(buffer, CancellationToken.None);
+
+        // Assert
+        closeResult.MessageType.ShouldBe(WebSocketMessageType.Close);
+        closeResult.CloseStatus.ShouldBe(WebSocketCloseStatus.InvalidMessageType);
+        clientSocket.State.ShouldBe(WebSocketState.CloseSent);
+    }
+
+    /// <summary>
     /// Proves an empty text message that the zero-byte wait takes whole still ends the link: the read after the
     /// wait returns zero and the peer sees close status 1003, though binary data follows the text message.
     /// </summary>
