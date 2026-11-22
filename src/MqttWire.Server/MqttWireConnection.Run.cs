@@ -84,26 +84,30 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Ends the run, in this order: removes the connection from the client-id table, only if it is still the one
-    /// there; calls <see cref="IMqttWireHandler.OnClosed"/> once if the connection was admitted, after every other
-    /// handler call for it has returned; makes it Closed; and only then frees its slot, so that
-    /// <see cref="ConnectionRegistry.WhenEmptyAsync"/> completes after every <see cref="IMqttWireHandler.OnClosed"/>
-    /// has returned. No write is in progress here yet: every write so far ends at once or holds nothing of the run.
-    /// Every buffer was returned by the code that held it before this runs.
+    /// Ends the run, in the order of design 6.6 ("Closing, bounded", step 5): removes the connection from the
+    /// client-id table, only if it is still the one there; makes it Closed; then calls
+    /// <see cref="IMqttWireHandler.OnClosed"/> once if the connection was admitted, after every other handler call
+    /// for it has returned; and only then frees its slot, so that <see cref="ConnectionRegistry.WhenEmptyAsync"/>
+    /// completes after every <see cref="IMqttWireHandler.OnClosed"/> has returned. During
+    /// <see cref="IMqttWireHandler.OnClosed"/> the connection is Closed: a close changes nothing and the sweep
+    /// ignores it. Every buffer the read path held was returned before this runs.
     /// </summary>
     /// <returns>
     /// A task that completes when the connection is Closed and its slot is free.
     /// </returns>
     private ValueTask FinishAsync()
     {
+        // Task 8: a write started by SendConnAck or SendDisconnect (fire-and-forget) can still be pending over a real
+        // WebSocket when the read loop ends, holding its pool buffer. FinishAsync must wait for it before the state
+        // becomes Closed, so that the slot is freed and WhenEmptyAsync completes only when its buffer is back.
         ConnectionRegistry registry = _server.Registry;
         registry.RemoveFromTable(this);
+        _state = ConnectionState.Closed;
         if (_admitted)
         {
             ReportClosed();
         }
 
-        _state = ConnectionState.Closed;
         registry.Release(this);
         return ValueTask.CompletedTask;
     }

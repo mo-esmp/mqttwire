@@ -67,8 +67,10 @@ public sealed partial class MqttWireConnection
 
             // Admitting: closed during or right after its admission, before its CONNACK; no packet at all.
             // Task 8: Handing: the success CONNACK is being handed to the link on the connect phase's thread, so no
-            // DISCONNECT is written; but the WebSocket close below may still reach the link before that CONNACK's
-            // write. Task 8 closes this by reserving the send path for the CONNACK at admission.
+            // DISCONNECT is written. Two windows remain: (a) the WebSocket close below may reach the link before that
+            // CONNACK's write; (b) a close that lands after SendConnAck has handed the CONNACK over but before the
+            // progress becomes Handed sees Handing and writes no DISCONNECT, so one that could have been written (a
+            // takeover's 0x8E) is dropped. Task 8 closes both by reserving the send path for the CONNACK at admission.
         }
         finally
         {
