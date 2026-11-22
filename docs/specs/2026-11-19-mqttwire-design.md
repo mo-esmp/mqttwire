@@ -140,11 +140,12 @@ mqttwire/
                                 MqttWire's server and client
   tests/MqttWire.TestHost/      a small host with an exact-topic handler, shared by the interops,
                                 MQTT.js and the shared-topics test
-  tests/interop-js/             MQTT.js against the test host
+  tests/interop-js/             (part B) MQTT.js against the test host
   bench/MqttWire.Microbench/    BenchmarkDotNet runs of the codec and the client
-  bench/MqttWire.Bench/         the floor, and idle connections on a handler that does nothing
-  samples/GroupChat/            shared topics through the host (6.10)
-  docs/                         this design; "the part of MQTT 5 that is implemented"
+  bench/MqttWire.Bench/         (part B) the floor, and idle connections on a handler that does
+                                nothing
+  samples/GroupChat/            (part B) shared topics through the host (6.10)
+  docs/                         this design; (step 4) "the part of MQTT 5 that is implemented"
 ```
 
 ### 6.2 Public API: the server
@@ -659,9 +660,11 @@ instant.
   the header is written from a buffer of its own and the payload is then written straight from
   the memory the host handed over, in pieces of at most 64 KB, so no second copy of a large
   payload ever exists.
-- **A writer that throws** (an encoding, the array pool, the link's write call itself) gives
-  the send path up: the connection ends as a lost connection, the fault is logged as an error
-  (6.12), what waited is dropped, and nothing is left taken.
+- **A writer that throws inside MqttWire** (an encoding, the array pool, an object pool, the
+  clock) gives the send path up: the connection ends as a lost connection, the fault is logged
+  as an error (6.12, event 20), what waited is dropped, and nothing is left taken. A link whose
+  write throws is a failed write like any other: a lost connection (event 18), and the link is
+  aborted.
 
 **Scheduling: control packets never wait behind a delivery.** A single ordered list can
 deadlock: the client's window is full, its PUBREC arrives, and the PUBREL that would free the
@@ -802,7 +805,8 @@ Every close the server starts follows the same steps, and none of them waits on 
    WebSocket close through the same one-at-a-time send path, without waiting for the peer's
    answer. The link is aborted at the close deadline. A connection that was never admitted gets
    a CONNACK with a failure code instead of the DISCONNECT; a client's DISCONNECT, a lost link
-   and a fault of the send path get no packet, only the WebSocket close.
+   get no packet, only the WebSocket close; a fault of the send path gets no packet, and the
+   link is aborted.
 4. **Aborting does not release anything by itself** (6.8). The read loop and the write in
    progress each end with an error once the link is aborted; each returns its own buffer.
 5. The connection is Closed when the read loop has ended and no write is in progress. In this
@@ -1058,12 +1062,16 @@ an admitted connection can end with, two of which the server does not decide:
 | 17 | the client disconnected | debug; the client's reason code |
 | 18 | the connection was lost | debug |
 | 19 | a late `OnConnectAsync` result, observed and discarded | debug; error, with the exception, when it threw |
-| 20 | the send path faulted (6.6, "Sending") | error; the exception |
+| 20 | the send path faulted: something threw inside MqttWire while it sent (6.6, "Sending"); a link whose write fails or throws is event 18 | error; the exception |
 
 A connection whose CONNECT has not passed MqttWire's own checks has no client id yet: its line
 names the remote end point instead. An incoming packet that is too large, a topic alias, an
-unsupported QoS and a subscription identifier end with "protocol error"; the specific reason
-code is in the line and on the wire.
+unsupported QoS and a subscription identifier end with "protocol error"; so do a first packet
+that is not a CONNECT, a CONNECT the codec refuses with a code other than `0x81` (such as
+`0x84`, unsupported protocol version), and a CONNECT refused by MqttWire's own checks: `0x8C`
+(bad authentication method), `0x87` (a Will), `0x95` (a maximum packet size under 4 KiB, or a
+CONNECT over 16 KB) and `0x85` (client id not valid). The specific reason code is in the line
+and, where a packet can carry it, on the wire.
 
 **No log line contains a password, a user name, a payload, a topic, user properties or the
 host's reason string.** The same reason is what `OnClosed` receives, with one exception: a
@@ -1168,18 +1176,22 @@ example "closed by the host" followed by "handler threw").
 
 **The target: MqttWire adds no more than 1 KB to the floor for an idle connection**, before
 and after activity alike. The owner kept it on 2026-11-20, once GrainWire's step 0 had measured
-the floor at about 11,900 bytes. If the floor alone is most of what a connection costs today in
+the floor at about 11,900 bytes (11,917, 11,921 and 11,915 bytes in three runs, in
+[the step 0 report](https://github.com/mo-esmp/grainwire/blob/main/docs/step-0-idle-memory.md)).
+If the floor alone is most of what a connection costs today in
 GrainWire, the owner decides whether own WebSocket framing is worth looking at (see the
 companion design).
 
 The benchmark comes with the end of step 3. Until it runs, the only measurement is a unit test
-over the in-memory link: there an idle connection costs MqttWire about 684 bytes, held to 768,
-which leaves out the WebSocket link object and its parked read.
+over the in-memory link: there an idle connection costs MqttWire 684 bytes (in a Release build,
+measured on 2026-11-22; the smallest of 685, 684 and 703), held to 768, which leaves out the
+WebSocket link object and its parked read.
 
 ### 6.15 Documentation, versions, maintenance
 
-- **README:** what MqttWire is and is not (section 3, in plain words), the handler in twenty
-  lines, the group chat sample.
+- **README:** what MqttWire is and is not (section 3, in plain words), a short, complete
+  handler that shows the two rules a host most easily gets wrong (copy a payload that outlives
+  `OnPublish`; send at no higher QoS than was granted), the group chat sample.
 - **`docs/mqtt-support.md`:** the part of MQTT 5 that is implemented: the packets of 6.4, the
   property tables of 6.7, the limits and deadlines of 6.6. A report can be checked against a
   stated scope.
@@ -1289,8 +1301,9 @@ Decided while the server was built in step 3 (2026-11-22), not yet seen by the o
     that instant (6.6).
 22. A caller writes at most 16 packets at once on its own thread, then hands the send path to
     the thread pool (6.6).
-23. A writer that throws ends the connection as a lost connection, logged as event 20 (6.6,
-    6.12).
+23. A writer that throws inside MqttWire (an encoding, a pool, the clock) ends the connection as
+    a lost connection, logged as event 20; a link whose write throws is a failed write, event
+    18 (6.6, 6.12).
 24. The queue of waiting deliveries and the exchange records are pooled per server, at most
     1,024 of each retained, and a queue grown past 64 entries is not retained (6.6).
 25. The count against the receive maximum of 256 is the remembered QoS 2 identifiers plus the
@@ -1318,7 +1331,8 @@ What was left here, and what step 3 decided:
   when the server is not registered; a request that arrives without `UseWebSockets()` throws
   `InvalidOperationException` naming it. An internal `IHostedLifecycleService` starts the sweep
   in `StartingAsync` and runs the stop in `StoppingAsync`, before any hosted service, Kestrel
-  included, is stopped. The clock is `TimeProvider.System`.
+  included, is stopped. For now the clock is `TimeProvider.System`; whether a host may supply
+  its own is open.
 - The names and shapes of all internal types, including the link: the builder's, as built.
 - Buffer sizes, the pool, how the sweep walks the connections, how the admission step is made
   atomic: the shared `ArrayPool<byte>`; a first read buffer of 4 KB; every connection has a slot
