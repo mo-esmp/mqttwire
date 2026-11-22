@@ -20,6 +20,11 @@ internal static class ServerPackets
     public static readonly byte[] ConnectKeepAlive0 = Hex.Parse("10 0F 00 04 4D 51 54 54 05 02 00 00 00 00 02 63 31");
 
     /// <summary>
+    /// CONNECT with client id "c1", keep-alive 61 and no properties.
+    /// </summary>
+    public static readonly byte[] ConnectKeepAlive61 = Hex.Parse("10 0F 00 04 4D 51 54 54 05 02 00 3D 00 00 02 63 31");
+
+    /// <summary>
     /// CONNECT of MQTT 3.1.1 (protocol level 4) with client id "c1" and keep-alive 30.
     /// </summary>
     public static readonly byte[] ConnectVersion4 = Hex.Parse("10 0E 00 04 4D 51 54 54 04 02 00 1E 00 02 63 31");
@@ -142,6 +147,42 @@ internal static class ServerPackets
         [.. Hex.Parse("50 20 00 01 97 1C 1F 00 19"), .. Encoding.UTF8.GetBytes("The message is too large.")];
 
     /// <summary>
+    /// Builds an MQTT 5 CONNECT with keep-alive 30 from its connect flags, its properties and its payload, for the
+    /// CONNECT packets no constant above covers. The bytes are put together as given, so they may be ones the
+    /// codec refuses.
+    /// </summary>
+    /// <param name="flags">
+    /// The connect flags, for example <c>0x02</c> for a clean start alone.
+    /// </param>
+    /// <param name="properties">
+    /// The properties, without their length; the length is written in front of them.
+    /// </param>
+    /// <param name="payload">
+    /// The payload, each field already with its length prefix (see <see cref="Field"/>).
+    /// </param>
+    /// <returns>
+    /// The packet's bytes, fixed header included.
+    /// </returns>
+    public static byte[] BuildConnect(byte flags, ReadOnlySpan<byte> properties, ReadOnlySpan<byte> payload)
+    {
+        byte[] variableHeader = [0x00, 0x04, 0x4D, 0x51, 0x54, 0x54, 0x05, flags, 0x00, 0x1E];
+        byte[] propertyLength = VariableByteInteger(properties.Length);
+        int remaining = variableHeader.Length + propertyLength.Length + properties.Length + payload.Length;
+        return [0x10, .. VariableByteInteger(remaining), .. variableHeader, .. propertyLength, .. properties, .. payload];
+    }
+
+    /// <summary>
+    /// Builds a field with its two-byte length prefix, as a UTF-8 string or binary data is carried.
+    /// </summary>
+    /// <param name="value">
+    /// The field's bytes, at most 65,535.
+    /// </param>
+    /// <returns>
+    /// The length prefix followed by the bytes.
+    /// </returns>
+    public static byte[] Field(ReadOnlySpan<byte> value) => [(byte)(value.Length >> 8), (byte)value.Length, .. value];
+
+    /// <summary>
     /// Builds a CONNACK refusing the connection with a reason code and no properties.
     /// </summary>
     /// <param name="code">
@@ -162,4 +203,27 @@ internal static class ServerPackets
     /// The packet's bytes.
     /// </returns>
     public static byte[] Disconnect(MqttReasonCode code) => [0xE0, 0x01, (byte)code];
+
+    /// <summary>
+    /// Encodes a variable byte integer (MQTT 5, 1.5.5).
+    /// </summary>
+    /// <param name="value">
+    /// The value, at most 268,435,455.
+    /// </param>
+    /// <returns>
+    /// The one to four bytes.
+    /// </returns>
+    private static byte[] VariableByteInteger(int value)
+    {
+        List<byte> bytes = [];
+        do
+        {
+            byte digit = (byte)(value % 128);
+            value /= 128;
+            bytes.Add(value > 0 ? (byte)(digit | 0x80) : digit);
+        }
+        while (value > 0);
+
+        return [.. bytes];
+    }
 }

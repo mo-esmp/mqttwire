@@ -1,4 +1,5 @@
-using System.Net.WebSockets;
+﻿using System.Net.WebSockets;
+using MqttWire.Codec;
 using MqttWire.Link;
 using MqttWire.Server.Internal;
 
@@ -10,10 +11,11 @@ namespace MqttWire.Server;
 public sealed partial class MqttWireConnection
 {
     /// <summary>
-    /// Begins the close: moves the connection to Closing, once, records the reason and starts the WebSocket close
-    /// without waiting for the peer; the sweep aborts the link at the close deadline. Before a CONNACK no MQTT packet
-    /// can carry a reason, so a refusal in the Accepted state closes with WebSocket status 1002; any other close
-    /// uses 1000. Safe from any thread.
+    /// Begins the close: moves the connection to Closing, once, records the reason, writes the packet that carries
+    /// the reason code, and starts the WebSocket close with status 1000 without waiting for the peer; the sweep
+    /// aborts the link at the close deadline. A connection that was Active is sent DISCONNECT with the code, except
+    /// when the client disconnected or the link was lost; one that was not Active yet is sent CONNACK with the code
+    /// when the code is a failure (plan decision 7). Safe from any thread; a call after the first changes nothing.
     /// </summary>
     /// <param name="reason">
     /// Why the connection ends.
@@ -22,8 +24,12 @@ public sealed partial class MqttWireConnection
     /// The reason code the end carries; <see cref="MqttReasonCode.Success"/> when it carries none.
     /// </param>
     /// <param name="reasonString">
-    /// The reason string, or <see langword="null"/>; the DISCONNECT that carries it comes with a later step.
+    /// The reason string, at most 256 bytes, or <see langword="null"/>.
     /// </param>
+    /// <exception cref="ArgumentException">
+    /// The reason string cannot be carried (the host's bug); the connection is Closing and its close has begun all
+    /// the same, without the packet.
+    /// </exception>
     internal void BeginClose(MqttCloseReason reason, MqttReasonCode code, string? reasonString)
     {
         if (!TryEnterClosing(reason, out ConnectionState left))
@@ -32,39 +38,82 @@ public sealed partial class MqttWireConnection
         }
 
         IMqttLink? link = _link;
-        if (link is not null)
+        if (link is null)
         {
-            WebSocketCloseStatus status = left == ConnectionState.Accepted && (byte)code >= 0x80
-                ? WebSocketCloseStatus.ProtocolError
-                : WebSocketCloseStatus.NormalClosure;
-            _ = CloseLinkAsync(link, status);
+            return;
+        }
+
+        try
+        {
+            if (left == ConnectionState.Active)
+            {
+                if (reason is not (MqttCloseReason.ClientDisconnected or MqttCloseReason.ConnectionLost))
+                {
+                    SendDisconnect(code, reasonString);
+                }
+            }
+            else if ((byte)code >= 0x80)
+            {
+                SendConnAck(new ConnAckFields { ReasonCode = code, ReasonString = reasonString });
+            }
+        }
+        finally
+        {
+            _ = CloseLinkAsync(link, WebSocketCloseStatus.NormalClosure);
+        }
+    }
+
+    /// <summary>
+    /// Refuses a first packet that is not a CONNECT, or whose fixed header is malformed: no MQTT packet can answer
+    /// it, so the connection moves to Closing and the WebSocket is closed with status 1002 (plan decision 7). Does
+    /// nothing when the connection is Closing already.
+    /// </summary>
+    /// <param name="reason">
+    /// Why the connection ends.
+    /// </param>
+    private void RefuseFirstPacket(MqttCloseReason reason)
+    {
+        if (TryEnterClosing(reason, out _) && _link is { } link)
+        {
+            _ = CloseLinkAsync(link, WebSocketCloseStatus.ProtocolError);
         }
     }
 
     /// <summary>
     /// Acts on the deadlines that have passed; called by the sweep, from the timer's thread. An Accepted
-    /// connection is aborted at the connect deadline, and a Closing one at the close deadline. Each check acts only
-    /// on the state it read: the move out of Accepted is a compare-exchange that expects Accepted, and the close
-    /// deadline is measured from the stamp that only the winner of the move to Closing writes. It allocates
-    /// nothing and never throws.
+    /// connection is aborted at the connect deadline; an Authenticating one has the token of the host's
+    /// <see cref="IMqttWireHandler.OnConnectAsync"/> cancelled at the authentication deadline, and the connect phase
+    /// then refuses it; a Closing one is aborted at the close deadline. Each check acts only on the state it read:
+    /// the move out of Accepted is a compare-exchange that expects Accepted, the cancellation source exists only
+    /// while the connection is Authenticating and is taken from its field by one exchange, and the close deadline is
+    /// measured from the stamp that only the winner of the move to Closing writes. It allocates nothing and never
+    /// throws.
     /// </summary>
     /// <param name="now">
     /// The sweep's timestamp, from the server's clock.
     /// </param>
     internal void CheckDeadlines(long now)
     {
-        ConnectionState state = _state;
-        if (state == ConnectionState.Accepted)
+        if (_state == ConnectionState.Accepted)
         {
             long accepted = Volatile.Read(ref _stateEnteredAt);
             if (accepted != 0 && now - accepted >= _server.ConnectDeadlineLength
-                && TryEnterClosingFrom(ConnectionState.Accepted, MqttCloseReason.ConnectionLost))
+                              && TryEnterClosingFrom(ConnectionState.Accepted, MqttCloseReason.ConnectionLost))
             {
                 // The connection was never admitted, so no OnClosed reports the reason; the link failing is the end.
                 _link?.Abort();
             }
         }
-        else if (state == ConnectionState.Closing)
+        else if (_state == ConnectionState.Authenticating)
+        {
+            // Stamped before the move to Authenticating, so this is that state's stamp.
+            long entered = Volatile.Read(ref _stateEnteredAt);
+            if (now - entered >= _server.AuthenticationDeadlineLength)
+            {
+                CancelAuthentication();
+            }
+        }
+        else if (_state == ConnectionState.Closing)
         {
             // 0 until the winner of the move to Closing has stamped it: that sweep skips the connection.
             long closing = Volatile.Read(ref _closingAt);
@@ -98,6 +147,34 @@ public sealed partial class MqttWireConnection
         {
             // The close failed: end the link now rather than at the close deadline. The run then sees it end.
             link.Abort();
+        }
+    }
+
+    /// <summary>
+    /// Cancels the token of the host's <see cref="IMqttWireHandler.OnConnectAsync"/> at the authentication deadline:
+    /// takes the cancellation source out of its field, cancels it and disposes it. When the connect phase took it
+    /// first, the host has answered and nothing is done. The cancellation runs the token's callbacks on this thread,
+    /// the host's among them; one that throws is the host's bug and does not stop the sweep.
+    /// </summary>
+    private void CancelAuthentication()
+    {
+        CancellationTokenSource? source = Interlocked.Exchange(ref _authentication, null);
+        if (source is null)
+        {
+            return;
+        }
+
+        try
+        {
+            source.Cancel();
+        }
+        catch (AggregateException)
+        {
+            // A callback of the host's threw; the token is cancelled all the same, and the sweep goes on.
+        }
+        finally
+        {
+            source.Dispose();
         }
     }
 

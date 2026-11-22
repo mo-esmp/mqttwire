@@ -1,15 +1,12 @@
-using System.Net.WebSockets;
-using System.Runtime.CompilerServices;
-using System.Text;
+﻿using System.Net.WebSockets;
 using Microsoft.AspNetCore.Http;
-using MqttWire.Codec;
 using MqttWire.Link;
 using MqttWire.Server.Internal;
 
 namespace MqttWire.Server;
 
 /// <content>
-/// The run of a connection: the accept, the connect phase and the end.
+/// The run of a connection: the accept, the connect phase, the loop and the end.
 /// </content>
 public sealed partial class MqttWireConnection
 {
@@ -19,9 +16,17 @@ public sealed partial class MqttWireConnection
     private const string SubProtocol = "mqtt";
 
     /// <summary>
+    /// Gets the link, for the code that runs after <see cref="RunAsync"/> has set it.
+    /// </summary>
+    private IMqttLink RunningLink =>
+        _link!; // RunAsync sets _link before the connection takes its slot, and only code that runs after reads this.
+
+    /// <summary>
     /// Runs the connection from its accept until it is Closed. It is the only async method whose state lives as
-    /// long as the connection (plan decision 3), so it keeps as few locals alive across its awaits as it can; the
-    /// connect phase is a separate method that has completed before anything else runs.
+    /// long as the connection (plan decision 3), so it keeps as few locals alive across its awaits as it can: it
+    /// reads the link from <see cref="_link"/>, holds no buffer while it waits for data, and hands what arrives to
+    /// <see cref="HandleAvailableAsync"/>, whose state goes back to a pool. The connect phase is a separate method
+    /// that has completed before the loop starts.
     /// </summary>
     /// <param name="link">
     /// The link to run over, or <see langword="null"/> to accept the WebSocket of the request: sub-protocol
@@ -33,18 +38,27 @@ public sealed partial class MqttWireConnection
     /// </returns>
     internal async Task RunAsync(IMqttLink? link)
     {
-        link ??= await AcceptWebSocketAsync().ConfigureAwait(false);
-        _link = link;
+        _link = link ?? await AcceptWebSocketAsync().ConfigureAwait(false);
         Volatile.Write(ref _stateEnteredAt, _server.Time.GetTimestamp());
         _server.Registry.Add(this);
         try
         {
-            await ConnectPhaseAsync(link).ConfigureAwait(false);
+            bool open = await ConnectPhaseAsync().ConfigureAwait(false);
+            while (open)
+            {
+                // Bytes that came behind the CONNECT are in the buffer already; otherwise wait, holding nothing.
+                if (!_readBuffer.IsHeld)
+                {
+                    await RunningLink.WaitForDataAsync(HttpContext.RequestAborted).ConfigureAwait(false);
+                }
+
+                open = await HandleAvailableAsync().ConfigureAwait(false);
+            }
         }
         catch (Exception)
         {
             // The wait or a read failed: the link was aborted or lost. A reason recorded first is kept.
-            BeginClose(MqttCloseReason.ConnectionLost, MqttReasonCode.Success, null);
+            BeginClose(MqttCloseReason.ConnectionLost, MqttReasonCode.Success, reasonString: null);
         }
         finally
         {
@@ -63,89 +77,10 @@ public sealed partial class MqttWireConnection
     {
         WebSocketAcceptContext accept = new()
         {
-            SubProtocol = SubProtocol,
-            KeepAliveInterval = TimeSpan.Zero,
-            DangerousEnableCompression = false,
+            SubProtocol = SubProtocol, KeepAliveInterval = TimeSpan.Zero, DangerousEnableCompression = false,
         };
         WebSocket webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync(accept).ConfigureAwait(false);
         return new WebSocketLink(webSocket);
-    }
-
-    /// <summary>
-    /// The connect phase: reads the first packet, which must be a complete CONNECT, decodes it and asks the host's
-    /// <see cref="IMqttWireHandler.OnConnectAsync"/>. The read buffer is back in the pool on every way out, before
-    /// the host is asked. Until the CONNACK is written by a later step, the connection then closes its WebSocket
-    /// with 1000 and ends.
-    /// </summary>
-    /// <param name="link">
-    /// The link.
-    /// </param>
-    /// <returns>
-    /// A task that completes when the phase is over; when it refused the first packet, the close has begun.
-    /// </returns>
-    /// <exception cref="Exception">
-    /// The wait or a read failed, or the host's handler threw; the run records it.
-    /// </exception>
-    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
-    private async ValueTask ConnectPhaseAsync(IMqttLink link)
-    {
-        MqttConnectRequest? request;
-        try
-        {
-            int length = await ReadConnectAsync(link).ConfigureAwait(false);
-            request = length > 0 ? DecodeConnect(length) : null;
-        }
-        finally
-        {
-            // Every read has ended here, so the buffer can go back.
-            _readBuffer.Return(_server.Pool);
-        }
-
-        if (request is null)
-        {
-            return;
-        }
-
-        // Stamped before the move, so a sweep never sees Authenticating with the accept's stamp. Should the move
-        // lose to the connect deadline, the stamp is unused: Closing is measured from its own.
-        Volatile.Write(ref _stateEnteredAt, _server.Time.GetTimestamp());
-        if (Interlocked.CompareExchange(ref _state, ConnectionState.Authenticating, ConnectionState.Accepted)
-            != ConnectionState.Accepted)
-        {
-            // The connect deadline passed while the CONNECT was decoded.
-            return;
-        }
-
-        await _server.Handler.OnConnectAsync(request, HttpContext.RequestAborted).ConfigureAwait(false);
-
-        // The CONNACK and the admission come with a later step; until then the connection ends here.
-        await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Decodes the complete CONNECT at the start of the read buffer and takes the client id from it.
-    /// </summary>
-    /// <param name="length">
-    /// The CONNECT's total length.
-    /// </param>
-    /// <returns>
-    /// The request for the host; <see langword="null"/> when the CONNECT is malformed or not allowed, and the
-    /// close has begun.
-    /// </returns>
-    private MqttConnectRequest? DecodeConnect(int length)
-    {
-        MqttReasonCode code = ConnectCodec.TryDecode(_readBuffer.GetData()[..length], out ConnectPacket connect);
-        if (code != MqttReasonCode.Success)
-        {
-            MqttCloseReason reason = code == MqttReasonCode.MalformedPacket
-                ? MqttCloseReason.MalformedPacket
-                : MqttCloseReason.ProtocolError;
-            BeginClose(reason, code, null);
-            return null;
-        }
-
-        ClientId = Encoding.UTF8.GetString(connect.ClientId);
-        return new MqttConnectRequest(ClientId, null, null, [], null, false, HttpContext);
     }
 
     /// <summary>

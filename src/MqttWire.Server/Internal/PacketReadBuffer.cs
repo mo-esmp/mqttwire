@@ -112,6 +112,23 @@ internal struct PacketReadBuffer
     }
 
     /// <summary>
+    /// Moves the bytes not yet consumed to the start of the array, so the free space after them is as large as the
+    /// array allows. The caller must not have a read in progress into the array.
+    /// </summary>
+    public void Compact()
+    {
+        if (_start == 0)
+        {
+            return;
+        }
+
+        int count = Count;
+        _array.AsSpan(_start, count).CopyTo(_array);
+        _start = 0;
+        _end = count;
+    }
+
+    /// <summary>
     /// Drops a handled packet from the start of the bytes not yet consumed.
     /// </summary>
     /// <param name="length">

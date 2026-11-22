@@ -46,10 +46,15 @@ internal sealed class TestConnection(
     public CancellationTokenSource RequestAborted { get; } = requestAborted;
 
     /// <summary>
+    /// Gets the HTTP context the server was given.
+    /// </summary>
+    public HttpContext HttpContext { get; } = httpContext;
+
+    /// <summary>
     /// Gets the server's connection once the handler's <c>OnAdmit</c> has seen it; <see langword="null"/> before.
     /// </summary>
     public MqttWireConnection? Connection =>
-        harness.Handler.Admitted.Find(connection => connection.HttpContext == httpContext);
+        harness.Handler.Admitted.Find(connection => connection.HttpContext == HttpContext);
 
     /// <summary>
     /// Delivers bytes from the client, then asserts the harness's bounds.

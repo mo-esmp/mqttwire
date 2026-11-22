@@ -45,6 +45,7 @@ public sealed class MqttWireServer
         Time = time;
         Pool = pool;
         ConnectDeadlineLength = ToTimestampLength(ServerLimits.ConnectDeadline, time);
+        AuthenticationDeadlineLength = ToTimestampLength(ServerLimits.AuthenticationDeadline, time);
         CloseDeadlineLength = ToTimestampLength(ServerLimits.CloseDeadline, time);
     }
 
@@ -87,6 +88,11 @@ public sealed class MqttWireServer
     /// Gets <see cref="ServerLimits.ConnectDeadline"/> in units of <see cref="Time"/>'s timestamps.
     /// </summary>
     internal long ConnectDeadlineLength { get; }
+
+    /// <summary>
+    /// Gets <see cref="ServerLimits.AuthenticationDeadline"/> in units of <see cref="Time"/>'s timestamps.
+    /// </summary>
+    internal long AuthenticationDeadlineLength { get; }
 
     /// <summary>
     /// Gets <see cref="ServerLimits.CloseDeadline"/> in units of <see cref="Time"/>'s timestamps.

@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 
 namespace MqttWire.Server.Internal;
@@ -106,7 +106,7 @@ internal sealed class ConnectionRegistry
         {
             int slot = connection.Slot;
             Debug.Assert(ReferenceEquals(_slots[slot], connection), "The connection does not hold its slot.");
-            Volatile.Write(ref _slots[slot], null);
+            Volatile.Write(ref _slots[slot], value: null);
             _free[_freeCount++] = slot;
             _taken--;
             if (_table.TryGetValue(connection.ClientId, out MqttWireConnection? current)

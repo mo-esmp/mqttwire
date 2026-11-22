@@ -112,6 +112,7 @@ public sealed class AcceptTests
 
             // Assert
             harness.Handler.Calls.ShouldBe(["OnConnectAsync c1"], $"cut at {cut}");
+            connection.Link.EndFromPeer();
             await connection.Run;
             harness.Pool.Outstanding.ShouldBe(0);
         }
@@ -183,6 +184,7 @@ public sealed class AcceptTests
         TestConnection second = harness.Accept();
         first.Link.EndFromPeer();
         second.Deliver(ServerPackets.Connect);
+        second.Link.EndFromPeer();
         await first.Run;
         await second.Run;
 

@@ -40,6 +40,40 @@ public sealed partial class MqttWireConnection
     private long _closingAt;
 
     /// <summary>
+    /// The cancellation source of the host's <see cref="IMqttWireHandler.OnConnectAsync"/>; it exists only in the
+    /// Authenticating state. Whoever takes it out of the field with <see cref="Interlocked.Exchange{T}(ref T, T)"/>
+    /// disposes it: the connect phase when the host has answered, or the sweep at the authentication deadline.
+    /// </summary>
+    private CancellationTokenSource? _authentication;
+
+    /// <summary>
+    /// The keep-alive interval that applies, in seconds: the client's, or 60 when it asked for none or for more;
+    /// set by the connect phase.
+    /// </summary>
+    private ushort _keepAliveSeconds;
+
+#pragma warning disable S4487 // Set by the connect phase now; read by the tasks that send deliveries and acknowledgements.
+
+    /// <summary>
+    /// How many QoS 1 and 2 deliveries may be unacknowledged at once: the client's Receive Maximum, at most 256;
+    /// 256 when it sent none. Set by the connect phase.
+    /// </summary>
+    private int _clientWindow;
+
+    /// <summary>
+    /// The client's Maximum Packet Size, in bytes; <see cref="int.MaxValue"/> when it sent none or a larger one. Set
+    /// by the connect phase.
+    /// </summary>
+    private int _clientMaxPacketSize;
+
+    /// <summary>
+    /// Whether acknowledgements may carry a reason string and user properties; <see langword="false"/> when the
+    /// client sent Request Problem Information 0. Set by the connect phase.
+    /// </summary>
+    private bool _problemInformation;
+#pragma warning restore S4487
+
+    /// <summary>
     /// The state; it moves forward only, by <see cref="Interlocked.CompareExchange{T}(ref T, T, T)"/> where two
     /// threads may race.
     /// </summary>
