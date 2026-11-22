@@ -1,4 +1,4 @@
-namespace MqttWire.Server;
+﻿namespace MqttWire.Server;
 
 /// <summary>
 /// Why a connection ended, as <see cref="IMqttWireHandler.OnClosed"/> reports it.

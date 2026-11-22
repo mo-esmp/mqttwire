@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Options;
+﻿using Microsoft.Extensions.Options;
 using MqttWire.Server;
 using MqttWire.Server.Internal;
 

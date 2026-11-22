@@ -1,4 +1,4 @@
-namespace MqttWire.Server;
+﻿namespace MqttWire.Server;
 
 /// <summary>
 /// The options of the MQTT server. An invalid value throws

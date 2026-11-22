@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using MqttWire.Server.Internal;
 
 namespace MqttWire.Server;

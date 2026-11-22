@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using System.Runtime.InteropServices;
 using MqttWire.Client;
 using MqttWire.Codec;

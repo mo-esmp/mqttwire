@@ -1,4 +1,4 @@
-namespace MqttWire.Server.Internal;
+﻿namespace MqttWire.Server.Internal;
 
 /// <summary>
 /// The fixed limits and deadlines of the server. They are not options: each is a protection with one value.

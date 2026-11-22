@@ -1,4 +1,4 @@
-using System.Net.WebSockets;
+﻿using System.Net.WebSockets;
 using MqttWire.Server;
 using MqttWire.Server.Internal;
 using MqttWire.Tests.Client;

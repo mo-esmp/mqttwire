@@ -1,4 +1,4 @@
-namespace MqttWire.Server;
+﻿namespace MqttWire.Server;
 
 /// <summary>
 /// The one interface a host implements to drive the server: who may connect, what a client may subscribe to and

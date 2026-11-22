@@ -1,4 +1,4 @@
-namespace MqttWire.Server;
+﻿namespace MqttWire.Server;
 
 /// <summary>
 /// What became of a message handed to <see cref="MqttWireConnection.TrySend"/>.

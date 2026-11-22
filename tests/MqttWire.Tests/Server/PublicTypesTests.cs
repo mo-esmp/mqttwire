@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Microsoft.AspNetCore.Http;
 using MqttWire.Server;
 using MqttWire.Server.Internal;

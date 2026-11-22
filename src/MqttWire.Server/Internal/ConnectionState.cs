@@ -1,4 +1,4 @@
-namespace MqttWire.Server.Internal;
+﻿namespace MqttWire.Server.Internal;
 
 /// <summary>
 /// The state of a server connection (design 6.6, "States"). A connection moves forward only, and enters

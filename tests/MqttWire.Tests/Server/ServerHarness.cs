@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using System.Net;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Time.Testing;

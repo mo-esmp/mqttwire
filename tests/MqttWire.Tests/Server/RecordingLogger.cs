@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using MqttWire.Server;
 
 namespace MqttWire.Tests.Server;
