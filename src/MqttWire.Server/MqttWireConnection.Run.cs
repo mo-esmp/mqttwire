@@ -1,4 +1,5 @@
-﻿using System.Net.WebSockets;
+﻿using System.Diagnostics;
+using System.Net.WebSockets;
 using Microsoft.AspNetCore.Http;
 using MqttWire.Link;
 using MqttWire.Server.Internal;
@@ -90,13 +91,21 @@ public sealed partial class MqttWireConnection
     /// began the close could have taken the path. When nothing is in progress, which is the common case, this
     /// completes at once and allocates nothing. Otherwise it waits for whoever holds the send path to give it up,
     /// which that holder does when its write, or its close, has ended and its buffer is back. The wait is bounded by
-    /// the sweep: the close deadline aborts the link, and an aborted link's write ends.
+    /// the sweep: the close deadline aborts the link, and an aborted link's write ends. That the close has begun is
+    /// what makes the wait sound (only a give-up in Closing completes it), so it is asserted, and should it ever not
+    /// hold, the close begins here, before the send path is looked at.
     /// </summary>
     /// <returns>
     /// A task that completes when the connection is Closed and its slot is free.
     /// </returns>
     private ValueTask FinishAsync()
     {
+        Debug.Assert(_state >= ConnectionState.Closing, "Every way out of the run begins the close first.");
+        if (_state < ConnectionState.Closing)
+        {
+            BeginClose(MqttCloseReason.ConnectionLost, MqttReasonCode.Success, reasonString: null);
+        }
+
         Task? idle = null;
         lock (_sendLock)
         {

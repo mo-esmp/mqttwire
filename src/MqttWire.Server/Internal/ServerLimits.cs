@@ -128,4 +128,10 @@ internal static class ServerLimits
     /// The most idle pooled objects (connection state, records) the server keeps for reuse.
     /// </summary>
     public const int MaxPooledObjects = 1_024;
+
+    /// <summary>
+    /// The largest queue of waiting deliveries, in slots, that goes back to the server's pool; a larger one, grown by
+    /// a burst, is left to the garbage collector, so the pool never keeps a burst's storage.
+    /// </summary>
+    public const int MaxPooledQueueCapacity = 64;
 }

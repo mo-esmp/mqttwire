@@ -122,7 +122,8 @@ public sealed partial class MqttWireConnection
     /// Encodes the success CONNACK and writes it as the first write of the send path, which the admission step
     /// reserved for it (so no MQTT packet can precede it); what a host sent meanwhile is written behind it. It never
     /// waits: a write that does not complete at once is awaited elsewhere. A failed write ends the connection with
-    /// <see cref="MqttCloseReason.ConnectionLost"/>.
+    /// <see cref="MqttCloseReason.ConnectionLost"/>, and so does a fault inside MqttWire, such as a pool that throws
+    /// (<see cref="FaultSendPath"/>); the caller then finds the connection Closing.
     /// </summary>
     /// <param name="fields">
     /// The fields to encode.
@@ -147,8 +148,21 @@ public sealed partial class MqttWireConnection
             throw;
         }
 
-        byte[] buffer = _server.Pool.Rent(size);
-        StartSending(buffer.AsMemory(start: 0, ConnAckCodec.Write(buffer, fields)), buffer, InlineWrites);
+        byte[]? unsent = null;
+        int length;
+        try
+        {
+            unsent = _server.Pool.Rent(size);
+            length = ConnAckCodec.Write(unsent, fields);
+        }
+        catch (Exception exception)
+        {
+            // The send path is reserved for this CONNACK: the fault gives it up, with the buffer if one was rented.
+            FaultSendPath(exception, unsent);
+            return;
+        }
+
+        StartSending(unsent.AsMemory(start: 0, length), unsent, InlineWrites);
     }
 
     /// <summary>
@@ -277,6 +291,10 @@ public sealed partial class MqttWireConnection
     /// <returns>
     /// The first piece to write: the whole packet, or its header.
     /// </returns>
+    /// <exception cref="Exception">
+    /// The pool, or the payload's memory, threw (a fault inside MqttWire, or memory the host let go of): the buffer,
+    /// if one was rented, is back in the pool, and <see cref="_remainingPayload"/> holds no reference to the payload.
+    /// </exception>
     private ReadOnlyMemory<byte> EncodeDelivery(in PendingDelivery delivery, ushort packetIdentifier,
         out byte[] buffer)
     {
@@ -286,16 +304,26 @@ public sealed partial class MqttWireConnection
         };
         int payloadLength = delivery.Payload.Length;
         int size = PublishCodec.GetSize(fields, payloadLength);
-        if (size <= ServerLimits.CopyThresholdBytes)
+        bool whole = size <= ServerLimits.CopyThresholdBytes;
+        buffer = _server.Pool.Rent(whole ? size : size - payloadLength);
+        try
         {
-            buffer = _server.Pool.Rent(size);
-            _remainingPayload = default;
-            return buffer.AsMemory(start: 0, PublishCodec.Write(buffer, fields, delivery.Payload.Span));
-        }
+            if (whole)
+            {
+                _remainingPayload = default;
+                return buffer.AsMemory(start: 0, PublishCodec.Write(buffer, fields, delivery.Payload.Span));
+            }
 
-        // An empty payload behind a long topic leaves nothing to write, and no reference to the host's memory.
-        buffer = _server.Pool.Rent(size - payloadLength);
-        _remainingPayload = payloadLength == 0 ? default : delivery.Payload;
-        return buffer.AsMemory(start: 0, PublishCodec.WriteHeader(buffer, fields, payloadLength));
+            // An empty payload behind a long topic leaves nothing to write, and no reference to the host's memory.
+            int length = PublishCodec.WriteHeader(buffer, fields, payloadLength);
+            _remainingPayload = payloadLength == 0 ? default : delivery.Payload;
+            return buffer.AsMemory(start: 0, length);
+        }
+        catch (Exception)
+        {
+            // The buffer was never handed to the link: the code that rented it gives it back (design 6.8).
+            _server.Pool.Return(buffer);
+            throw;
+        }
     }
 }

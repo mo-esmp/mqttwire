@@ -11,7 +11,8 @@ internal sealed class ServerPools
 {
     /// <summary>
     /// Gets the pool of the queues of waiting deliveries; it keeps at most
-    /// <see cref="ServerLimits.MaxPooledObjects"/>, and a queue that comes back holds no delivery.
+    /// <see cref="ServerLimits.MaxPooledObjects"/>, a queue that comes back holds no delivery, and one grown past
+    /// <see cref="ServerLimits.MaxPooledQueueCapacity"/> slots is not kept.
     /// </summary>
     public ObjectPool<WaitingDeliveries> Waiting { get; } =
         new DefaultObjectPool<WaitingDeliveries>(new WaitingDeliveriesPolicy(), ServerLimits.MaxPooledObjects);
@@ -54,9 +55,10 @@ internal sealed class ServerPools
     }
 
     /// <summary>
-    /// Creates the queues of waiting deliveries and clears each one that comes back.
+    /// Creates the queues of waiting deliveries, clears each one that comes back, and keeps only those that stayed
+    /// small; internal for its tests.
     /// </summary>
-    private sealed class WaitingDeliveriesPolicy : IPooledObjectPolicy<WaitingDeliveries>
+    internal sealed class WaitingDeliveriesPolicy : IPooledObjectPolicy<WaitingDeliveries>
     {
         /// <summary>
         /// Creates an empty queue.
@@ -67,18 +69,21 @@ internal sealed class ServerPools
         public WaitingDeliveries Create() => new();
 
         /// <summary>
-        /// Clears a queue that comes back, so that it keeps no reference to a host's topic or payload.
+        /// Clears a queue that comes back, so that it keeps no reference to a host's topic or payload, and keeps it
+        /// only while its storage is at most <see cref="ServerLimits.MaxPooledQueueCapacity"/> slots.
         /// </summary>
         /// <param name="obj">
         /// The queue.
         /// </param>
         /// <returns>
-        /// <see langword="true"/>, always: no queue is refused.
+        /// <see langword="true"/> when the pool keeps the queue; <see langword="false"/> when a burst grew it past
+        /// <see cref="ServerLimits.MaxPooledQueueCapacity"/> slots, so that it is dropped, cleared, to the garbage
+        /// collector.
         /// </returns>
         public bool Return(WaitingDeliveries obj)
         {
             obj.Clear();
-            return true;
+            return obj.Capacity <= ServerLimits.MaxPooledQueueCapacity;
         }
     }
 }

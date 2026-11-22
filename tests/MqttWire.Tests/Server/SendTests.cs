@@ -860,6 +860,191 @@ public sealed class SendTests
     }
 
     /// <summary>
+    /// Proves that answers whose encoded bytes would take the one control buffer past 65,536 evict the connection,
+    /// long before 1,024 packets wait: behind a held write, sixteen SUBACKs of 4,006 bytes wait, and the seventeenth
+    /// aborts the link and ends the connection with <see cref="MqttCloseReason.OutgoingLimitPassed"/>.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task TrySend_WaitingControlBytesPass64KiB_Evicts()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        connection.Link.HoldWrites();
+        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+
+        // Each SUBSCRIBE of 4,000 filters is answered with a SUBACK of 4,006 bytes: sixteen take 64,096.
+        for (int i = 1; i <= 16; i++)
+        {
+            connection.Deliver(SubscribeOf((ushort)i, filters: 4_000));
+        }
+
+        ConnectionCounts before = server.GetCounts();
+        bool abortedBefore = connection.Link.IsAborted;
+
+        // Act
+        connection.Deliver(SubscribeOf(packetIdentifier: 17, filters: 4_000));
+        bool aborted = connection.Link.IsAborted;
+        connection.CompleteHeldWrites(new IOException("The socket was aborted."));
+        await connection.Run;
+
+        // Assert
+        before.WaitingControlPackets.ShouldBe(16);
+        before.OutgoingBytes.ShouldBe(2 + 64_096);
+        abortedBefore.ShouldBeFalse();
+        aborted.ShouldBeTrue();
+        connection.TakeWritten().ShouldBeEmpty();
+        ClosedCalls(harness).ShouldBe(["OnClosed c1 OutgoingLimitPassed"]);
+        server.GetCounts().ShouldBe(s_idle);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that the bytes of waiting answers count against <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>
+    /// with the delivery being written: with 65,536 allowed and a delivery of 60,000 bytes held, a SUBACK of 3,006
+    /// bytes waits, and a second, which would make 66,012, evicts the connection.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task TrySend_WaitingControlBytesPassMaxOutgoingBytes_Evicts()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create(static options => options.MaxOutgoingBytes = 65_536);
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        connection.Link.HoldWrites();
+        server.TrySend(s_topic, new byte[60_000], MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        connection.Deliver(SubscribeOf(packetIdentifier: 1, filters: 3_000));
+        ConnectionCounts before = server.GetCounts();
+        bool abortedBefore = connection.Link.IsAborted;
+
+        // Act
+        connection.Deliver(SubscribeOf(packetIdentifier: 2, filters: 3_000));
+        bool aborted = connection.Link.IsAborted;
+        connection.CompleteHeldWrites(new IOException("The socket was aborted."));
+        await connection.Run;
+
+        // Assert
+        before.WaitingControlPackets.ShouldBe(1);
+        before.OutgoingBytes.ShouldBe(63_006);
+        abortedBefore.ShouldBeFalse();
+        aborted.ShouldBeTrue();
+        connection.TakeWritten().ShouldBeEmpty();
+        ClosedCalls(harness).ShouldBe(["OnClosed c1 OutgoingLimitPassed"]);
+        server.GetCounts().ShouldBe(s_idle);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that the pieces of one PUBLISH count as one write towards the writes a caller makes on its own thread:
+    /// a payload of 1 MiB, a header and sixteen pieces, is written whole before <c>TrySend</c> returns, with no hand-over
+    /// to the thread pool, and the send path is idle on return.
+    /// </summary>
+    [Fact]
+    public void TrySend_PayloadOfOneMebibyte_IsWrittenOnTheCallersThreadWithoutAHandOver()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create(static options => options.MaxOutgoingBytes = 2_097_152);
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        byte[] payload = new byte[1_048_576];
+        new Random(10).NextBytes(payload);
+
+        // Act
+        MqttSendResult result = server.TrySend(s_topic, payload, MqttQoS.AtMostOnce);
+        int writes = connection.Link.WriteCount;
+        ConnectionCounts onReturn = server.GetCounts();
+
+        // Assert
+        result.ShouldBe(MqttSendResult.Taken);
+
+        // The CONNACK, the header and sixteen pieces of 65,536 bytes.
+        writes.ShouldBe(18);
+        onReturn.ShouldBe(s_idle);
+        connection.TakeWritten().ShouldBe(ServerPackets.Delivery(payload));
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that the hand-over to the thread pool still happens when it is needed: a first message whose write adds
+    /// seventeen more behind itself is written with fifteen of them on the caller's thread, sixteen writes in all, and
+    /// the last two are handed to the thread pool once; everything is written once and in order.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task TrySend_SeventeenWaitingMessages_HandsOverOnceAndWritesAllInOrder()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+
+        // Set in the test's own call and nowhere else: the thread pool runs what is handed to it without the caller's
+        // execution context, whichever thread it uses, so there the value is false.
+        AsyncLocal<bool> insideTheCall = new() { Value = true };
+        int writes = 0;
+        int writesInsideTheCall = 0;
+        connection.Link.Writing = _ =>
+        {
+            // Runs under the send path, one write at a time. The first write adds the seventeen behind itself.
+            if (++writes == 1)
+            {
+                for (int i = 1; i <= 17; i++)
+                {
+                    server.TrySend(s_topic, new[] { (byte)i }, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+                }
+            }
+
+            if (insideTheCall.Value)
+            {
+                writesInsideTheCall++;
+            }
+        };
+        List<byte> expected = [];
+        for (int i = 0; i <= 17; i++)
+        {
+            expected.AddRange(ServerPackets.Delivery([(byte)i]));
+        }
+
+        // Act
+        MqttSendResult first = server.TrySend(s_topic, new byte[1], MqttQoS.AtMostOnce);
+
+        // The CONNACK, the first message and the seventeen.
+        await connection.Link.WhenWrittenAsync(count: 19);
+        await harness.Pool.WhenNoneOutstandingAsync();
+
+        // Assert
+        first.ShouldBe(MqttSendResult.Taken);
+        writes.ShouldBe(18);
+        writesInsideTheCall.ShouldBe(16);
+        connection.TakeWritten().ShouldBe(expected.ToArray());
+        harness.AssertBounds();
+    }
+
+    /// <summary>
+    /// Builds a SUBSCRIBE of many one-letter topic filters at QoS 0, whose SUBACK is as many reason codes long.
+    /// </summary>
+    /// <param name="packetIdentifier">
+    /// The packet identifier.
+    /// </param>
+    /// <param name="filters">
+    /// How many topic filters; at most 4,000, so the SUBSCRIBE stays a control packet the server reads.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes.
+    /// </returns>
+    private static byte[] SubscribeOf(ushort packetIdentifier, int filters) =>
+        ServerPackets.BuildSubscribe(packetIdentifier, properties: [], Enumerable.Repeat(("a", (byte)0), filters));
+
+    /// <summary>
     /// Sends a payload of 200,000 bytes that only this method holds, in a frame of its own so that no local of the
     /// test keeps the payload alive.
     /// </summary>

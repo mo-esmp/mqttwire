@@ -4,8 +4,9 @@
 /// The deliveries of one connection that wait behind a write in progress or for room in the client's window, oldest
 /// first: a ring of <see cref="PendingDelivery"/>. A connection takes one from the server's pool with its first
 /// waiting delivery and gives it back with the last (plan decision 12), so an idle connection holds none. It is not
-/// thread-safe: the connection's lock guards it. The ring grows by doubling and keeps its storage while it is
-/// pooled; how many deliveries may wait is the connection's limit, not this type's.
+/// thread-safe: the connection's lock guards it. The ring grows by doubling and never shrinks; the pool keeps it
+/// only while its storage is at most <see cref="ServerLimits.MaxPooledQueueCapacity"/> slots. How many deliveries may
+/// wait is the connection's limit, not this type's.
 /// </summary>
 internal sealed class WaitingDeliveries
 {
@@ -33,6 +34,12 @@ internal sealed class WaitingDeliveries
     /// Gets the payload bytes of the deliveries that wait, together.
     /// </summary>
     public long PayloadBytes { get; private set; }
+
+    /// <summary>
+    /// Gets the number of slots of the ring: 0 before the first delivery, then a power of two from 16 up; it never
+    /// shrinks.
+    /// </summary>
+    public int Capacity => _items.Length;
 
     /// <summary>
     /// Adds a delivery behind those that wait.

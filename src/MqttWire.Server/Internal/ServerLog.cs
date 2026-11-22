@@ -60,4 +60,20 @@ internal static partial class ServerLog
     /// </param>
     [LoggerMessage(EventId = 19, Message = "OnConnectAsync for client {ClientId} ended after the connection had let go of it; its outcome was discarded.")]
     public static partial void LateConnectResult(ILogger logger, LogLevel level, string clientId, Exception? exception);
+
+    /// <summary>
+    /// Logs that something threw inside MqttWire while it sent to a client (an encoding, the pool, the link): the
+    /// connection was ended with <see cref="MqttCloseReason.ConnectionLost"/> and its link aborted.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection.
+    /// </param>
+    /// <param name="exception">
+    /// What was thrown.
+    /// </param>
+    [LoggerMessage(EventId = 20, Level = LogLevel.Error, Message = "Sending to client {ClientId} failed inside MqttWire; the connection was ended.")]
+    public static partial void SendPathFaulted(ILogger logger, string clientId, Exception exception);
 }

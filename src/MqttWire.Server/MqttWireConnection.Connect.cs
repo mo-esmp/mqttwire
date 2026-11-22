@@ -1,4 +1,5 @@
-﻿using System.Net;
+﻿using System.Diagnostics;
+using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text;
 using Microsoft.Extensions.Logging;
@@ -381,9 +382,35 @@ public sealed partial class MqttWireConnection
     /// <summary>
     /// Gives the send path reserved by <see cref="TryEnterAdmission"/> up when the host refused or threw, so that
     /// the close that follows writes the CONNACK carrying the refusal. Called under the registry's lock. A connection
-    /// that was closed during the step stays as that close left it: its link aborted, and no packet written.
+    /// that was closed during the step stays as that close left it: its link aborted, and no packet written. The
+    /// general step that carries the send path on is safe under the registry's lock only because it finds nothing to
+    /// do here and gives the path up in its hold: nothing can wait (the connection was never Active, so nothing was
+    /// taken or added) and no WebSocket close is pending (a close during the step found the path reserved and only
+    /// aborted). Both are asserted.
     /// </summary>
-    internal void LeaveRefusedAdmission() => ContinueSending(returned: null, failed: false, InlineWrites);
+    internal void LeaveRefusedAdmission()
+    {
+        AssertNothingToSendInAdmission();
+        ContinueSending(returned: null, failed: false, InlineWrites);
+    }
+
+    /// <summary>
+    /// Asserts, in debug builds only, what <see cref="LeaveRefusedAdmission"/> relies on: the send path is reserved,
+    /// nothing waits for it (no delivery, no control packet, no piece of a payload, no exchange record) and no
+    /// WebSocket close is pending, so carrying it on gives it up without a write, a close or a host call.
+    /// </summary>
+    [Conditional("DEBUG")]
+    private void AssertNothingToSendInAdmission()
+    {
+        lock (_sendLock)
+        {
+            Debug.Assert(_writing, "The admission step reserved the send path.");
+            Debug.Assert(_state <= ConnectionState.Closing, "The connection's run has not ended.");
+            Debug.Assert(_waiting is null && _control.PacketCount == 0 && _remainingPayload.IsEmpty && _records is null,
+                "Nothing can wait for a connection that was never Active.");
+            Debug.Assert(_closeStatus == 0, "A close during the admission step found the path reserved and only aborted.");
+        }
+    }
 
     /// <summary>
     /// Records that the host's <see cref="IMqttWireHandler.OnAdmit"/> accepted the connection, so that its end calls

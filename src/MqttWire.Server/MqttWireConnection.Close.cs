@@ -38,8 +38,9 @@ public sealed partial class MqttWireConnection
     /// without waiting for the peer; the sweep aborts the link at the close deadline. The packet is DISCONNECT for a
     /// connection that was Active, except when the client disconnected or the link was lost; CONNACK for one that was
     /// not admitted, when the code is a failure (plan decision 7); otherwise none. Aborting returns nothing: the
-    /// write in progress ends by itself and returns its own buffer (design 6.8). Safe from any thread; a call after
-    /// the first changes nothing.
+    /// write in progress ends by itself and returns its own buffer (design 6.8). A fault inside MqttWire while the
+    /// packet is encoded (the pool throws) aborts the link instead, logged with event 20; nothing is thrown. Safe from
+    /// any thread; a call after the first changes nothing.
     /// </summary>
     /// <param name="reason">
     /// Why the connection ends.
@@ -83,23 +84,28 @@ public sealed partial class MqttWireConnection
         }
 
         byte[]? buffer = null;
-        int length = 0;
+        int length;
         try
         {
             length = EncodeClosingPacket(left, reason, code, reasonString, out buffer);
         }
-        finally
+        catch (Exception exception)
         {
-            // The close goes on whatever became of its packet: the WebSocket close follows through the send path. A
-            // buffer whose packet could not be encoded goes back without being written.
-            if (buffer is not null && length > 0)
-            {
-                StartSending(buffer.AsMemory(start: 0, length), buffer, InlineWrites);
-            }
-            else
-            {
-                ContinueSending(returned: buffer, failed: false, InlineWrites);
-            }
+            // This close holds the send path: the fault gives it up, with the buffer if one was rented (it was never
+            // handed to the link), and aborts the link instead of the WebSocket close. Nothing is thrown at the
+            // caller, which may be the sweep's timer or a host's Close.
+            FaultSendPath(exception, buffer);
+            return;
+        }
+
+        // The packet, when there is one, then the WebSocket close, both through the send path.
+        if (buffer is not null && length > 0)
+        {
+            StartSending(buffer.AsMemory(start: 0, length), buffer, InlineWrites);
+        }
+        else
+        {
+            ContinueSending(returned: buffer, failed: false, InlineWrites);
         }
     }
 
