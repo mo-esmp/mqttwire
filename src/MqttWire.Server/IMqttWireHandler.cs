@@ -41,6 +41,12 @@ public interface IMqttWireHandler
     /// Decides whether the client may come in now. Called inside the admission step: synchronous and quick; it
     /// must not block or call back into the server.
     /// </summary>
+    /// <remarks>
+    /// It runs under a lock of the server, the one <see cref="MqttWireServer.TryGetConnection"/> and
+    /// <see cref="MqttWireServer.ConnectionCount"/> take for a moment. A lock of the host's own that this method
+    /// takes must therefore never be held, on any other thread, across a call of either of those two: the two
+    /// threads would take the two locks in opposite orders and wait for each other for ever.
+    /// </remarks>
     /// <param name="connection">
     /// The new connection, which is not open yet.
     /// </param>

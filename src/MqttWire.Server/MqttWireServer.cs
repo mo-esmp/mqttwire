@@ -129,6 +129,11 @@ public sealed class MqttWireServer
     /// until it has closed, one that is closing included, counted until just before its
     /// <see cref="IMqttWireHandler.OnClosed"/>.
     /// </summary>
+    /// <remarks>
+    /// It takes, for a moment, the server's lock that <see cref="IMqttWireHandler.OnAdmit"/> runs under. So a host
+    /// must never call it while it holds a lock of its own that its <see cref="IMqttWireHandler.OnAdmit"/> also
+    /// takes: the two threads would take the two locks in opposite orders and wait for each other for ever.
+    /// </remarks>
     public int ConnectionCount => Registry.ActiveCount;
 
     /// <summary>
@@ -224,6 +229,11 @@ public sealed class MqttWireServer
     /// <returns>
     /// <see langword="true"/> when a connection has this client identifier; <see langword="false"/> otherwise.
     /// </returns>
+    /// <remarks>
+    /// It takes, for a moment, the server's lock that <see cref="IMqttWireHandler.OnAdmit"/> runs under. So a host
+    /// must never call it while it holds a lock of its own that its <see cref="IMqttWireHandler.OnAdmit"/> also
+    /// takes: the two threads would take the two locks in opposite orders and wait for each other for ever.
+    /// </remarks>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="clientId"/> is <see langword="null"/>.
     /// </exception>

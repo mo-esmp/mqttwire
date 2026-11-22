@@ -231,7 +231,9 @@ branch) is a refusal with `0x87` (not authorized) and no reason string: a handle
   connections at the same time. They are synchronous and must return quickly. Work that takes
   time is queued by the host.
 - `OnAdmit` runs inside MqttWire's admission step and must not block or call back into the
-  server.
+  server. It runs under the server's lock that `TryGetConnection` and `ConnectionCount` take
+  for a moment, so a lock of the host's own that `OnAdmit` takes must never be held, on another
+  thread, across a call of either of the two: the locks would be taken in opposite orders.
 - `OnClosed` is called once, after the last other call for that connection has returned. A
   connection that was refused in `OnConnectAsync` or `OnAdmit` gets no `OnClosed`. It must not
   wait on the server's stop: the stop waits for every `OnClosed` to return.
