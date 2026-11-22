@@ -6,11 +6,24 @@ namespace MqttWire.Server;
 /// <summary>
 /// The answer to <see cref="IMqttWireHandler.OnAdmit"/>: accept or refuse (reason code and string). When the
 /// connection to replace is not <see langword="null"/> and the host accepts, the new connection takes over and the
-/// old one is closed with the reason "session taken over". The default value is the accepted result.
+/// old one is closed with the reason "session taken over". Only <see cref="Accepted"/> accepts: the default value
+/// is a refusal with 0x87 (not authorized) and no reason string, so a handler that returns <c>default</c> admits
+/// nobody.
 /// </summary>
 [StructLayout(LayoutKind.Auto)]
 public readonly struct MqttAdmitResult
 {
+    /// <summary>
+    /// Whether a factory member created the value. The default value, which no factory created, fails closed: it
+    /// is a refusal with 0x87 (not authorized).
+    /// </summary>
+    private readonly bool _created;
+
+    /// <summary>
+    /// The reason code a factory member gave; meaningless in the default value.
+    /// </summary>
+    private readonly MqttReasonCode _reasonCode;
+
     /// <summary>
     /// Creates a result.
     /// </summary>
@@ -22,14 +35,15 @@ public readonly struct MqttAdmitResult
     /// </param>
     private MqttAdmitResult(MqttReasonCode reasonCode, string? reasonString)
     {
-        ReasonCode = reasonCode;
+        _created = true;
+        _reasonCode = reasonCode;
         ReasonString = reasonString;
     }
 
     /// <summary>
-    /// Gets the result that lets the client in; it is the default value.
+    /// Gets the result that lets the client in. It is not the default value, which refuses.
     /// </summary>
-    public static MqttAdmitResult Accepted => default;
+    public static MqttAdmitResult Accepted => new(reasonCode: MqttReasonCode.Success, reasonString: null);
 
     /// <summary>
     /// Gets a value indicating whether the client is let in.
@@ -37,9 +51,9 @@ public readonly struct MqttAdmitResult
     internal bool IsAccepted => (byte)ReasonCode < 0x80;
 
     /// <summary>
-    /// Gets the reason code: below 0x80 for an acceptance.
+    /// Gets the reason code: below 0x80 for an acceptance; 0x87 for the default value.
     /// </summary>
-    internal MqttReasonCode ReasonCode { get; }
+    internal MqttReasonCode ReasonCode => _created ? _reasonCode : MqttReasonCode.NotAuthorized;
 
     /// <summary>
     /// Gets the reason string of a refusal, at most <see cref="ServerLimits.MaxReasonStringBytes"/> bytes, or

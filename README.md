@@ -84,6 +84,8 @@ public sealed class EchoHandler : IMqttWireHandler
   order the packets arrived, and must return quickly. `OnClosed` is called exactly once for every
   connection `OnAdmit` accepted, after the last other call for it. A handler method that throws
   closes its connection with reason code `0x83`.
+- The result types fail closed: only `Accept`, `Accepted` and `Granted` accept, and `default` is
+  a refusal with `0x87` (not authorized).
 - MqttWire keeps no record of subscriptions: remembering them, and sending at no higher QoS than
   you granted, is the handler's.
 - `TrySend` returns at once, whatever the network does: `Taken`, `NotOpen`, `TooLarge` or

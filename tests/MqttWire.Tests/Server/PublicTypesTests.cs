@@ -2,6 +2,8 @@ using System.Text;
 using Microsoft.AspNetCore.Http;
 using MqttWire.Server;
 using MqttWire.Server.Internal;
+using MqttWire.Tests.Client;
+using MqttWire.Tests.Codec;
 
 namespace MqttWire.Tests.Server;
 
@@ -230,10 +232,11 @@ public sealed class PublicTypesTests
     }
 
     /// <summary>
-    /// Proves that the default value of each result type is its accepted value.
+    /// Proves that the default value of each result type fails closed: it is a refusal with 0x87 (not authorized)
+    /// and no reason string, so a handler that returns <c>default</c> lets nobody in and nothing through.
     /// </summary>
     [Fact]
-    public void Default_EachResult_IsAccepted()
+    public void Default_EachResult_RefusesWith0x87()
     {
         // Arrange
         // Act
@@ -243,12 +246,135 @@ public sealed class PublicTypesTests
         MqttSubscribeResult subscribe = default;
 
         // Assert
-        publish.IsAccepted.ShouldBeTrue();
-        admit.IsAccepted.ShouldBeTrue();
-        connect.IsAccepted.ShouldBeTrue();
+        publish.IsAccepted.ShouldBeFalse();
+        publish.ReasonCode.ShouldBe(MqttReasonCode.NotAuthorized);
+        publish.ReasonString.ShouldBeNull();
+        admit.IsAccepted.ShouldBeFalse();
+        admit.ReasonCode.ShouldBe(MqttReasonCode.NotAuthorized);
+        admit.ReasonString.ShouldBeNull();
+        connect.IsAccepted.ShouldBeFalse();
+        connect.ReasonCode.ShouldBe(MqttReasonCode.NotAuthorized);
+        connect.ReasonString.ShouldBeNull();
         connect.State.ShouldBeNull();
+        subscribe.IsAccepted.ShouldBeFalse();
+        subscribe.ReasonCode.ShouldBe(MqttReasonCode.NotAuthorized);
+        subscribe.ReasonString.ShouldBeNull();
+    }
+
+    /// <summary>
+    /// Proves that only the factory members accept: each is accepted, with the reason code its packet carries.
+    /// </summary>
+    [Fact]
+    public void Accept_EachResultsFactory_IsAccepted()
+    {
+        // Arrange
+        // Act
+        MqttPublishResult publish = MqttPublishResult.Accepted;
+        MqttAdmitResult admit = MqttAdmitResult.Accepted;
+        MqttConnectResult connect = MqttConnectResult.Accept();
+        MqttSubscribeResult subscribe = MqttSubscribeResult.Granted(MqttQoS.AtMostOnce);
+
+        // Assert
+        publish.IsAccepted.ShouldBeTrue();
+        publish.ReasonCode.ShouldBe(MqttReasonCode.Success);
+        admit.IsAccepted.ShouldBeTrue();
+        admit.ReasonCode.ShouldBe(MqttReasonCode.Success);
+        connect.IsAccepted.ShouldBeTrue();
+        connect.ReasonCode.ShouldBe(MqttReasonCode.Success);
         subscribe.IsAccepted.ShouldBeTrue();
         subscribe.ReasonCode.ShouldBe(MqttReasonCode.Success);
+    }
+
+    /// <summary>
+    /// Proves that a handler that returns <c>default</c> from <c>OnConnectAsync</c> authenticates nobody: the CONNECT
+    /// is refused with CONNACK 0x87 and the admission is not reached.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task OnConnectAsync_ReturnsTheDefaultValue_RefusesWith0x87()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        harness.Handler.Connect = static (_, _) => ValueTask.FromResult<MqttConnectResult>(default);
+        TestConnection connection = harness.Accept();
+
+        // Act
+        connection.Deliver(ServerPackets.Connect);
+        byte[] written = connection.TakeWritten();
+        connection.Link.EndFromPeer();
+        await connection.RunEnded();
+
+        // Assert
+        written.ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.NotAuthorized));
+        harness.Handler.CallsNow().ShouldBe(["OnConnectAsync c1"]);
+        harness.Server.ConnectionCount.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a handler that returns <c>default</c> from <c>OnAdmit</c> admits nobody: the CONNECT is refused
+    /// with CONNACK 0x87, the connection is in no table and gets no <c>OnClosed</c>.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task OnAdmit_ReturnsTheDefaultValue_RefusesWith0x87()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        harness.Handler.Admit = static (_, _) => default;
+        TestConnection connection = harness.Accept();
+
+        // Act
+        connection.Deliver(ServerPackets.Connect);
+        byte[] written = connection.TakeWritten();
+        connection.Link.EndFromPeer();
+        await connection.RunEnded();
+
+        // Assert
+        written.ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.NotAuthorized));
+        harness.Handler.CallsNow().ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-"]);
+        harness.Server.ConnectionCount.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a handler that returns <c>default</c> from <c>OnSubscribe</c> grants nothing: the SUBACK carries
+    /// 0x87 for the filter.
+    /// </summary>
+    [Fact]
+    public void OnSubscribe_ReturnsTheDefaultValue_RefusesTheFilterWith0x87()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        harness.Handler.Subscribe = static (_, _, _) => default;
+        TestConnection connection = harness.Connect();
+
+        // Act
+        connection.Deliver(ServerPackets.Subscribe);
+
+        // Assert
+        connection.TakeWritten().ShouldBe(ServerPackets.SubAckNotAuthorized);
+    }
+
+    /// <summary>
+    /// Proves that a handler that returns <c>default</c> from <c>OnPublish</c> accepts nothing: a QoS 1 publish is
+    /// answered with PUBACK 0x87.
+    /// </summary>
+    [Fact]
+    public void OnPublish_ReturnsTheDefaultValue_RefusesWith0x87()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        harness.Handler.Publish = static (MqttWireConnection _, in MqttPublish _) => default;
+        TestConnection connection = harness.Connect();
+
+        // Act
+        connection.Deliver(ClientPackets.PublishQoS1);
+
+        // Assert
+        connection.TakeWritten().ShouldBe(Hex.Parse("40 03 00 01 87"));
     }
 
     /// <summary>

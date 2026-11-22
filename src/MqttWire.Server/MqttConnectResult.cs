@@ -6,12 +6,24 @@ namespace MqttWire.Server;
 
 /// <summary>
 /// The answer to <see cref="IMqttWireHandler.OnConnectAsync"/>: accept, with the state object of the host for the
-/// connection and optional user properties for CONNACK; or refuse, with a reason code and a reason string. The
-/// default value is an acceptance with no state and no user properties.
+/// connection and optional user properties for CONNACK; or refuse, with a reason code and a reason string. Only
+/// <see cref="Accept"/> accepts: the default value is a refusal with 0x87 (not authorized) and no reason string, so
+/// a handler that returns <c>default</c> authenticates nobody.
 /// </summary>
 [StructLayout(LayoutKind.Auto)]
 public readonly struct MqttConnectResult
 {
+    /// <summary>
+    /// Whether a factory member created the value. The default value, which no factory created, fails closed: it
+    /// is a refusal with 0x87 (not authorized).
+    /// </summary>
+    private readonly bool _created;
+
+    /// <summary>
+    /// The reason code a factory member gave; meaningless in the default value.
+    /// </summary>
+    private readonly MqttReasonCode _reasonCode;
+
     /// <summary>
     /// Creates a result.
     /// </summary>
@@ -30,7 +42,8 @@ public readonly struct MqttConnectResult
     private MqttConnectResult(MqttReasonCode reasonCode, string? reasonString, object? state,
         MqttWireUserProperty[]? userProperties)
     {
-        ReasonCode = reasonCode;
+        _created = true;
+        _reasonCode = reasonCode;
         ReasonString = reasonString;
         State = state;
         UserProperties = userProperties;
@@ -42,9 +55,9 @@ public readonly struct MqttConnectResult
     internal bool IsAccepted => (byte)ReasonCode < 0x80;
 
     /// <summary>
-    /// Gets the reason code: below 0x80 for an acceptance.
+    /// Gets the reason code: below 0x80 for an acceptance; 0x87 for the default value.
     /// </summary>
-    internal MqttReasonCode ReasonCode { get; }
+    internal MqttReasonCode ReasonCode => _created ? _reasonCode : MqttReasonCode.NotAuthorized;
 
     /// <summary>
     /// Gets the reason string of a refusal, at most <see cref="ServerLimits.MaxReasonStringBytes"/> bytes, or

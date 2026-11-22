@@ -213,6 +213,12 @@ public sealed class MqttWireServer
 | `Close` | Ends the connection as 6.6 describes. Safe from any thread, any number of times. |
 | `State` | The host's own object for this connection. MqttWire never looks at it. |
 
+**The result types fail closed.** `MqttConnectResult`, `MqttAdmitResult`, `MqttSubscribeResult`
+and `MqttPublishResult` are values that only their factory members make accepting (`Accept`,
+`Accepted`, `Granted`). The default value of each (`default`, an unset field, a forgotten
+branch) is a refusal with `0x87` (not authorized) and no reason string: a handler that returns
+`default` authenticates nobody, admits nobody, grants nothing and lets no publish through.
+
 **The rules for a handler**
 
 - The handler is a singleton that dependency injection creates when the host starts, before
@@ -1390,13 +1396,16 @@ owner:
     returns (6.6, 6.12).
 34. The server resolves its handler when it starts, not when it is built, so a handler may take
     `MqttWireServer` in its constructor (6.2).
+35. The default value of each result type is a refusal with `0x87`; it used to accept (6.2). A
+    change of behaviour for a host that returned `default` to accept.
 
 ## 11. Left to the builder
 
 What was left here, and what step 3 decided:
 
 - Exact names and shapes of the public types, within what 6.2 and 6.3 fix: as 6.2 now shows.
-  The result types are readonly structs with factory members, whose default value accepts.
+  The result types are readonly structs with factory members, whose default value refuses
+  (6.2).
 - Whether `State` is an `object` or the server is generic over the host's state type: an
   `object?`, decided by the owner (section 9).
 - How the registration and mapping calls look, and how the server joins the host's shutdown:
