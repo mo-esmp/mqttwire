@@ -79,6 +79,12 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     private Exception? _abortFailure;
 
     /// <summary>
+    /// The number of calls of <see cref="WriteAsync"/> and <see cref="CloseAsync"/> that have begun and not yet
+    /// returned to their caller.
+    /// </summary>
+    private int _beginning;
+
+    /// <summary>
     /// Completes when <see cref="WriteCount"/> reaches <see cref="_writesWanted"/>, or <see langword="null"/> when
     /// no one waits.
     /// </summary>
@@ -121,6 +127,44 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     /// WebSocket such an abort throws, so a server must never issue one.
     /// </summary>
     public int AbortsAfterEnd
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return field;
+            }
+        }
+
+        private set;
+    }
+
+    /// <summary>
+    /// Gets the number of writes and closes that were begun while another write or close had not ended: one that the
+    /// link holds (<see cref="HoldWrites"/>), or one whose call had not returned yet. A WebSocket takes one send at
+    /// a time, so a correct user of a link never does this; the link only counts it, and goes on as before.
+    /// </summary>
+    public int OverlappingWrites
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return field;
+            }
+        }
+
+        private set;
+    }
+
+    /// <summary>
+    /// Gets the number of writes and closes that were begun after <see cref="Abort"/>. A user that has aborted its
+    /// link has nothing more to say on it; but one that writes on one thread while another aborts cannot always
+    /// help beginning the one write it had already decided on, which then fails here as it does on a socket. So a
+    /// single-threaded test expects 0, and any test expects at most 1, with nothing following it
+    /// (<see cref="MemoryLinkChecks.FurtherWritesAfterAbort"/>). The link only counts.
+    /// </summary>
+    public int WritesAfterAbort
     {
         get
         {
@@ -599,28 +643,39 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     public ValueTask WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        Writing?.Invoke(packet);
-        lock (_gate)
+        NoteBeginning();
+        try
         {
-            if (_holdWrites)
+            Writing?.Invoke(packet);
+            lock (_gate)
             {
-                TaskCompletionSource completion = new();
-                _held.Enqueue(new HeldWrite(packet, completion));
-                return new ValueTask(completion.Task);
-            }
+                // A write begun after the abort fails at once, as on a socket, also when writes are held. A write
+                // that was held before the abort is the test's to end, as it chooses: that is deliberately more
+                // forgiving than a socket, whose pending write an abort fails.
+                if (IsAborted)
+                {
+                    return ValueTask.FromException(new OperationCanceledException());
+                }
 
-            if (_writeFailure is not null)
-            {
-                return ValueTask.FromException(_writeFailure);
-            }
+                if (_holdWrites)
+                {
+                    TaskCompletionSource completion = new();
+                    _held.Enqueue(new HeldWrite(packet, completion));
+                    return new ValueTask(completion.Task);
+                }
 
-            if (IsAborted)
-            {
-                return ValueTask.FromException(new OperationCanceledException());
-            }
+                if (_writeFailure is not null)
+                {
+                    return ValueTask.FromException(_writeFailure);
+                }
 
-            AppendWritten(packet.Span);
-            return default;
+                AppendWritten(packet.Span);
+                return default;
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _beginning);
         }
     }
 
@@ -639,12 +694,47 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     public ValueTask CloseAsync(WebSocketCloseStatus status, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        NoteBeginning();
+        try
+        {
+            lock (_gate)
+            {
+                ClosedWith = status;
+            }
+
+            return default;
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _beginning);
+        }
+    }
+
+    /// <summary>
+    /// Counts a write or a close that begins: as overlapping when another has begun and not returned, or is held;
+    /// and as after the abort when the link was aborted, the second and later ones on this link also in the shared
+    /// checks. The caller takes the count of beginnings down again when its call returns.
+    /// </summary>
+    private void NoteBeginning()
+    {
+        bool overlapping = Interlocked.Increment(ref _beginning) > 1;
         lock (_gate)
         {
-            ClosedWith = status;
-        }
+            if (overlapping || _held.Count > 0)
+            {
+                OverlappingWrites++;
+                Checks?.NoteOverlappingWrite();
+            }
 
-        return default;
+            if (IsAborted)
+            {
+                WritesAfterAbort++;
+                if (WritesAfterAbort > 1)
+                {
+                    Checks?.NoteFurtherWriteAfterAbort();
+                }
+            }
+        }
     }
 
     /// <summary>

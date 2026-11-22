@@ -644,6 +644,76 @@ public sealed class MemoryLinkTests
     }
 
     /// <summary>
+    /// Proves the link counts a write, and a close, begun while a write it holds has not ended, on itself and in the
+    /// checks it shares, and counts none for writes that follow each other.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task WriteAsync_BegunWhileAnotherIsHeld_IsCountedAsOverlapping()
+    {
+        // Arrange
+        MemoryLinkChecks checks = new();
+        MemoryLink link = new() { Checks = checks };
+        await link.WriteAsync(new byte[] { 1 }, CancellationToken.None);
+        await link.WriteAsync(new byte[] { 2 }, CancellationToken.None);
+        int afterWritesInTurn = link.OverlappingWrites;
+        link.HoldWrites();
+        ValueTask held = link.WriteAsync(new byte[] { 3 }, CancellationToken.None);
+
+        // Act
+        ValueTask overlapping = link.WriteAsync(new byte[] { 4 }, CancellationToken.None);
+        await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
+        link.CompleteHeldWrites();
+        await held;
+        await overlapping;
+
+        // Assert
+        afterWritesInTurn.ShouldBe(0);
+        link.OverlappingWrites.ShouldBe(2);
+        checks.OverlappingWrites.ShouldBe(2);
+        link.WritesAfterAbort.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves a write begun after the abort fails at once, also while writes are held, and is counted; that the
+    /// shared checks count only what follows the first such write on a link; and that a write held before the abort
+    /// is still the test's to complete.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task WriteAsync_BegunAfterTheAbort_FailsAndIsCounted()
+    {
+        // Arrange
+        MemoryLinkChecks checks = new();
+        MemoryLink link = new() { Checks = checks };
+        link.HoldWrites();
+        ValueTask heldBeforeTheAbort = link.WriteAsync(new byte[] { 1 }, CancellationToken.None);
+        link.Abort();
+        link.CompleteHeldWrites();
+        await heldBeforeTheAbort;
+        link.HoldWrites();
+
+        // Act
+        ValueTask first = link.WriteAsync(new byte[] { 2 }, CancellationToken.None);
+        int sharedAfterTheFirst = checks.FurtherWritesAfterAbort;
+        ValueTask second = link.WriteAsync(new byte[] { 3 }, CancellationToken.None);
+
+        // Assert
+        first.IsFaulted.ShouldBeTrue();
+        second.IsFaulted.ShouldBeTrue();
+        await Should.ThrowAsync<OperationCanceledException>(async () => await first);
+        await Should.ThrowAsync<OperationCanceledException>(async () => await second);
+        link.WritesAfterAbort.ShouldBe(2);
+        sharedAfterTheFirst.ShouldBe(0);
+        checks.FurtherWritesAfterAbort.ShouldBe(1);
+        link.TakeWritten().ShouldBe(new byte[] { 1 });
+    }
+
+    /// <summary>
     /// Creates a deterministic byte pattern.
     /// </summary>
     /// <param name="start">

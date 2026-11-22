@@ -254,11 +254,14 @@ public sealed class ServerStressTests
             int disconnect = types.IndexOf((byte)PacketType.Disconnect);
             if (writesAfterTheClose != 0 || (disconnect >= 0 && disconnect != types.Count - 1) || published > taken
                 || afterTheClose != MqttSendResult.NotOpen || harness.Pool.Outstanding != 0
-                || harness.Pool.FaultyReturns != 0)
+                || harness.Pool.FaultyReturns != 0 || link.OverlappingWrites != 0 || link.WritesAfterAbort > 1
+                || link.AbortsAfterEnd != 0)
             {
                 failures.Add($"round {round} (held {held}): writes after the close {writesAfterTheClose}, packets "
                              + $"[{string.Join(' ', types)}], taken {taken}, after the close {afterTheClose}, "
-                             + $"outstanding {harness.Pool.Outstanding}, faulty returns {harness.Pool.FaultyReturns}");
+                             + $"outstanding {harness.Pool.Outstanding}, faulty returns {harness.Pool.FaultyReturns}, "
+                             + $"overlapping writes {link.OverlappingWrites}, writes after the abort "
+                             + $"{link.WritesAfterAbort}, aborts after the end {link.AbortsAfterEnd}");
             }
         }
 

@@ -279,8 +279,10 @@ internal sealed class ServerHarness
     /// the count against the receive maximum, the deliveries in the client's window, at most the window the test
     /// computed from the CONNECT it sent, the waiting deliveries, the waiting control packets and the bytes on the way
     /// out), and the buffers out of the pool are no more than <see cref="MaxBuffersPerConnection"/> for each
-    /// connection that has a slot: one that has ended holds none. And no link was aborted after the run over it had
-    /// ended (design 6.6, "Closing, bounded"): over a WebSocket that abort throws. Called by
+    /// connection that has a slot: one that has ended holds none. And on every link of the harness the server kept
+    /// to what a WebSocket demands (design 6.6): one write or close at a time; after an abort of the link at most
+    /// the one write that was decided on before it, and nothing behind that; and no abort after the run over the
+    /// link had ended, which over a WebSocket throws. Called by
     /// <see cref="TestConnection"/> after every delivery, by <see cref="Advance"/> after every step of the clock, and
     /// by the tests after every send.
     /// </summary>
@@ -288,6 +290,8 @@ internal sealed class ServerHarness
     {
         Pool.FaultyReturns.ShouldBe(0);
         _linkChecks.AbortsAfterEnd.ShouldBe(0);
+        _linkChecks.OverlappingWrites.ShouldBe(0);
+        _linkChecks.FurtherWritesAfterAbort.ShouldBe(0);
         MqttWireServerOptions options = Server.Options;
         Pool.LargestRent.ShouldBeLessThanOrEqualTo(Math.Max(ServerLimits.MaxEncodingBufferBytes,
             options.MaxPublishPayloadBytes + ServerLimits.PublishOverheadBytes + 5));
