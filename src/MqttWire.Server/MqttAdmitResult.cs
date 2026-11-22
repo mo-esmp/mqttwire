@@ -68,8 +68,7 @@ public readonly struct MqttAdmitResult
     /// The reason code, 0x80 or above.
     /// </param>
     /// <param name="reasonString">
-    /// A human-readable reason, or <see langword="null"/>; it is cut to
-    /// <see cref="ServerLimits.MaxReasonStringBytes"/> bytes.
+    /// A human-readable reason, or <see langword="null"/>; it is cut to 256 UTF-8 bytes.
     /// </param>
     /// <returns>
     /// A refusal.

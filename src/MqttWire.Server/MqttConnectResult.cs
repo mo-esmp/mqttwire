@@ -90,8 +90,8 @@ public readonly struct MqttConnectResult
     /// An acceptance.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// The user properties are over <see cref="ServerLimits.MaxConnAckUserPropertyBytes"/> bytes encoded, or a
-    /// name or value cannot be carried (U+0000, an unpaired surrogate or over 65,535 bytes).
+    /// The user properties are over 1,024 bytes encoded, or a name or value cannot be carried (U+0000, an unpaired
+    /// surrogate or over 65,535 bytes).
     /// </exception>
     public static MqttConnectResult Accept(object? state = null, MqttWireUserProperty[]? userProperties = null)
     {
@@ -114,8 +114,7 @@ public readonly struct MqttConnectResult
     /// The reason code, 0x80 or above.
     /// </param>
     /// <param name="reasonString">
-    /// A human-readable reason, or <see langword="null"/>; it is cut to
-    /// <see cref="ServerLimits.MaxReasonStringBytes"/> bytes.
+    /// A human-readable reason, or <see langword="null"/>; it is cut to 256 UTF-8 bytes.
     /// </param>
     /// <returns>
     /// A refusal.

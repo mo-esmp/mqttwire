@@ -65,7 +65,7 @@ public readonly struct MqttSubscribeResult
     /// Grants the subscription at a QoS.
     /// </summary>
     /// <param name="qos">
-    /// The QoS granted; the server lowers it to its maximum if needed.
+    /// The QoS granted; the server lowers it to <see cref="MqttWireServerOptions.MaxQoS"/> if needed.
     /// </param>
     /// <returns>
     /// A grant.
@@ -91,8 +91,7 @@ public readonly struct MqttSubscribeResult
     /// The reason code, 0x80 or above.
     /// </param>
     /// <param name="reasonString">
-    /// A human-readable reason, or <see langword="null"/>; it is cut to
-    /// <see cref="ServerLimits.MaxReasonStringBytes"/> bytes.
+    /// A human-readable reason, or <see langword="null"/>; it is cut to 256 UTF-8 bytes.
     /// </param>
     /// <returns>
     /// A refusal.

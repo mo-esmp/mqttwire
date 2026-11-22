@@ -19,8 +19,11 @@ namespace MqttWire.Server;
 public interface IMqttWireHandler
 {
     /// <summary>
-    /// Decides who a connecting client is. May take time and may do I/O; it has a deadline, and a connection
-    /// that overruns it is refused.
+    /// Decides who a connecting client is. May take time and may do I/O; it has a deadline of about 10 seconds, and
+    /// a connection that overruns it is refused with CONNACK 0x88. What it returns or throws after that is logged
+    /// and discarded. It must not block the calling thread: a call that neither returns nor heeds its token has its
+    /// connection's socket aborted 2 seconds after the token was cancelled, and holds that connection's place in the
+    /// server until it returns.
     /// </summary>
     /// <param name="request">
     /// The CONNECT as the host needs it. It owns copies of what it holds, so it may be used across awaits.
@@ -42,7 +45,8 @@ public interface IMqttWireHandler
     /// The new connection, which is not open yet.
     /// </param>
     /// <param name="replaces">
-    /// The connection that currently has this client id, or <see langword="null"/> when there is none.
+    /// The connection that currently has this client id, or <see langword="null"/> when there is none. It may be
+    /// closing already; it then keeps the reason it is closing with.
     /// </param>
     /// <returns>
     /// Accept or refuse. When <paramref name="replaces"/> is not <see langword="null"/> and the host accepts, the
@@ -64,8 +68,8 @@ public interface IMqttWireHandler
     /// The QoS the client asked for.
     /// </param>
     /// <returns>
-    /// Grant at a QoS (the server lowers it to the highest QoS it supports if needed), or refuse with a reason
-    /// code and a reason string.
+    /// Grant at a QoS (the server lowers it to <see cref="MqttWireServerOptions.MaxQoS"/> if needed), or refuse with
+    /// a reason code and a reason string. The server does not remember the grant.
     /// </returns>
     MqttSubscribeResult OnSubscribe(MqttWireConnection connection, string topicFilter, MqttQoS requested);
 
@@ -94,15 +98,16 @@ public interface IMqttWireHandler
     /// </param>
     /// <returns>
     /// Accept, or refuse with a reason code and a reason string. The server sends the answer in the form the QoS
-    /// calls for.
+    /// calls for: a PUBACK at QoS 1, a PUBREC at QoS 2, nothing at QoS 0.
     /// </returns>
     MqttPublishResult OnPublish(MqttWireConnection connection, in MqttPublish publish);
 
     /// <summary>
     /// Tells the host that a connection ended. Called exactly once for every connection that
-    /// <see cref="OnAdmit"/> accepted, after the last other call for that connection has returned. It must not wait
-    /// on the server's stop, or on a shutdown of the host's own that waits for it: the stop waits for every
-    /// <see cref="OnClosed"/> to return.
+    /// <see cref="OnAdmit"/> accepted, after the last other call for that connection has returned. It may run on a
+    /// thread-pool thread, and never runs inside the host's own <see cref="MqttWireConnection.TrySend"/> or
+    /// <see cref="MqttWireConnection.Close"/>. It must not wait on the server's stop, or on a shutdown of the host's
+    /// own that waits for it: the stop waits for every <see cref="OnClosed"/> to return.
     /// </summary>
     /// <param name="connection">
     /// The connection that ended.

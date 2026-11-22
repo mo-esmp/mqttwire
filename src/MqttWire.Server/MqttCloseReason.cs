@@ -11,7 +11,8 @@ public enum MqttCloseReason
     ClientDisconnected,
 
     /// <summary>
-    /// The link ended without a DISCONNECT.
+    /// The link ended without a DISCONNECT: the client went away, a write failed, a text message arrived, or a fault
+    /// inside the server ended the connection (which the server logs as an error).
     /// </summary>
     ConnectionLost,
 
@@ -21,7 +22,8 @@ public enum MqttCloseReason
     MalformedPacket,
 
     /// <summary>
-    /// The client broke the protocol.
+    /// The client broke the protocol, or sent what the server does not take: a packet too large, a topic alias, a
+    /// QoS above <see cref="MqttWireServerOptions.MaxQoS"/>, a subscription identifier.
     /// </summary>
     ProtocolError,
 
@@ -31,7 +33,7 @@ public enum MqttCloseReason
     KeepAliveTimedOut,
 
     /// <summary>
-    /// A packet stayed incomplete for too long.
+    /// A packet stayed incomplete for too long, or data the client announced did not arrive.
     /// </summary>
     PartialPacketTimedOut,
 
@@ -46,7 +48,8 @@ public enum MqttCloseReason
     AcknowledgementTimedOut,
 
     /// <summary>
-    /// More messages or bytes waited for the client than the options allow.
+    /// More messages or bytes waited for the client than the options allow, or more answers to its own packets than
+    /// the server holds.
     /// </summary>
     OutgoingLimitPassed,
 
@@ -56,7 +59,8 @@ public enum MqttCloseReason
     ReceiveMaximumPassed,
 
     /// <summary>
-    /// A message was larger than the client accepts.
+    /// A message handed to <see cref="MqttWireConnection.TrySend"/> was larger than the client accepts, or than
+    /// <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>.
     /// </summary>
     MessageTooLargeToSend,
 

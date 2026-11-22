@@ -49,8 +49,8 @@ public readonly struct MqttTopic
     /// The topic is <see langword="null"/>.
     /// </exception>
     /// <exception cref="ArgumentException">
-    /// The topic is empty, holds <c>+</c>, <c>#</c> or U+0000, has an unpaired surrogate, or is over
-    /// <see cref="ServerLimits.MaxTopicBytes"/> UTF-8 bytes.
+    /// The topic is empty, holds <c>+</c>, <c>#</c> or U+0000, has an unpaired surrogate, or is over 65,526 UTF-8
+    /// bytes (9 fewer than MQTT allows, so that the header of every PUBLISH fits one buffer).
     /// </exception>
     public static MqttTopic Create(string topic)
     {
@@ -75,8 +75,7 @@ public readonly struct MqttTopic
     /// The topic.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// The bytes are not valid UTF-8, are empty, hold <c>+</c>, <c>#</c> or U+0000, or are over
-    /// <see cref="ServerLimits.MaxTopicBytes"/> bytes.
+    /// The bytes are not valid UTF-8, are empty, hold <c>+</c>, <c>#</c> or U+0000, or are over 65,526 bytes.
     /// </exception>
     public static MqttTopic Create(ReadOnlySpan<byte> utf8Topic)
     {

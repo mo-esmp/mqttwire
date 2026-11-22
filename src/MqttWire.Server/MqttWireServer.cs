@@ -9,8 +9,8 @@ using MqttWire.Server.Internal;
 namespace MqttWire.Server;
 
 /// <summary>
-/// The running server: lets the host look up the connections that are open. It has no public constructor; the
-/// host gets it from dependency injection.
+/// The running server: lets the host look up the connections it has admitted. It has no public constructor; the
+/// host gets it from dependency injection, and its handler may take it in its constructor.
 /// </summary>
 public sealed class MqttWireServer
 {
@@ -125,7 +125,9 @@ public sealed class MqttWireServer
     }
 
     /// <summary>
-    /// Gets the number of open connections.
+    /// Gets the number of connections that have a client identifier's place: every connection from its admission
+    /// until it has closed, one that is closing included, counted until just before its
+    /// <see cref="IMqttWireHandler.OnClosed"/>.
     /// </summary>
     public int ConnectionCount => Registry.ActiveCount;
 
@@ -208,7 +210,10 @@ public sealed class MqttWireServer
     internal long AcknowledgementDeadlineLength { get; }
 
     /// <summary>
-    /// Looks up an open connection by client identifier.
+    /// Looks up the connection that has a client identifier: the one admitted last for it, from its admission until
+    /// it has closed. So it may be closing already, in which case its <see cref="MqttWireConnection.TrySend"/>
+    /// answers <see cref="MqttSendResult.NotOpen"/>; it is found until just before its
+    /// <see cref="IMqttWireHandler.OnClosed"/>.
     /// </summary>
     /// <param name="clientId">
     /// The client identifier.
@@ -217,8 +222,7 @@ public sealed class MqttWireServer
     /// The connection when found; otherwise <see langword="null"/>.
     /// </param>
     /// <returns>
-    /// <see langword="true"/> when a connection with this client identifier is open; <see langword="false"/>
-    /// otherwise.
+    /// <see langword="true"/> when a connection has this client identifier; <see langword="false"/> otherwise.
     /// </returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="clientId"/> is <see langword="null"/>.

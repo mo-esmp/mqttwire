@@ -292,10 +292,13 @@ public sealed partial class MqttWireConnection
     /// The payload; it is referenced, not copied.
     /// </param>
     /// <param name="qos">
-    /// The QoS to deliver with; the server lowers it to what the client was granted if needed.
+    /// The QoS to deliver with. The server lowers it only to <see cref="MqttWireServerOptions.MaxQoS"/>. It keeps
+    /// no record of subscriptions, so it does not know what the client was granted: sending at no higher QoS than
+    /// the host granted is the host's.
     /// </param>
     /// <returns>
-    /// <see cref="MqttSendResult.Taken"/> when the server took the message; otherwise why it did not: the
+    /// <see cref="MqttSendResult.Taken"/> when the server took the message, which means accepted, not delivered: it
+    /// is written when the socket allows, and is dropped if the connection ends first. Otherwise why it did not: the
     /// connection is not open, the message is too large, or the connection was just evicted. A message that was
     /// not taken is not queued. "Not open" changes nothing; "too large" and "evicted" also end the connection,
     /// with <see cref="MqttCloseReason.MessageTooLargeToSend"/> and <see cref="MqttCloseReason.OutgoingLimitPassed"/>.
@@ -324,11 +327,13 @@ public sealed partial class MqttWireConnection
     /// Ends the connection. Safe from any thread and any number of times; a call after the first changes
     /// nothing. It never waits for the network: when nothing is being written to the client, DISCONNECT with the
     /// reason code is handed to the socket, followed by the WebSocket close; when a write is in progress, the socket
-    /// is aborted instead, so a client that is not reading is never waited for.
-    /// <see cref="IMqttWireHandler.OnClosed"/> then reports <see cref="MqttCloseReason.ClosedByHost"/>.
+    /// is aborted instead, so a client that is not reading is never waited for. A connection that is not admitted yet
+    /// (the call comes from inside <see cref="IMqttWireHandler.OnAdmit"/>) is aborted too, with no packet.
+    /// <see cref="IMqttWireHandler.OnClosed"/> then reports <see cref="MqttCloseReason.ClosedByHost"/>, unless the
+    /// connection was already ending for another reason, which it keeps.
     /// </summary>
     /// <param name="reason">
-    /// The reason code to send to the client in DISCONNECT.
+    /// The reason code to send to the client in DISCONNECT, when one is sent.
     /// </param>
     /// <param name="reasonString">
     /// A human-readable reason, or <see langword="null"/>; it is cut to 256 UTF-8 bytes.

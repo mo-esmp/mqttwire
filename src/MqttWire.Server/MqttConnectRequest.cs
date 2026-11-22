@@ -6,8 +6,8 @@ namespace MqttWire.Server;
 /// <summary>
 /// The CONNECT of a client as the host needs it: client id, user name, password, the user properties the client
 /// sent, the remote end point, whether the connection is secure, and the HTTP context of the WebSocket request.
-/// It owns copies of what it holds, so it may be used across awaits inside
-/// <see cref="IMqttWireHandler.OnConnectAsync"/>.
+/// It owns copies of what the CONNECT held, so it may be used across awaits inside
+/// <see cref="IMqttWireHandler.OnConnectAsync"/>; the HTTP context is the request's own.
 /// </summary>
 public sealed class MqttConnectRequest
 {
@@ -50,7 +50,8 @@ public sealed class MqttConnectRequest
     }
 
     /// <summary>
-    /// Gets the client identifier: the one the client sent, or the one the server assigned when it sent none.
+    /// Gets the client identifier the client sent: never empty and at most 256 UTF-8 bytes. The server assigns
+    /// none: a CONNECT with an empty client identifier is refused with 0x85 before the host is asked.
     /// </summary>
     public string ClientId { get; }
 
@@ -80,12 +81,15 @@ public sealed class MqttConnectRequest
     public IPEndPoint? RemoteEndPoint { get; }
 
     /// <summary>
-    /// Gets a value indicating whether the connection is secure (TLS).
+    /// Gets a value indicating whether the WebSocket request came over HTTPS, as the request itself says
+    /// (<see cref="HttpRequest.IsHttps"/>).
     /// </summary>
     public bool IsSecure { get; }
 
     /// <summary>
-    /// Gets the context of the WebSocket request: headers, cookies and the authenticated user.
+    /// Gets the context of the WebSocket request: headers, cookies and the authenticated user. It is the request's
+    /// own object, not a copy: it is valid only while the connection lives, so a host that needs something from it
+    /// later takes it out during <see cref="IMqttWireHandler.OnConnectAsync"/>.
     /// </summary>
     public HttpContext HttpContext { get; }
 }
