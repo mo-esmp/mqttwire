@@ -8,7 +8,7 @@ namespace MqttWire.Tests.Client;
 /// An <see cref="ArrayPool{T}"/> over the shared pool that counts what is out and refuses a return it did not
 /// expect, so a test can prove that every rented buffer comes back exactly once.
 /// </summary>
-internal sealed class CountingPool : ArrayPool<byte>
+internal sealed class CountingPool : ArrayPool<byte>, IPoolCounts
 {
     private readonly Lock _gate = new();
     private readonly HashSet<byte[]> _rented = [];

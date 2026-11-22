@@ -8,7 +8,7 @@ namespace MqttWire.Tests.Client;
 /// every returned array with <see cref="Filler"/> and hands it out again on the next <see cref="Rent"/> of a size
 /// it fits, the most recently returned first. It counts what is out and refuses a return it did not expect.
 /// </summary>
-internal sealed class OverwritingPool : ArrayPool<byte>
+internal sealed class OverwritingPool : ArrayPool<byte>, IPoolCounts
 {
     /// <summary>
     /// The byte every returned array is filled with.
@@ -34,6 +34,11 @@ internal sealed class OverwritingPool : ArrayPool<byte>
     /// The number of returns refused.
     /// </summary>
     private int _faultyReturns;
+
+    /// <summary>
+    /// The largest minimum length any rent asked for.
+    /// </summary>
+    private int _largestRent;
 
     /// <summary>
     /// Gets or sets a callback that sees each array as it comes back, before it is overwritten and while it is still
@@ -65,6 +70,20 @@ internal sealed class OverwritingPool : ArrayPool<byte>
             lock (_gate)
             {
                 return _faultyReturns;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the largest minimum length any rent asked for; 0 before the first rent.
+    /// </summary>
+    public int LargestRent
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _largestRent;
             }
         }
     }
@@ -119,6 +138,7 @@ internal sealed class OverwritingPool : ArrayPool<byte>
 
             array ??= new byte[minimumLength];
             _rented.Add(array);
+            _largestRent = Math.Max(_largestRent, minimumLength);
             return array;
         }
     }

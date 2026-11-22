@@ -275,6 +275,7 @@ public sealed class ServerBufferTests
         second.Deliver(ClientPackets.PingReq);
         byte[] secondsAnswer = second.TakeWritten();
         byte[] mine = pool.Rent(pending.Length);
+        harness.RentedByTheTest = 1;
         mine.AsSpan().Fill(Mine);
         bool outAfterOtherRents = pool.IsRented(pending);
         bool readStillPending = first.Link.IsReadPending;
@@ -331,6 +332,7 @@ public sealed class ServerBufferTests
         second.Deliver(ClientPackets.PingReq);
         byte[] secondsAnswer = second.TakeWritten();
         byte[] mine = pool.Rent(held.Length);
+        harness.RentedByTheTest = 1;
         mine.AsSpan().Fill(Mine);
         byte[] afterOtherRents = held.ToArray();
         bool outBeforeTheWriteEnds = pool.IsRented(held);
@@ -586,6 +588,7 @@ public sealed class ServerBufferTests
                 () => server.Close(MqttReasonCode.AdministrativeAction)));
             Thread renter = new(() => RunAtTheGate(ref ready, threads: 3, renterDelay, () => RentAndFill(pool, mine,
                 held.Length)));
+            harness.RentedByTheTest = mine.Length;
 
             // Act
             completer.Start();
@@ -661,6 +664,7 @@ public sealed class ServerBufferTests
             second.Deliver(ClientPackets.PingReq);
             secondsAnswer = second.TakeWritten();
             mine = pool.Rent(pending.Length);
+            harness.RentedByTheTest = 1;
             mine.AsSpan().Fill(Mine);
             bytesAtTheAbort = pending[..arriving.Length].ToArray();
             outAfterOtherRents = pool.IsRented(pending);
@@ -721,6 +725,7 @@ public sealed class ServerBufferTests
             Thread aborter = new(() => RunAtTheGate(ref ready, threads: 3, aborterDelay, connection.Link.Abort));
             Thread renter = new(() =>
                 RunAtTheGate(ref ready, threads: 3, renterDelay, () => RentAndFill(pool, mine, pending.Length)));
+            harness.RentedByTheTest = mine.Length;
 
             // Act
             deliverer.Start();

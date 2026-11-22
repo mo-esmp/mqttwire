@@ -65,8 +65,8 @@ internal sealed class ServerHarness
     /// <param name="timers">
     /// The clock the server is given, over <paramref name="time"/>.
     /// </param>
-    /// <param name="pool">
-    /// The pool the bounds are asserted on.
+    /// <param name="counts">
+    /// The counts of the pool the server rents from, which the bounds are asserted on.
     /// </param>
     private ServerHarness(
         MqttWireServer server,
@@ -74,14 +74,15 @@ internal sealed class ServerHarness
         RecordingLogger log,
         FakeTimeProvider time,
         CountingTimeProvider timers,
-        CountingPool pool)
+        IPoolCounts counts)
     {
         Server = server;
         Handler = handler;
         Log = log;
         Time = time;
         Timers = timers;
-        Pool = pool;
+        Counts = counts;
+        Pool = counts as CountingPool;
     }
 
     /// <summary>
@@ -110,11 +111,27 @@ internal sealed class ServerHarness
     public CountingTimeProvider Timers { get; }
 
     /// <summary>
-    /// Gets the counting pool the bounds are asserted on: the pool the server rents from, the inner pool of a
-    /// <see cref="ThrowingPool"/> it rents from, or, when a test gave a pool of another kind, one the server never
-    /// rents from.
+    /// Gets the counting pool the server rents from: the one the harness created or was given, or the inner pool of
+    /// a <see cref="ThrowingPool"/>.
     /// </summary>
-    public CountingPool Pool { get; }
+    /// <exception cref="InvalidOperationException">
+    /// The server rents from a pool of another kind (an <see cref="OverwritingPool"/>): a test of such a pool asserts
+    /// on that pool, or on <see cref="Counts"/>, never on a pool the server does not use.
+    /// </exception>
+    public CountingPool Pool => field
+        ?? throw new InvalidOperationException("The server does not rent from a CountingPool: use Counts.");
+
+    /// <summary>
+    /// Gets the counts of the pool the server rents from, whatever its kind: what the bounds are asserted on. For a
+    /// pool that counts nothing, such as the shared pool, every count is 0.
+    /// </summary>
+    public IPoolCounts Counts { get; }
+
+    /// <summary>
+    /// Gets or sets the number of buffers the test itself has out of the pool the server rents from, which
+    /// <see cref="AssertBounds"/> allows for on top of the connections' own; 0 unless a test rents from that pool.
+    /// </summary>
+    public int RentedByTheTest { get; set; }
 
     /// <summary>
     /// Creates a started server.
@@ -125,7 +142,9 @@ internal sealed class ServerHarness
     /// <param name="pool">
     /// The pool the server rents from, or <see langword="null"/> for a new <see cref="CountingPool"/>. A
     /// <see cref="CountingPool"/> given here is <see cref="Pool"/>, and so is the inner pool of a
-    /// <see cref="ThrowingPool"/>; a test that gives a pool of another kind asserts on it itself.
+    /// <see cref="ThrowingPool"/>; an <see cref="OverwritingPool"/> is asserted on through <see cref="Counts"/>. A
+    /// pool that counts nothing (the shared pool, for a test that measures allocations) leaves the bounds of the
+    /// buffers unasserted, and only those.
     /// </param>
     /// <param name="pools">
     /// The pools of queues and exchange records, or <see langword="null"/> for the server's own; for the tests of a
@@ -143,15 +162,16 @@ internal sealed class ServerHarness
         RecordingLogger log = new();
         FakeTimeProvider time = new();
         CountingTimeProvider timers = new(time);
-        CountingPool counting = pool switch
+        pool ??= new CountingPool();
+        IPoolCounts counts = pool switch
         {
-            CountingPool given => given,
+            IPoolCounts given => given,
             ThrowingPool throwing => throwing.Inner,
-            _ => new CountingPool(),
+            _ => Uncounted.Instance,
         };
-        MqttWireServer server = new(handler, options, log, timers, pool ?? counting, pools);
+        MqttWireServer server = new(handler, options, log, timers, pool, pools);
         server.Start();
-        return new ServerHarness(server, handler, log, time, timers, counting);
+        return new ServerHarness(server, handler, log, time, timers, counts);
     }
 
     /// <summary>
@@ -288,12 +308,12 @@ internal sealed class ServerHarness
     /// </summary>
     public void AssertBounds()
     {
-        Pool.FaultyReturns.ShouldBe(0);
+        Counts.FaultyReturns.ShouldBe(0);
         _linkChecks.AbortsAfterEnd.ShouldBe(0);
         _linkChecks.OverlappingWrites.ShouldBe(0);
         _linkChecks.FurtherWritesAfterAbort.ShouldBe(0);
         MqttWireServerOptions options = Server.Options;
-        Pool.LargestRent.ShouldBeLessThanOrEqualTo(Math.Max(ServerLimits.MaxEncodingBufferBytes,
+        Counts.LargestRent.ShouldBeLessThanOrEqualTo(Math.Max(ServerLimits.MaxEncodingBufferBytes,
             options.MaxPublishPayloadBytes + ServerLimits.PublishOverheadBytes + 5));
         int connections = 0;
         foreach (MqttWireConnection? connection in Server.Registry.Slots)
@@ -314,7 +334,33 @@ internal sealed class ServerHarness
             counts.OutgoingBytes.ShouldBeGreaterThanOrEqualTo(0);
         }
 
-        Pool.Outstanding.ShouldBeLessThanOrEqualTo(MaxBuffersPerConnection * connections);
+        Counts.Outstanding.ShouldBeLessThanOrEqualTo((MaxBuffersPerConnection * connections) + RentedByTheTest);
+    }
+
+    /// <summary>
+    /// The counts of a pool that counts nothing: all 0.
+    /// </summary>
+    private sealed class Uncounted : IPoolCounts
+    {
+        /// <summary>
+        /// The one instance.
+        /// </summary>
+        public static readonly Uncounted Instance = new();
+
+        /// <summary>
+        /// Gets 0: the pool does not count.
+        /// </summary>
+        public int Outstanding => 0;
+
+        /// <summary>
+        /// Gets 0: the pool does not count.
+        /// </summary>
+        public int FaultyReturns => 0;
+
+        /// <summary>
+        /// Gets 0: the pool does not count.
+        /// </summary>
+        public int LargestRent => 0;
     }
 
     /// <summary>
