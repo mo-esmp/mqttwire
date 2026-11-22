@@ -525,7 +525,7 @@ public sealed partial class MqttWireConnection
             // The close finds the send path taken, by this caller, and aborts; when the connection was closing
             // already, nothing has aborted the link yet, so that a failed link ends now and not at the close deadline.
             BeginClose(CloseCause.ConnectionLost, MqttReasonCode.Success, reasonString: null);
-            link.Abort();
+            AbortLink();
         }
 
         while (true)
@@ -592,7 +592,7 @@ public sealed partial class MqttWireConnection
 
         if (!HasSucceeded(close))
         {
-            link.Abort();
+            AbortLink();
         }
 
         return true;
@@ -891,7 +891,7 @@ public sealed partial class MqttWireConnection
         }
         catch (Exception)
         {
-            RunningLink.Abort();
+            AbortLink();
         }
 
         ContinueSending(returned: null, failed: false, int.MaxValue);

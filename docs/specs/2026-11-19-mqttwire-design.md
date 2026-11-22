@@ -224,11 +224,11 @@ public sealed class MqttWireServer
 - `OnClosed` is called once, after the last other call for that connection has returned. A
   connection that was refused in `OnConnectAsync` or `OnAdmit` gets no `OnClosed`. It must not
   wait on the server's stop: the stop waits for every `OnClosed` to return.
-- `OnClosed` may run on a thread-pool thread. Over ASP.NET Core's WebSocket an aborted read
-  ends on a thread-pool thread, so `OnClosed` never runs on the sweep's thread or on the thread
-  that stops the server. That comes from the transport, not from MqttWire: on a transport that
-  completes an aborted read inline, `OnClosed` runs inline on the thread that aborts, which can
-  be inside the host's own `TrySend` or `Close` (6.10).
+- `OnClosed` may run on a thread-pool thread, and never runs inside an abort of the link: the
+  end of a connection waits until an abort that is in flight has returned, and then carries on
+  on a thread-pool thread (6.6, "Closing, bounded"). So `OnClosed` never runs on the sweep's
+  thread or on the thread that stops the server, and never inside the host's own `TrySend` or
+  `Close`, whatever the transport does when its read is aborted.
 - A handler method that throws is the host's fault: the exception is logged as an error and
   the connection is closed with `0x83` (implementation specific error): with CONNACK `0x83` from
   `OnConnectAsync` or `OnAdmit`, and then no `OnClosed`; with DISCONNECT `0x83` from the others,
@@ -809,10 +809,34 @@ Every close the server starts follows the same steps, and none of them waits on 
    link is aborted.
 4. **Aborting does not release anything by itself** (6.8). The read loop and the write in
    progress each end with an error once the link is aborted; each returns its own buffer.
-5. The connection is Closed when the read loop has ended and no write is in progress. In this
-   order: it is removed from the client-id table (by object), it becomes Closed, `OnClosed` is
-   called (if it was admitted), and only then is its slot freed and does the endpoint's request
-   return to Kestrel. The stop waits for the slots.
+5. The connection is Closed when the read loop has ended, no write is in progress and no abort
+   of its link is in flight. In this order: it lets go of the link, it is removed from the
+   client-id table (by object), it becomes Closed, `OnClosed` is called (if it was admitted),
+   and only then is its slot freed and does the endpoint's request return to Kestrel. The stop
+   waits for the slots.
+
+**A link is never aborted once its request has ended.** ASP.NET Core's WebSocket aborts its
+`HttpContext`, and the first abort after the request has ended throws; over HTTP/2, where
+Kestrel reuses the stream and its context for a later request of the same connection, it could
+reach that request instead. An abort decided on one thread (the sweep, the stop, a takeover, a
+host's `Close` or `TrySend`) can meet the end of the run on another (the peer closes at that
+moment). So every abort goes through one rule, under the lock of the send path:
+
+- Whoever aborts first registers the abort, in a hold of the lock that finds the run not ended
+  and no abort in flight; where the abort follows a decision to end the connection, that is the
+  hold that makes the move to Closing. It then aborts outside the lock, and clears the
+  registration in a second hold. With an abort in flight, a second one is not issued: the first
+  does its work.
+- The run ends only in a hold that finds no write in progress and no abort in flight, and in
+  that hold it lets go of the link. From then on nothing aborts: a late `Close`, `TrySend` or
+  sweep finds the link gone.
+- A run that finds an abort in flight waits for it as it waits for a write in progress, and
+  carries on on a thread-pool thread; so the end of a connection, `OnClosed` included, never
+  runs inside an abort.
+- A link that throws when it is aborted is logged (6.12, event 20) and nothing is thrown at the
+  caller; the sweep aborts it again at the close deadline. The sweep itself lets no exception
+  out of a connection's check: it ends that connection as a fault (event 20) and goes on to the
+  next, because an exception on its timer's thread would end the process.
 
 #### When the host stops
 
@@ -1011,12 +1035,11 @@ What the host does itself: the table and its clean-up in `OnUnsubscribe` and `On
 may subscribe and publish; wildcards, if it wants them; whether the sender gets its own message
 back; and using the lower of the publish's QoS and the granted QoS.
 
-`_subscribers.Get` above stands for a snapshot of the recipients. A host must not hold a lock
-across `TrySend` unless that lock is re-entrant and its table tolerates a change: `TrySend` can
-close a connection (an eviction, a message too large), and on a transport that completes an
-aborted read inline that connection's `OnClosed` then runs inside the call (6.2). So the host
-takes a snapshot of the recipients under its lock and sends after releasing it, as
-`tests/MqttWire.TestHost/ExactTopicHandler.cs` does.
+`_subscribers.Get` above stands for a snapshot of the recipients. `TrySend` can close a
+connection (an eviction, a message too large). That connection's `OnClosed` never runs inside
+the call (6.2); it runs on another thread, where it waits for any lock the host holds across
+`TrySend`. So the host takes a snapshot of the recipients under its lock and sends after
+releasing it, as `tests/MqttWire.TestHost/ExactTopicHandler.cs` does.
 
 ### 6.11 Kept open for later
 
@@ -1062,7 +1085,7 @@ an admitted connection can end with, two of which the server does not decide:
 | 17 | the client disconnected | debug; the client's reason code |
 | 18 | the connection was lost | debug |
 | 19 | a late `OnConnectAsync` result, observed and discarded | debug; error, with the exception, when it threw |
-| 20 | the send path faulted: something threw inside MqttWire while it sent (6.6, "Sending"); a link whose write fails or throws is event 18 | error; the exception |
+| 20 | a fault inside MqttWire: something threw while it sent (6.6, "Sending"), a link threw when it was aborted, or the sweep's check of the connection threw (6.6, "Closing, bounded"); a link whose write fails or throws is event 18 | error; the exception |
 
 A connection whose CONNECT has not passed MqttWire's own checks has no client id yet: its line
 names the remote end point instead. An incoming packet that is too large, a topic alias, an
@@ -1075,7 +1098,9 @@ and, where a packet can carry it, on the wire.
 
 **No log line contains a password, a user name, a payload, a topic, user properties or the
 host's reason string.** The same reason is what `OnClosed` receives, with one exception: a
-send-path fault is logged as event 20 and reported to `OnClosed` as a lost connection. The three
+fault that ends a connection is logged as event 20 and reported to `OnClosed` as a lost
+connection (a link that throws when it is aborted ends nothing: the connection keeps the reason
+it was closing with). The three
 ends before admission (refused by the host, authentication timed out, connect timed out) are
 logged but never reach `OnClosed`. And an end can show two lines: events 15 and 20 are written
 by the code that caught the exception, even when its own close lost the race to another (for
@@ -1314,6 +1339,16 @@ Decided while the server was built in step 3 (2026-11-22), not yet seen by the o
 28. A link starts at most one close frame, whichever side closes first (6.5).
 29. The log's event ids; the remote end point in a line of a connection that has no client id
     yet; and the two lines of an exception whose close lost the race (6.12).
+
+Decided in the fix wave after the review of the whole server (2026-11-22), not yet seen by the
+owner:
+
+30. A link is aborted only while its connection's run has not ended, and the run waits for an
+    abort in flight; so `OnClosed` never runs inside an abort, on the sweep's thread, the
+    stopping thread or inside the host's `TrySend` or `Close` (6.2, 6.6).
+31. A link that throws when it is aborted, and a sweep's check that throws, are logged as event
+    20; the first ends nothing, the second ends that connection as a lost connection (6.6,
+    6.12).
 
 ## 11. Left to the builder
 

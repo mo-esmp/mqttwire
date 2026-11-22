@@ -111,21 +111,22 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Ends a connection after a fault inside MqttWire's sending, for a caller that does not hold the send path:
-    /// begins the close and aborts the link (<see cref="CloseAfterFault"/>), then logs the fault
-    /// (<see cref="LogFault"/>). It never touches the send path's own state: when someone holds the path, the close
-    /// finds it taken and aborts; when nobody does, the close takes it and writes its WebSocket close as any close
-    /// does. It cannot throw.
+    /// Ends a connection after a fault inside MqttWire's sending, for a caller that does not hold the send path, the
+    /// sweep whose check of the connection threw included: begins the close and aborts the link
+    /// (<see cref="CloseAfterFault"/>), then logs the fault (<see cref="LogFault"/>). It never touches the send
+    /// path's own state: when someone holds the path, the close finds it taken and aborts; when nobody does, the
+    /// close takes it and writes its WebSocket close as any close does. It cannot throw.
     /// </summary>
     /// <param name="exception">
     /// What was thrown.
     /// </param>
-    private void EndFaulted(Exception exception) => LogFault(exception, CloseAfterFault());
+    internal void EndFaulted(Exception exception) => LogFault(exception, CloseAfterFault());
 
     /// <summary>
     /// Begins the close with <see cref="CloseCause.SendPathFaulted"/> (reported to the host as
     /// <see cref="MqttCloseReason.ConnectionLost"/>), unless an earlier close recorded its own cause, and aborts the
-    /// link, which a close that had begun already has not necessarily done. The close writes no log line of its own:
+    /// link (<see cref="TryAbortLink"/>: unless the run has ended, or an abort is in flight already), which a close
+    /// that had begun already has not necessarily done. The close writes no log line of its own:
     /// the fault's line, which carries the exception, is written by <see cref="LogFault"/>. It cannot throw, and when
     /// it returns the connection is Closing or later: the close's own throw can come only after its move to Closing
     /// (the clock read for its stamp).
@@ -147,16 +148,8 @@ public sealed partial class MqttWireConnection
             secondary = thrown;
         }
 
-        try
-        {
-            RunningLink.Abort();
-        }
-        catch (Exception thrown)
-        {
-            // A link that cannot even be aborted: the sweep's close deadline is all that is left.
-            secondary ??= thrown;
-        }
-
+        // A link that cannot even be aborted: the sweep's close deadline is all that is left.
+        secondary ??= TryAbortLink();
         return secondary;
     }
 

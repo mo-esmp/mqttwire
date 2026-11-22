@@ -320,7 +320,9 @@ public sealed partial class MqttWireConnection
     /// connection gets <see cref="IMqttWireHandler.OnClosed"/>. A connection that was admitted but closed during or
     /// after the step (by the host from inside <see cref="IMqttWireHandler.OnAdmit"/>, or by a takeover) gets no
     /// CONNACK: that close found the send path reserved for the CONNACK and aborted the link, so no packet was
-    /// written, and the send path is given up here.
+    /// written, and the send path is given up here. The reservation never outlives this method unless the CONNACK is
+    /// to be written: should the close of the replaced connection throw, which it does not, this connection ends as
+    /// a fault (event 20) and gives the path up like one closed in the step.
     /// </summary>
     /// <returns>
     /// <see langword="true"/> when the connection was admitted and is Active: the send path is reserved for its
@@ -351,7 +353,17 @@ public sealed partial class MqttWireConnection
             return false;
         }
 
-        replaced?.BeginClose(CloseCause.TakenOver, MqttReasonCode.SessionTakenOver, reasonString: null);
+        try
+        {
+            replaced?.BeginClose(CloseCause.TakenOver, MqttReasonCode.SessionTakenOver, reasonString: null);
+        }
+        catch (Exception exception)
+        {
+            // The reserved send path must not be left taken, or this connection would never end: it ends as a
+            // fault, which finds the path reserved and aborts the link, and gives the path up below.
+            EndFaulted(exception);
+        }
+
         if (_state == ConnectionState.Active)
         {
             // A close from here on finds the send path taken until the CONNACK's write has ended, and aborts.
@@ -433,12 +445,16 @@ public sealed partial class MqttWireConnection
     /// <see cref="IMqttWireHandler.OnConnectAsync"/> nor a slow <see cref="IMqttWireHandler.OnAdmit"/> uses it up,
     /// and the first sweep that sees Active never reads an older stamp. When the connection has moved to Closing
     /// meanwhile, it stays there: it is admitted all the same, and its <see cref="IMqttWireHandler.OnClosed"/>
-    /// reports the reason it is closing with.
+    /// reports the reason it is closing with. It cannot throw: the caller read the clock before it changed the
+    /// table.
     /// </remarks>
-    internal void MarkAdmitted()
+    /// <param name="now">
+    /// The time of the admission, a timestamp of the server's clock.
+    /// </param>
+    internal void MarkAdmitted(long now)
     {
         _admitted = true;
-        Volatile.Write(ref _lastPacketAt, _server.Time.GetTimestamp());
+        Volatile.Write(ref _lastPacketAt, now);
         Interlocked.CompareExchange(ref _state, ConnectionState.Active, ConnectionState.Authenticating);
     }
 

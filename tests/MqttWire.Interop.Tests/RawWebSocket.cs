@@ -219,6 +219,11 @@ internal sealed class RawWebSocket : IAsyncDisposable
     }
 
     /// <summary>
+    /// Closes the TCP connection without a WebSocket close, at once and on the calling thread.
+    /// </summary>
+    public void CloseSocket() => _stream.Dispose();
+
+    /// <summary>
     /// Closes the TCP connection without a WebSocket close.
     /// </summary>
     /// <returns>

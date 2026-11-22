@@ -74,6 +74,11 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     private bool _holdReadsOnAbort;
 
     /// <summary>
+    /// What the next <see cref="Abort"/> throws instead of aborting, or <see langword="null"/> when it aborts.
+    /// </summary>
+    private Exception? _abortFailure;
+
+    /// <summary>
     /// Completes when <see cref="WriteCount"/> reaches <see cref="_writesWanted"/>, or <see langword="null"/> when
     /// no one waits.
     /// </summary>
@@ -91,6 +96,58 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     /// the moment a write begins; or <see langword="null"/>.
     /// </summary>
     public Action<ReadOnlyMemory<byte>>? Writing { get; set; }
+
+    /// <summary>
+    /// Gets or sets a callback that runs at the start of every <see cref="Abort"/>, on the aborting thread and
+    /// before the link is aborted, so a test can see what was true at the moment the abort was issued; or
+    /// <see langword="null"/>.
+    /// </summary>
+    public Action? Aborting { get; set; }
+
+    /// <summary>
+    /// Gets or sets the task of whoever runs over the link (the server's run of the connection), looked at at the
+    /// start of every <see cref="Abort"/>; or <see langword="null"/>.
+    /// </summary>
+    public Task? Run { get; set; }
+
+    /// <summary>
+    /// Gets or sets the checks this link reports to besides counting for itself, shared by the links of one harness
+    /// so that the harness can assert on all of them without keeping them alive; or <see langword="null"/>.
+    /// </summary>
+    public MemoryLinkChecks? Checks { get; set; }
+
+    /// <summary>
+    /// Gets the number of calls of <see cref="Abort"/> that were made after <see cref="Run"/> had completed: over a
+    /// WebSocket such an abort throws, so a server must never issue one.
+    /// </summary>
+    public int AbortsAfterEnd
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return field;
+            }
+        }
+
+        private set;
+    }
+
+    /// <summary>
+    /// Gets the number of calls of <see cref="Abort"/>, one that threw included.
+    /// </summary>
+    public int AbortCalls
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return field;
+            }
+        }
+
+        private set;
+    }
 
     /// <summary>
     /// Gets or sets a value indicating whether a write that succeeds is only counted in <see cref="WriteCount"/>, its
@@ -387,6 +444,22 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     }
 
     /// <summary>
+    /// Makes the next <see cref="Abort"/>, and only that one, throw instead of aborting, as the abort of a WebSocket
+    /// does whose request has ended; the link is left as it was.
+    /// </summary>
+    /// <param name="exception">
+    /// The exception the next abort throws.
+    /// </param>
+    public void FailNextAbort(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        lock (_gate)
+        {
+            _abortFailure = exception;
+        }
+    }
+
+    /// <summary>
     /// Makes <see cref="Abort"/> leave a pending wait or read pending, as a link may whose abort ends its read only
     /// later; <see cref="Deliver"/>, <see cref="EndFromPeer"/> or <see cref="FailReads"/> then ends it.
     /// </summary>
@@ -579,11 +652,29 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     /// <see cref="WebSocket.Abort"/> does, unless <see cref="HoldReadsOnAbort"/> was called. Held writes stay
     /// pending until <see cref="CompleteHeldWrites"/>.
     /// </summary>
+    /// <exception cref="Exception">
+    /// <see cref="FailNextAbort"/> chose this call: the call is counted and nothing else changes.
+    /// </exception>
     public void Abort()
     {
+        Aborting?.Invoke();
+        bool ended = Run?.IsCompleted ?? false;
         CancellationTokenRegistration registration;
         lock (_gate)
         {
+            AbortCalls++;
+            if (ended)
+            {
+                AbortsAfterEnd++;
+                Checks?.NoteAbortAfterEnd();
+            }
+
+            if (_abortFailure is { } failure)
+            {
+                _abortFailure = null;
+                throw failure;
+            }
+
             IsAborted = true;
             if (_pending == Pending.None || _holdReadsOnAbort)
             {

@@ -34,7 +34,6 @@ public sealed class AcceptTests
         abortedEarly.ShouldBeFalse();
         connection.Link.IsAborted.ShouldBeTrue();
         connection.TakeWritten().ShouldBeEmpty();
-        connection.Run.IsCompleted.ShouldBeTrue();
         await connection.RunEnded();
         harness.Handler.Calls.ShouldBeEmpty();
         harness.Pool.Outstanding.ShouldBe(0);
@@ -140,7 +139,6 @@ public sealed class AcceptTests
         // Assert
         heldWhileWaiting.ShouldBe(1);
         connection.Link.IsAborted.ShouldBeTrue();
-        connection.Run.IsCompleted.ShouldBeTrue();
         await connection.RunEnded();
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Handler.Calls.ShouldBeEmpty();

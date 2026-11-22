@@ -36,6 +36,12 @@ internal sealed class ServerHarness
     private readonly Lock _windowsGate = new();
 
     /// <summary>
+    /// What the link of every connection the harness opened reports to (design 6.6): the harness asserts on it
+    /// without keeping the links alive.
+    /// </summary>
+    private readonly MemoryLinkChecks _linkChecks = new();
+
+    /// <summary>
     /// The window of each connection whose CONNECT carried a Receive Maximum below 256, by the HTTP context of its
     /// request, as the test computed it from the CONNECT it sent; a connection that is not here has the window 256.
     /// </summary>
@@ -159,7 +165,6 @@ internal sealed class ServerHarness
     /// </returns>
     public TestConnection Accept(IPEndPoint? remoteEndPoint = null)
     {
-        MemoryLink link = new();
         CancellationTokenSource requestAborted = new();
         DefaultHttpContext httpContext = new() { RequestAborted = requestAborted.Token };
         if (remoteEndPoint is not null)
@@ -168,7 +173,9 @@ internal sealed class ServerHarness
             httpContext.Connection.RemotePort = remoteEndPoint.Port;
         }
 
+        MemoryLink link = new() { Checks = _linkChecks };
         Task run = Server.RunConnectionAsync(httpContext, link);
+        link.Run = run;
         return new TestConnection(this, link, run, requestAborted, httpContext);
     }
 
@@ -205,6 +212,15 @@ internal sealed class ServerHarness
 
         return connection;
     }
+
+    /// <summary>
+    /// Lists the handler's <c>OnClosed</c> calls so far, oldest first.
+    /// </summary>
+    /// <returns>
+    /// The calls as text, for example <c>"OnClosed c1 TakenOver"</c>; a copy.
+    /// </returns>
+    public List<string> ClosedCalls() =>
+        [.. Handler.CallsNow().Where(static call => call.StartsWith("OnClosed", StringComparison.Ordinal))];
 
     /// <summary>
     /// Moves the fake clock forward in steps of the sweep interval, so that every sweep in between runs, and asserts
@@ -263,12 +279,15 @@ internal sealed class ServerHarness
     /// the count against the receive maximum, the deliveries in the client's window, at most the window the test
     /// computed from the CONNECT it sent, the waiting deliveries, the waiting control packets and the bytes on the way
     /// out), and the buffers out of the pool are no more than <see cref="MaxBuffersPerConnection"/> for each
-    /// connection that has a slot: one that has ended holds none. Called by <see cref="TestConnection"/> after every
-    /// delivery, by <see cref="Advance"/> after every step of the clock, and by the tests after every send.
+    /// connection that has a slot: one that has ended holds none. And no link was aborted after the run over it had
+    /// ended (design 6.6, "Closing, bounded"): over a WebSocket that abort throws. Called by
+    /// <see cref="TestConnection"/> after every delivery, by <see cref="Advance"/> after every step of the clock, and
+    /// by the tests after every send.
     /// </summary>
     public void AssertBounds()
     {
         Pool.FaultyReturns.ShouldBe(0);
+        _linkChecks.AbortsAfterEnd.ShouldBe(0);
         MqttWireServerOptions options = Server.Options;
         Pool.LargestRent.ShouldBeLessThanOrEqualTo(Math.Max(ServerLimits.MaxEncodingBufferBytes,
             options.MaxPublishPayloadBytes + ServerLimits.PublishOverheadBytes + 5));

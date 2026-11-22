@@ -96,11 +96,15 @@ public sealed class StopTests
         // Act
         harness.Advance(s_justShort);
         await stop.Within("The server's stop");
+        foreach (TestConnection connection in connections)
+        {
+            await connection.RunEnded();
+        }
 
         // Assert
         completedBeforeTheDeadline.ShouldBeFalse();
         abortedBeforeTheDeadline.ShouldBeFalse();
-        connections.ShouldAllBe(connection => connection.Link.IsAborted && connection.Run.IsCompleted);
+        connections.ShouldAllBe(connection => connection.Link.IsAborted);
         ClosedCalls(harness).ShouldBe(["OnClosed c1 ServerStopping", "OnClosed c2 ServerStopping"], ignoreOrder: true);
     }
 
@@ -342,10 +346,10 @@ public sealed class StopTests
         Task stop = harness.Server.StopAsync();
         bool abortedAtOnce = connection.Link.IsAborted;
         await stop.Within("The server's stop");
+        await connection.RunEnded();
 
         // Assert
         abortedAtOnce.ShouldBeTrue();
-        connection.Run.IsCompleted.ShouldBeTrue();
         connection.TakeWritten().ShouldBeEmpty();
         harness.Handler.Calls.ShouldBeEmpty();
         harness.Pool.Outstanding.ShouldBe(0);
@@ -403,10 +407,10 @@ public sealed class StopTests
         bool abortedAtOnce = connection.Link.IsAborted;
         connection.Link.Deliver(ServerPackets.Connect.AsSpan(half));
         await stop.Within("The server's stop");
+        await connection.RunEnded();
 
         // Assert
         abortedAtOnce.ShouldBeTrue();
-        connection.Run.IsCompleted.ShouldBeTrue();
         connection.TakeWritten().ShouldBeEmpty();
         harness.Handler.Calls.ShouldBeEmpty();
         harness.Pool.Outstanding.ShouldBe(0);

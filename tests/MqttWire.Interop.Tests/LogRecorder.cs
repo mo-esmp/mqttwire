@@ -23,6 +23,12 @@ internal sealed class LogRecorder : ILoggerProvider
     private readonly List<(Func<LogEntry, bool> Match, TaskCompletionSource<LogEntry> Found)> _waiters = [];
 
     /// <summary>
+    /// Gets or sets a callback that runs after each line is recorded, on the thread that logs it, so a test can act
+    /// at the very moment the server writes a line; or <see langword="null"/>.
+    /// </summary>
+    public Action<LogEntry>? Recorded { get; set; }
+
+    /// <summary>
     /// Gets a copy of every line written so far, in order.
     /// </summary>
     public IReadOnlyList<LogEntry> Entries
@@ -82,7 +88,7 @@ internal sealed class LogRecorder : ILoggerProvider
     }
 
     /// <summary>
-    /// Records a line and completes the waiters it matches.
+    /// Records a line, completes the waiters it matches, and runs <see cref="Recorded"/>.
     /// </summary>
     /// <param name="entry">
     /// The line.
@@ -101,6 +107,8 @@ internal sealed class LogRecorder : ILoggerProvider
                 }
             }
         }
+
+        Recorded?.Invoke(entry);
     }
 
     /// <summary>

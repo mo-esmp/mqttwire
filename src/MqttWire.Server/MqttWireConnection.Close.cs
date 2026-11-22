@@ -4,6 +4,7 @@ using System.Net.WebSockets;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using MqttWire.Codec;
+using MqttWire.Link;
 using MqttWire.Server.Internal;
 
 namespace MqttWire.Server;
@@ -35,8 +36,9 @@ public sealed partial class MqttWireConnection
     /// to Closing, once, records the reason, and looks at the send path; from that hold on nothing is added to what
     /// waits. When a write is in progress, which includes the send path reserved for a CONNACK during and after the
     /// admission step, the link is aborted now and nothing else is done: a socket that is not taking data is never
-    /// asked to carry its own notice, and no packet precedes a CONNACK. When no write is in progress, this call takes
-    /// the send path, hands the packet that carries the reason code to the link, and then the WebSocket close,
+    /// asked to carry its own notice, and no packet precedes a CONNACK. The abort is registered in the same hold
+    /// (<see cref="BeginAbort"/>), so the run cannot end before it has been issued. When no write is in progress, this
+    /// call takes the send path, hands the packet that carries the reason code to the link, and then the WebSocket close,
     /// without waiting for the peer; the sweep aborts the link at the close deadline. The packet is DISCONNECT for a
     /// connection that was Active, except when the client disconnected, the link was lost or the send path faulted;
     /// CONNACK for one that was not admitted, when the code is a failure and the first packet was a CONNECT (plan
@@ -70,6 +72,7 @@ public sealed partial class MqttWireConnection
     {
         ConnectionState left;
         bool writing;
+        IMqttLink? aborted = null;
         lock (_sendLock)
         {
             if (!TryEnterClosing(cause, out left))
@@ -78,7 +81,12 @@ public sealed partial class MqttWireConnection
             }
 
             writing = _writing;
-            if (!writing)
+            if (writing)
+            {
+                // Registered in the hold that decided on the abort: the run does not end before it is issued.
+                aborted = BeginAbort();
+            }
+            else
             {
                 // This close takes the send path, in the hold that found it free, and keeps it until its WebSocket
                 // close has been handed to the link.
@@ -90,7 +98,7 @@ public sealed partial class MqttWireConnection
         LogEnd(cause, code, payloadLength, method: null, exception: null);
         if (writing)
         {
-            RunningLink.Abort();
+            FinishAbort(aborted);
             return;
         }
 
@@ -257,9 +265,11 @@ public sealed partial class MqttWireConnection
     /// moves to Closing once, and the close deadline is measured from the stamp that only the winner of the move to
     /// Closing writes. On the sweep's thread it runs no host code; beyond an abort, the only part of the connection's
     /// end it runs is the start of a close through the send path: the DISCONNECT handed to the link and the WebSocket
-    /// close, neither awaited. It never throws; it allocates only when it hands a source to the thread pool or a
-    /// write or close does not complete at once. An abort ends the link's pending reads, whose continuations may run
-    /// on the thread that aborts, as with any abort.
+    /// close, neither awaited. It does not throw, and should it all the same, the sweep ends the connection as a
+    /// fault and goes on (<see cref="MqttWireServer.Sweep"/>); it allocates only when it hands a source to the thread
+    /// pool or a write or close does not complete at once. An abort ends the link's pending reads, whose
+    /// continuations may run on the thread that aborts, as with any abort; the end of the run never does, because the
+    /// run waits for the abort to return and then carries on on a thread-pool thread (<see cref="TryEndRun"/>).
     /// </summary>
     /// <param name="now">
     /// The sweep's timestamp, from the server's clock.
@@ -306,7 +316,7 @@ public sealed partial class MqttWireConnection
             long closing = Volatile.Read(ref _closingAt);
             if (closing != 0 && now - closing >= _server.CloseDeadlineLength)
             {
-                _link?.Abort();
+                AbortLink();
             }
         }
     }
@@ -314,7 +324,9 @@ public sealed partial class MqttWireConnection
     /// <summary>
     /// Ends a connection that has sent no complete CONNECT, at the connect deadline or when the server stops: moves
     /// it to Closing, only from Accepted, logs the end and aborts the link. Nothing is handed to the link, and the
-    /// send path is not touched: nothing was ever written.
+    /// send path is not touched: nothing was ever written. The abort is registered in the hold that makes the move
+    /// (<see cref="BeginAbort"/>), so a run that ends meanwhile, because the peer closed, waits until the abort has
+    /// been issued.
     /// </summary>
     /// <param name="cause">
     /// Why the connection ends; no <see cref="IMqttWireHandler.OnClosed"/> reports it, since the connection was
@@ -326,17 +338,20 @@ public sealed partial class MqttWireConnection
     /// </returns>
     private bool AbortFromAccepted(CloseCause cause)
     {
+        IMqttLink? aborted;
         lock (_sendLock)
         {
             if (!TryEnterClosingFrom(ConnectionState.Accepted, cause))
             {
                 return false;
             }
+
+            aborted = BeginAbort();
         }
 
         // The connection was never admitted, so no OnClosed reports the reason; the link failing is the end.
         LogEnd(cause, MqttReasonCode.Success, payloadLength: 0, method: null, exception: null);
-        _link?.Abort();
+        FinishAbort(aborted);
         return true;
     }
 
@@ -346,13 +361,14 @@ public sealed partial class MqttWireConnection
     /// a write is in progress, and it is the one that does not move. It acts only on the write whose stamp the sweep
     /// read: when that write has ended meanwhile, or the connection is closing already, nothing is done. Aborting
     /// releases nothing: the write ends with an error and returns its own buffer, and what waited behind it is
-    /// dropped then.
+    /// dropped then. The abort is registered in the hold that makes the move (<see cref="BeginAbort"/>).
     /// </summary>
     /// <param name="started">
     /// The stamp of the write the sweep found past its deadline.
     /// </param>
     private void AbortStalledWrite(long started)
     {
+        IMqttLink? aborted;
         lock (_sendLock)
         {
             // The stamp is set only while a piece is with the link, so the send path is taken: by that write.
@@ -361,10 +377,125 @@ public sealed partial class MqttWireConnection
             {
                 return;
             }
+
+            aborted = BeginAbort();
         }
 
         LogEnd(CloseCause.WriteTimedOut, MqttReasonCode.Success, payloadLength: 0, method: null, exception: null);
-        _link?.Abort();
+        FinishAbort(aborted);
+    }
+
+    /// <summary>
+    /// Aborts the link, unless the run has ended or an abort is in flight already. Every abort of the link goes
+    /// through here, or through <see cref="BeginAbort"/> and <see cref="FinishAbort"/>, which this is for a caller
+    /// that has no hold of its own to decide in. It never throws: a link that throws when it is aborted is logged as
+    /// a fault (event 20) and nothing else.
+    /// </summary>
+    private void AbortLink()
+    {
+        if (TryAbortLink() is { } thrown)
+        {
+            LogFault(thrown, secondary: null);
+        }
+    }
+
+    /// <summary>
+    /// Aborts the link as <see cref="AbortLink"/> does, for a caller that logs what the abort threw itself.
+    /// </summary>
+    /// <returns>
+    /// What the link threw when it was aborted; <see langword="null"/> when it threw nothing, or was not aborted by
+    /// this call.
+    /// </returns>
+    private Exception? TryAbortLink()
+    {
+        IMqttLink? link;
+        lock (_sendLock)
+        {
+            link = BeginAbort();
+        }
+
+        return link is null ? null : IssueAbort(link);
+    }
+
+    /// <summary>
+    /// Registers an abort of the link, in the caller's hold of the send path's lock: the one rule that keeps an abort
+    /// from ever reaching a link whose request has ended, when its first abort would throw (ASP.NET Core's WebSocket
+    /// aborts its <see cref="HttpContext"/>, which throws once the request is over). An abort is issued only by a
+    /// thread that found, in a hold of the lock, the link still there (the run has not ended) and no abort in flight,
+    /// and that set <see cref="_aborting"/> in that hold; the run ends only in a hold that finds the flag clear, and
+    /// lets go of the link in it (<see cref="TryEndRun"/>). So the two are ordered by the lock: either the run waits
+    /// until the abort has returned, or the abort is never issued.
+    /// </summary>
+    /// <returns>
+    /// The link to hand to <see cref="FinishAbort"/> or <see cref="IssueAbort"/> once the lock is released, which
+    /// the caller must then do; <see langword="null"/> when nothing is to be aborted: the run has ended, or an abort
+    /// is in flight on another thread, or lower on this one's stack, and does this caller's work.
+    /// </returns>
+    private IMqttLink? BeginAbort()
+    {
+        Debug.Assert(_sendLock.IsHeldByCurrentThread, "An abort is registered under the send path's lock.");
+        IMqttLink? link = _link;
+        if (link is null || _aborting)
+        {
+            return null;
+        }
+
+        _aborting = true;
+        return link;
+    }
+
+    /// <summary>
+    /// Issues an abort that <see cref="BeginAbort"/> registered, outside the lock, and logs what the link threw, if
+    /// anything, as a fault (event 20). It never throws.
+    /// </summary>
+    /// <param name="link">
+    /// What <see cref="BeginAbort"/> returned; <see langword="null"/> does nothing.
+    /// </param>
+    private void FinishAbort(IMqttLink? link)
+    {
+        if (link is not null && IssueAbort(link) is { } thrown)
+        {
+            LogFault(thrown, secondary: null);
+        }
+    }
+
+    /// <summary>
+    /// Aborts the link for a registered abort, outside the lock, then clears <see cref="_aborting"/> in a hold of
+    /// its own and, when the send path is not taken then, tells whoever waits for the connection to be idle (the end
+    /// of the run), never inline. When the path is taken, the hold that gives it up tells them. It never throws.
+    /// </summary>
+    /// <param name="link">
+    /// The link <see cref="BeginAbort"/> returned.
+    /// </param>
+    /// <returns>
+    /// What the link threw; <see langword="null"/> when it threw nothing. A link that threw may not have been
+    /// aborted: the sweep aborts it again at the close deadline.
+    /// </returns>
+    private Exception? IssueAbort(IMqttLink link)
+    {
+        Exception? thrown = null;
+        try
+        {
+            link.Abort();
+        }
+        catch (Exception exception)
+        {
+            thrown = exception;
+        }
+
+        TaskCompletionSource? idle = null;
+        lock (_sendLock)
+        {
+            _aborting = false;
+            if (!_writing)
+            {
+                idle = _sendIdle;
+                _sendIdle = null;
+            }
+        }
+
+        idle?.TrySetResult();
+        return thrown;
     }
 
     /// <summary>

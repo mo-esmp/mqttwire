@@ -15,18 +15,23 @@ public sealed partial class MqttWireConnection
     private readonly MqttWireServer _server;
 
     /// <summary>
-    /// The lock of the send path: it guards <see cref="_writing"/>, <see cref="_waiting"/>, <see cref="_control"/>,
-    /// <see cref="_outgoingBytes"/>, <see cref="_writingBytes"/>, <see cref="_closeStatus"/>,
-    /// <see cref="_sendIdle"/>, <see cref="_records"/> and <see cref="_lastDeliveryIdentifier"/>, and every move to Closing is made under it. It is held for a few field updates and a
-    /// copy of at most one control packet, never across a write, a close, an abort or a call of the host's handler,
-    /// so a host may call <see cref="TrySend"/> and <see cref="Close"/> from inside its callbacks. It is taken inside
-    /// the registry's lock (the admission step), never the other way round.
+    /// The lock of the send path: it guards <see cref="_writing"/>, <see cref="_aborting"/>, <see cref="_waiting"/>,
+    /// <see cref="_control"/>, <see cref="_outgoingBytes"/>, <see cref="_writingBytes"/>, <see cref="_closeStatus"/>,
+    /// <see cref="_sendIdle"/>, <see cref="_records"/> and <see cref="_lastDeliveryIdentifier"/>, and the end of
+    /// <see cref="_link"/>; every move to Closing is made under it. It is held for a few field updates and a copy of
+    /// at most one control packet, never across a write, a close, an abort or a call of the host's handler, so a host
+    /// may call <see cref="TrySend"/> and <see cref="Close"/> from inside its callbacks. It is taken inside the
+    /// registry's lock (the admission step), never the other way round.
     /// </summary>
     private readonly Lock _sendLock = new();
 
     /// <summary>
-    /// The link, or <see langword="null"/> until <see cref="RunAsync"/> has it; set before the connection takes its
-    /// slot, so the sweep never sees it unset.
+    /// The link while the connection runs: <see langword="null"/> until <see cref="RunAsync"/> has it, which is
+    /// before the connection takes its slot, so the sweep never sees it unset; and <see langword="null"/> again once
+    /// the run has decided to end, which it does in the hold of <see cref="_sendLock"/> that found neither a write
+    /// nor an abort in flight (<see cref="TryEndRun"/>). So whoever finds it <see langword="null"/> under the lock
+    /// knows that the run has ended and that the link, whose request may be gone, must not be touched any more; and a
+    /// connection the host keeps after its end keeps neither the link nor its socket alive.
     /// </summary>
     private IMqttLink? _link;
 
@@ -119,10 +124,11 @@ public sealed partial class MqttWireConnection
     private ReadOnlyMemory<byte> _remainingPayload;
 
     /// <summary>
-    /// Completes when the send path is given up; it exists only while the end of the run, or a test
-    /// (<see cref="WhenSendPathIdleAsync"/>), waits for the holder to give it up. Guarded by <see cref="_sendLock"/>:
-    /// set by whoever waits, taken by the hold that clears <see cref="_writing"/>, whether the connection is Closing
-    /// or not.
+    /// Completes when the send path is given up, or when an abort of the link has returned while the path is not
+    /// taken; it exists only while the end of the run, or a test (<see cref="WhenSendPathIdleAsync"/>), waits.
+    /// Guarded by <see cref="_sendLock"/>: set by whoever waits; taken by the hold that clears <see cref="_writing"/>,
+    /// whether the connection is Closing or not, and by the hold that clears <see cref="_aborting"/> when the path
+    /// is not taken then.
     /// </summary>
     private TaskCompletionSource? _sendIdle;
 
@@ -167,6 +173,15 @@ public sealed partial class MqttWireConnection
     /// and cleared only by its holder, in the hold in which that holder found nothing more to do.
     /// </summary>
     private bool _writing;
+
+    /// <summary>
+    /// Whether an abort of the link is in flight: a thread is about to call the link's <c>Abort</c>, or is inside it.
+    /// It is set only in a hold of <see cref="_sendLock"/> that found the link still there and no abort in flight
+    /// (<see cref="BeginAbort"/>), and cleared by the same thread, in another hold, once the call has returned or
+    /// thrown (<see cref="IssueAbort"/>). The run does not end while it is set (<see cref="TryEndRun"/>), so the link
+    /// is never aborted after its request has ended, when the first abort would throw.
+    /// </summary>
+    private bool _aborting;
 
     /// <summary>
     /// How many QoS 1 and 2 deliveries may be unacknowledged at once: the client's Receive Maximum, at most 256;

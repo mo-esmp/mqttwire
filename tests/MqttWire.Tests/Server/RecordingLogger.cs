@@ -32,9 +32,30 @@ internal sealed class RecordingLogger : ILogger<MqttWireServer>
     public int ThrowForEventId { get; set; }
 
     /// <summary>
+    /// Gets or sets a callback that runs after each entry is recorded, on the logging thread, with the entry's event
+    /// id, so a test can act at the moment the server logs something; or <see langword="null"/>.
+    /// </summary>
+    public Action<int>? Logged { get; set; }
+
+    /// <summary>
     /// Gets every entry logged, oldest first, with its message formatted.
     /// </summary>
     public List<(LogLevel Level, EventId Id, string Message, Exception? Exception)> Entries { get; } = [];
+
+    /// <summary>
+    /// Copies <see cref="Entries"/> under the logger's lock, for a test that reads the entries while server threads
+    /// may still add to them.
+    /// </summary>
+    /// <returns>
+    /// Every entry so far, oldest first.
+    /// </returns>
+    public List<(LogLevel Level, EventId Id, string Message, Exception? Exception)> EntriesNow()
+    {
+        lock (_gate)
+        {
+            return [.. Entries];
+        }
+    }
 
     /// <summary>
     /// Waits until an entry with an event id is logged, for entries written on another thread. One waiter at a time.
@@ -127,6 +148,7 @@ internal sealed class RecordingLogger : ILogger<MqttWireServer>
             }
         }
 
+        Logged?.Invoke(eventId.Id);
         if (ThrowForEventId != 0 && eventId.Id == ThrowForEventId)
         {
             throw new InvalidOperationException("The logging provider failed.");

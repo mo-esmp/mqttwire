@@ -303,7 +303,8 @@ public sealed class MqttWireServer
     /// changes nothing.
     /// </returns>
     /// <exception cref="Exception">
-    /// <see cref="IMqttWireHandler.OnAdmit"/> threw (the host's bug); the lock is released and nothing changed.
+    /// <see cref="IMqttWireHandler.OnAdmit"/> threw (the host's bug), or the clock or the table did; the lock is
+    /// released, the send path is no longer reserved, and the connection was not admitted.
     /// </exception>
     internal MqttAdmitResult Admit(MqttWireConnection connection, out MqttWireConnection? replaced)
     {
@@ -326,9 +327,13 @@ public sealed class MqttWireServer
                     return result;
                 }
 
-                accepted = true;
+                // The clock is read before anything changes, and the reservation is kept only once everything
+                // has: whatever throws here (the clock, the table) leaves the connection refused, its send path
+                // given up by the finally below.
+                long now = Time.GetTimestamp();
                 Registry.SetCurrent(connection);
-                connection.MarkAdmitted();
+                connection.MarkAdmitted(now);
+                accepted = true;
                 replaced = existing;
                 return result;
             }
@@ -344,7 +349,9 @@ public sealed class MqttWireServer
 
     /// <summary>
     /// The sweep: lets every connection act on the deadlines that have passed. It walks the slots without the lock
-    /// and allocates nothing.
+    /// and allocates nothing. It runs on the timer's thread, where an exception would end the process, so nothing a
+    /// connection's check throws leaves it: a check does not throw, and should one all the same (a fault inside
+    /// MqttWire), that connection is ended as a fault, logged with event 20, and the sweep goes on to the next.
     /// </summary>
     internal void Sweep()
     {
@@ -352,7 +359,20 @@ public sealed class MqttWireServer
         MqttWireConnection?[] slots = Registry.Slots;
         for (int i = 0; i < slots.Length; i++)
         {
-            Volatile.Read(ref slots[i])?.CheckDeadlines(now);
+            MqttWireConnection? connection = Volatile.Read(ref slots[i]);
+            if (connection is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                connection.CheckDeadlines(now);
+            }
+            catch (Exception exception)
+            {
+                connection.EndFaulted(exception);
+            }
         }
     }
 

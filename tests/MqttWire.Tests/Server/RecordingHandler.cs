@@ -79,6 +79,21 @@ internal sealed class RecordingHandler : IMqttWireHandler
     public bool RecordsCalls { get; set; } = true;
 
     /// <summary>
+    /// Copies <see cref="Calls"/> under the handler's lock, for a test that reads the calls while server threads may
+    /// still add to them.
+    /// </summary>
+    /// <returns>
+    /// Every call so far, oldest first.
+    /// </returns>
+    public List<string> CallsNow()
+    {
+        lock (_gate)
+        {
+            return [.. Calls];
+        }
+    }
+
+    /// <summary>
     /// Records the call and answers with <see cref="Connect"/>, or accepts.
     /// </summary>
     /// <param name="request">

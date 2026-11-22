@@ -23,6 +23,11 @@ internal sealed class CountingTimeProvider(FakeTimeProvider inner) : TimeProvide
     private readonly List<CountedTimer> _timers = [];
 
     /// <summary>
+    /// How many calls of <see cref="GetTimestamp"/> are left before the one that throws; 0 when none is to throw.
+    /// </summary>
+    private int _timestampsLeft;
+
+    /// <summary>
     /// Gets the frequency of <see cref="GetTimestamp"/>, the fake clock's.
     /// </summary>
     public override long TimestampFrequency => inner.TimestampFrequency;
@@ -69,12 +74,33 @@ internal sealed class CountingTimeProvider(FakeTimeProvider inner) : TimeProvide
     public override DateTimeOffset GetUtcNow() => inner.GetUtcNow();
 
     /// <summary>
-    /// Gets the current timestamp from the fake clock.
+    /// Chooses the call of <see cref="GetTimestamp"/> that throws, counted from the next one; only that one throws,
+    /// as a clock may that fails.
+    /// </summary>
+    /// <param name="which">
+    /// 1 for the next call, 2 for the one after it, and so on.
+    /// </param>
+    public void ThrowOnTimestamp(int which) => Volatile.Write(ref _timestampsLeft, which);
+
+    /// <summary>
+    /// Gets the current timestamp from the fake clock, unless this is the call chosen by
+    /// <see cref="ThrowOnTimestamp"/>.
     /// </summary>
     /// <returns>
     /// The fake clock's timestamp.
     /// </returns>
-    public override long GetTimestamp() => inner.GetTimestamp();
+    /// <exception cref="InvalidOperationException">
+    /// This is the chosen call.
+    /// </exception>
+    public override long GetTimestamp()
+    {
+        if (Volatile.Read(ref _timestampsLeft) > 0 && Interlocked.Decrement(ref _timestampsLeft) == 0)
+        {
+            throw new InvalidOperationException("The clock failed.");
+        }
+
+        return inner.GetTimestamp();
+    }
 
     /// <summary>
     /// Creates a timer on the fake clock and keeps it.

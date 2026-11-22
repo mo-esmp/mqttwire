@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Net.WebSockets;
 using Microsoft.AspNetCore.Http;
 using MqttWire.Link;
@@ -17,10 +18,11 @@ public sealed partial class MqttWireConnection
     internal const string SubProtocol = "mqtt";
 
     /// <summary>
-    /// Gets the link, for the code that runs after <see cref="RunAsync"/> has set it.
+    /// Gets the link, for the code that runs after <see cref="RunAsync"/> has set it and before the run has ended:
+    /// the run itself, and whoever holds the send path, which the end of the run waits for.
     /// </summary>
     private IMqttLink RunningLink =>
-        _link!; // RunAsync sets _link before the connection takes its slot, and only code that runs after reads this.
+        _link!; // Set before the slot is taken, cleared when the run ends: only the run and a holder of the path read it.
 
     /// <summary>
     /// Runs the connection from its accept until it is Closed. It is the only async method whose state lives as
@@ -133,15 +135,17 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Ends the run once the send path is idle (design 6.6, "Closing, bounded", step 5: the connection is Closed
-    /// when the read loop has ended and no write is in progress). The read loop has ended and the close has begun,
-    /// so the send path, once idle, stays idle: nothing is added to a Closing connection, and only the call that
-    /// began the close could have taken the path. When nothing is in progress, which is the common case, this
-    /// completes at once and allocates nothing. Otherwise it waits for whoever holds the send path to give it up,
-    /// which that holder does when its write, or its close, has ended and its buffer is back. The wait is bounded by
-    /// the sweep: the close deadline aborts the link, and an aborted link's write ends. That the close has begun is
-    /// what makes the wait sound (only a give-up in Closing completes it), so it is asserted, and should it ever not
-    /// hold, the close begins here, before the send path is looked at.
+    /// Ends the run once the send path is idle and no abort of the link is in flight (design 6.6, "Closing,
+    /// bounded", step 5: the connection is Closed when the read loop has ended, no write is in progress and no abort
+    /// of its link is being issued). The read loop has ended and the close has begun, so the send path, once idle,
+    /// stays idle: nothing is added to a Closing connection, and only the call that began the close could have taken
+    /// the path. When nothing is in progress, which is the common case, this completes at once and allocates nothing.
+    /// Otherwise it waits for whoever holds the send path to give it up, which that holder does when its write, or
+    /// its close, has ended and its buffer is back, and for whoever is aborting the link to have done so. The wait is
+    /// bounded: by the sweep for a write (the close deadline aborts the link, and an aborted link's write ends), and
+    /// by the abort's own return. That the close has begun is what makes the wait sound (only a give-up in Closing
+    /// completes it for good), so it is asserted, and should it ever not hold, the close begins here, before the send
+    /// path is looked at.
     /// </summary>
     /// <returns>
     /// A task that completes when the connection is Closed and its slot is free.
@@ -154,39 +158,69 @@ public sealed partial class MqttWireConnection
             BeginClose(CloseCause.ConnectionLost, MqttReasonCode.Success, reasonString: null);
         }
 
-        Task? idle = null;
-        lock (_sendLock)
-        {
-            if (_writing)
-            {
-                // Completed, never inline, by the hold that gives the send path up: what follows calls the host.
-                // Shared with a test that already waits for the same give-up (WhenSendPathIdleAsync).
-                _sendIdle ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                idle = _sendIdle.Task;
-            }
-        }
-
-        if (idle is null)
+        if (TryEndRun(out Task? busy))
         {
             EndRun();
             return ValueTask.CompletedTask;
         }
 
-        return new ValueTask(FinishWhenIdleAsync(idle));
+        return new ValueTask(FinishWhenIdleAsync(busy));
     }
 
     /// <summary>
-    /// Waits for the send path to be idle, then ends the run as <see cref="EndRun"/> does.
+    /// The one hold of the send path's lock in which the run decides to end. With the send path taken or an abort of
+    /// the link in flight, the run does not end: it is given what to wait on. With neither, the run ends in this
+    /// hold: it lets go of the link, so that every later look at <see cref="_link"/> under the lock finds
+    /// <see langword="null"/> and no abort is issued any more (<see cref="BeginAbort"/>). The request can only end
+    /// after this hold, and no abort can begin after it, so a link is never aborted once its request has ended.
     /// </summary>
-    /// <param name="idle">
-    /// Completes when the send path has been given up.
+    /// <param name="busy">
+    /// When the result is <see langword="false"/>, a task that completes, never inline, when the send path has been
+    /// given up or an abort has returned, after which the caller looks again: what follows calls the host, so it
+    /// never runs inside the hold or the abort that completes the wait. Otherwise <see langword="null"/>.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the run has ended and <see cref="EndRun"/> is to follow; <see langword="false"/>
+    /// when it has to wait, and nothing changed.
+    /// </returns>
+    private bool TryEndRun([NotNullWhen(false)] out Task? busy)
+    {
+        lock (_sendLock)
+        {
+            if (_writing || _aborting)
+            {
+                // Shared with a test that already waits for the give-up of the send path (WhenSendPathIdleAsync).
+                _sendIdle ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                busy = _sendIdle.Task;
+                return false;
+            }
+
+            _link = null;
+            busy = null;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Waits until the send path is idle and no abort of the link is in flight, then ends the run as
+    /// <see cref="EndRun"/> does. It looks again after every wake-up: the give-up of the send path wakes it while an
+    /// abort may still be in flight, and an abort may begin between the wake-up and the look.
+    /// </summary>
+    /// <param name="busy">
+    /// What <see cref="TryEndRun"/> gave to wait on.
     /// </param>
     /// <returns>
     /// A task that completes when the connection is Closed and its slot is free.
     /// </returns>
-    private async Task FinishWhenIdleAsync(Task idle)
+    private async Task FinishWhenIdleAsync(Task busy)
     {
-        await idle.ConfigureAwait(false);
+        Task? next = busy;
+        while (next is not null)
+        {
+            await next.ConfigureAwait(false);
+            TryEndRun(out next);
+        }
+
         EndRun();
     }
 
@@ -198,7 +232,9 @@ public sealed partial class MqttWireConnection
     /// completes after every <see cref="IMqttWireHandler.OnClosed"/> has returned. During
     /// <see cref="IMqttWireHandler.OnClosed"/> the connection is Closed: a close changes nothing and the sweep
     /// ignores it. Every buffer the connection held is back in the pool before this runs: the read path returned
-    /// its own, and the send path is idle.
+    /// its own, and the send path is idle. The link was let go by the hold that decided the end
+    /// (<see cref="TryEndRun"/>), so nothing here, and nothing the host does from <see cref="IMqttWireHandler.OnClosed"/>
+    /// on, can reach it.
     /// </summary>
     private void EndRun()
     {

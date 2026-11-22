@@ -132,11 +132,11 @@ public sealed class ExactTopicHandler : IMqttWireHandler
     /// <summary>
     /// Copies the payload once and sends it to every connection subscribed to the publish's topic, the sender
     /// included, at the lower of the publish's QoS and the granted QoS. The recipients are copied out of the table
-    /// under the lock and sent to after it is released: <c>TrySend</c> may begin a recipient's close inline, and on a
-    /// transport whose read ends inline on an abort that recipient's <see cref="OnClosed"/> could then run on this
-    /// thread, where it takes the lock again (it is re-entrant) and changes the table. A recipient that closed
-    /// meanwhile answers "not open"; one that cannot take the message (too large, evicted) is skipped: what that means
-    /// for it is the server's.
+    /// under the lock and sent to after it is released: <c>TrySend</c> may begin a recipient's close, and that
+    /// recipient's <see cref="OnClosed"/>, which runs on another thread and never inside the call, takes the lock to
+    /// change the table; it must not have to wait for a whole fan-out. A recipient that closed meanwhile answers "not
+    /// open"; one that cannot take the message (too large, evicted) is skipped: what that means for it is the
+    /// server's.
     /// </summary>
     /// <param name="connection">
     /// The publishing connection.
