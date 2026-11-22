@@ -255,6 +255,93 @@ public sealed class AdmissionTests
     }
 
     /// <summary>
+    /// Proves that a connection taken over after its admission but before its CONNACK is sent no MQTT packet at all:
+    /// its WebSocket is closed with 1000 and it ends once with <see cref="MqttCloseReason.TakenOver"/>, while the
+    /// connection that took over is connected normally. The window is reached deterministically: the second
+    /// connection replaces a first one, whose DISCONNECT 0x8E is written between the second's admission and its
+    /// CONNACK; when that DISCONNECT's buffer goes back to the pool, the pool's return hook connects the third
+    /// connection, inline, which takes the client id over from the second.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Admit_TakenOverBeforeItsConnAck_GetsNoMqttPacket()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection first = harness.Connect();
+        TestConnection? third = null;
+        bool armed = false;
+        harness.Handler.Admit = (_, existing) =>
+        {
+            if (!armed && existing is not null)
+            {
+                // The second's admission: the next buffer returned is the first's DISCONNECT, after this step.
+                armed = true;
+                harness.Pool.Returning = _ =>
+                {
+                    harness.Pool.Returning = null;
+                    third = harness.Connect();
+                };
+            }
+
+            return MqttAdmitResult.Accepted;
+        };
+        TestConnection second = harness.Accept();
+
+        // Act
+        second.Deliver(ServerPackets.Connect);
+        await second.Run;
+
+        // Assert
+        second.TakeWritten().ShouldBeEmpty();
+        second.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
+        third.ShouldNotBeNull();
+        harness.Server.TryGetConnection("c1", out MqttWireConnection? found).ShouldBeTrue();
+        found.ShouldBeSameAs(third.Connection);
+        first.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.SessionTakenOver));
+        harness.Handler.Calls.ShouldBe(
+        [
+            "OnConnectAsync c1", "OnAdmit c1 replaces=-", "OnConnectAsync c1", "OnAdmit c1 replaces=c1",
+            "OnConnectAsync c1", "OnAdmit c1 replaces=c1", "OnClosed c1 TakenOver",
+        ]);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a host that closes the new connection from inside <c>OnAdmit</c> and then accepts gets the close
+    /// after the step: no CONNACK and no DISCONNECT are written, the WebSocket is closed, and <c>OnClosed</c> is
+    /// called once with <see cref="MqttCloseReason.ClosedByHost"/>.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Close_FromInsideOnAdmit_TakesEffectAfterTheStep()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        harness.Handler.Admit = static (connection, _) =>
+        {
+            connection.BeginClose(MqttCloseReason.ClosedByHost, MqttReasonCode.AdministrativeAction, reasonString: null);
+            return MqttAdmitResult.Accepted;
+        };
+        TestConnection connection = harness.Accept();
+
+        // Act
+        connection.Deliver(ServerPackets.Connect);
+        await connection.Run;
+
+        // Assert
+        connection.TakeWritten().ShouldBeEmpty();
+        connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
+        harness.Handler.Calls.ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-", "OnClosed c1 ClosedByHost"]);
+        harness.Server.ConnectionCount.ShouldBe(0);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves that the end of a connection that was taken over does not remove the connection that replaced it from
     /// the client-id table.
     /// </summary>

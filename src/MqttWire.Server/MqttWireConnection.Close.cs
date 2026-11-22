@@ -14,9 +14,11 @@ public sealed partial class MqttWireConnection
     /// <summary>
     /// Begins the close: moves the connection to Closing, once, records the reason, writes the packet that carries
     /// the reason code, and starts the WebSocket close with status 1000 without waiting for the peer; the sweep
-    /// aborts the link at the close deadline. A connection that was Active is sent DISCONNECT with the code, except
-    /// when the client disconnected or the link was lost; one that was not Active yet is sent CONNACK with the code
-    /// when the code is a failure (plan decision 7). Safe from any thread; a call after the first changes nothing.
+    /// aborts the link at the close deadline. No MQTT packet precedes the CONNACK: a connection whose success CONNACK
+    /// was handed to the link is sent DISCONNECT with the code, except when the client disconnected or the link was
+    /// lost; one that was not admitted is sent CONNACK with the code when the code is a failure (plan decision 7);
+    /// one closed during or after its admission but before its CONNACK is sent nothing. Safe from any thread; a call
+    /// after the first changes nothing.
     /// </summary>
     /// <param name="reason">
     /// Why the connection ends.
@@ -46,17 +48,27 @@ public sealed partial class MqttWireConnection
 
         try
         {
-            if (left == ConnectionState.Active)
+            // Read after the move to Closing, the order TryBeginHandingConnAck relies on.
+            ConnAckProgress progress =
+                Interlocked.CompareExchange(ref _connAck, ConnAckProgress.Withheld, ConnAckProgress.NotHanded);
+            if (progress == ConnAckProgress.NotHanded)
             {
-                if (reason is not (MqttCloseReason.ClientDisconnected or MqttCloseReason.ConnectionLost))
+                // Not admitted: this close's CONNACK, if any, is the first packet.
+                if ((byte)code >= 0x80)
                 {
-                    SendDisconnect(code, reasonString);
+                    SendConnAck(new ConnAckFields { ReasonCode = code, ReasonString = reasonString });
                 }
             }
-            else if ((byte)code >= 0x80)
+            else if (progress == ConnAckProgress.Handed && left == ConnectionState.Active
+                     && reason is not (MqttCloseReason.ClientDisconnected or MqttCloseReason.ConnectionLost))
             {
-                SendConnAck(new ConnAckFields { ReasonCode = code, ReasonString = reasonString });
+                SendDisconnect(code, reasonString);
             }
+
+            // Admitting: closed during or right after its admission, before its CONNACK; no packet at all.
+            // Task 8: Handing: the success CONNACK is being handed to the link on the connect phase's thread, so no
+            // DISCONNECT is written; but the WebSocket close below may still reach the link before that CONNACK's
+            // write. Task 8 closes this by reserving the send path for the CONNACK at admission.
         }
         finally
         {

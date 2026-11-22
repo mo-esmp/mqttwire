@@ -192,22 +192,34 @@ public sealed class MqttWireServer
         replaced = null;
         lock (Registry.Gate)
         {
-            if (IsStopping || connection.StateNow != ConnectionState.Authenticating)
+            if (IsStopping || connection.StateNow != ConnectionState.Authenticating || !connection.TryEnterAdmission())
             {
                 return MqttAdmitResult.Refuse(MqttReasonCode.ServerShuttingDown);
             }
 
-            MqttWireConnection? existing = Registry.Find(connection.ClientId);
-            MqttAdmitResult result = Handler.OnAdmit(connection, existing);
-            if (!result.IsAccepted)
+            bool accepted = false;
+            try
             {
+                MqttWireConnection? existing = Registry.Find(connection.ClientId);
+                MqttAdmitResult result = Handler.OnAdmit(connection, existing);
+                if (!result.IsAccepted)
+                {
+                    return result;
+                }
+
+                accepted = true;
+                Registry.SetCurrent(connection);
+                connection.MarkAdmitted();
+                replaced = existing;
                 return result;
             }
-
-            Registry.SetCurrent(connection);
-            connection.MarkAdmitted();
-            replaced = existing;
-            return result;
+            finally
+            {
+                if (!accepted)
+                {
+                    connection.LeaveRefusedAdmission();
+                }
+            }
         }
     }
 

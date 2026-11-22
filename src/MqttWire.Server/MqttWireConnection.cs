@@ -59,6 +59,12 @@ public sealed partial class MqttWireConnection
     /// </summary>
     private bool _admitted;
 
+    /// <summary>
+    /// How far the connection is with its CONNACK; it moves by <see cref="Interlocked.CompareExchange{T}(ref T, T, T)"/>
+    /// between the connect phase, the admission step and <see cref="BeginClose"/>.
+    /// </summary>
+    private ConnAckProgress _connAck;
+
 #pragma warning disable S4487 // Set by the connect phase now; read by the tasks that send deliveries and acknowledgements.
 
     /// <summary>
