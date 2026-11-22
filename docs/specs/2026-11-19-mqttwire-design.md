@@ -1124,6 +1124,7 @@ an admitted connection can end with, two of which the server does not decide:
 | 18 | the connection was lost | debug |
 | 19 | a late `OnConnectAsync` result, observed and discarded | debug; error, with the exception, when it threw |
 | 20 | a fault inside MqttWire: something threw while it sent (6.6, "Sending"), a link threw when it was aborted, or the sweep's check of the connection threw (6.6, "Closing, bounded"); a link whose write fails or throws is event 18 | error; the exception |
+| 21 | the run of a connection ended with an exception that is not what a broken link gives (a WebSocket, I/O, cancellation or disposed-object exception): a bug, never hidden behind event 18 | error; the exception |
 | 22 | a host call had not returned when the server stopped; the stop does not wait for it (6.6, "When the host stops"). Not an end: the connection's end is logged with event 16 or 4 | error; the method's name |
 
 A connection whose CONNECT has not passed MqttWire's own checks has no client id yet: its line
@@ -1141,9 +1142,10 @@ fault that ends a connection is logged as event 20 and reported to `OnClosed` as
 connection (a link that throws when it is aborted ends nothing: the connection keeps the reason
 it was closing with). The three
 ends before admission (refused by the host, authentication timed out, connect timed out) are
-logged but never reach `OnClosed`. And an end can show two lines: events 15 and 20 are written
-by the code that caught the exception, even when its own close lost the race to another (for
-example "closed by the host" followed by "handler threw").
+logged but never reach `OnClosed`. And an end can show two lines: events 15, 20 and 21 are
+written by the code that caught the exception, even when its own close lost the race to another
+(for example "closed by the host" followed by "handler threw", or "the connection was lost"
+followed by event 21, which `OnClosed` receives as a lost connection).
 
 ### 6.13 Tests
 
@@ -1398,6 +1400,8 @@ owner:
     `MqttWireServer` in its constructor (6.2).
 35. The default value of each result type is a refusal with `0x87`; it used to accept (6.2). A
     change of behaviour for a host that returned `default` to accept.
+36. Event 21: an exception that ends a connection's run and is not a failure of its link is
+    logged as an error, and still reported to `OnClosed` as a lost connection (6.12).
 
 ## 11. Left to the builder
 

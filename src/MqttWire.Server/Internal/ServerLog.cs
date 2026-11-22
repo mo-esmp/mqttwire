@@ -50,7 +50,15 @@ internal static partial class ServerLog
     /// </summary>
     private static readonly Action<ILogger, string, Exception?> s_sendPathFaultedFrom =
         LoggerMessage.Define<string>(LogLevel.Error, new EventId(20, nameof(SendPathFaulted)),
-            "Sending to the connection from {RemoteEndPoint} failed inside MqttWire; the connection was ended.",
+            "A fault inside MqttWire for the connection from {RemoteEndPoint}: sending to it, aborting its link or checking its deadlines threw; the connection was ended.",
+            new LogDefineOptions { SkipEnabledCheck = true });
+
+    /// <summary>
+    /// Event 21 for a connection that has no client id yet: the same id, name and level, naming the remote end point.
+    /// </summary>
+    private static readonly Action<ILogger, string, Exception?> s_runFaultedFrom =
+        LoggerMessage.Define<string>(LogLevel.Error, new EventId(21, nameof(RunFaulted)),
+            "The run of the connection from {RemoteEndPoint} ended with an exception that is not a failure of its link; the connection was ended.",
             new LogDefineOptions { SkipEnabledCheck = true });
 
     /// <summary>
@@ -126,6 +134,22 @@ internal static partial class ServerLog
     /// </param>
     public static void SendPathFaultedFrom(ILogger logger, string remoteEndPoint, Exception exception) =>
         s_sendPathFaultedFrom(logger, remoteEndPoint, exception);
+
+    /// <summary>
+    /// Logs event 21, a run that an exception ended that is not a failure of its link, for a connection that has no
+    /// client id yet. The caller has checked that <see cref="LogLevel.Error"/> is enabled.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="remoteEndPoint">
+    /// The remote end point, address and port, or "unknown".
+    /// </param>
+    /// <param name="exception">
+    /// What was thrown.
+    /// </param>
+    public static void RunFaultedFrom(ILogger logger, string remoteEndPoint, Exception exception) =>
+        s_runFaultedFrom(logger, remoteEndPoint, exception);
 
     /// <summary>
     /// Logs that the client sent a malformed packet, and the connection was ended.
@@ -417,9 +441,9 @@ internal static partial class ServerLog
     public static partial void LateConnectResult(ILogger logger, LogLevel level, string clientId, Exception? exception);
 
     /// <summary>
-    /// Logs that something threw inside MqttWire while it sent to a client (an encoding, the pool, the link): the
-    /// connection was ended, reported to the host as <see cref="MqttCloseReason.ConnectionLost"/>, and its link
-    /// aborted.
+    /// Logs a fault inside MqttWire: something threw while it sent to a client (an encoding, the pool, the clock),
+    /// the link threw when it was aborted, or the sweep's check of the connection threw. The connection was ended, or
+    /// was ending; when the fault ended it, the host is told <see cref="MqttCloseReason.ConnectionLost"/>.
     /// </summary>
     /// <param name="logger">
     /// The server's logger.
@@ -430,8 +454,27 @@ internal static partial class ServerLog
     /// <param name="exception">
     /// What was thrown.
     /// </param>
-    [LoggerMessage(EventId = 20, Level = LogLevel.Error, Message = "Sending to client {ClientId} failed inside MqttWire; the connection was ended.")]
+    [LoggerMessage(EventId = 20, Level = LogLevel.Error,
+        Message = "A fault inside MqttWire for client {ClientId}: sending to it, aborting its link or checking its deadlines threw; the connection was ended.")]
     public static partial void SendPathFaulted(ILogger logger, string clientId, Exception exception);
+
+    /// <summary>
+    /// Logs that the run of a connection ended with an exception that is not what a broken link gives (a bug, of
+    /// MqttWire or of what it runs on): the connection was ended, reported to the host as
+    /// <see cref="MqttCloseReason.ConnectionLost"/>.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection.
+    /// </param>
+    /// <param name="exception">
+    /// What was thrown.
+    /// </param>
+    [LoggerMessage(EventId = 21, Level = LogLevel.Error,
+        Message = "The run of the connection of client {ClientId} ended with an exception that is not a failure of its link; the connection was ended.")]
+    public static partial void RunFaulted(ILogger logger, string clientId, Exception exception);
 
     /// <summary>
     /// Logs that a call of the host's handler had not returned one close deadline after its token was cancelled

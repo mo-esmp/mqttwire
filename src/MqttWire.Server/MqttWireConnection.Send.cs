@@ -305,6 +305,7 @@ public sealed partial class MqttWireConnection
 
             if (exception is ArgumentException)
             {
+                // A bug of this library: it ends the run, which logs it as an error (event 21).
                 throw;
             }
 

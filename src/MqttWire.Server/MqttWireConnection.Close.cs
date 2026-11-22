@@ -745,21 +745,25 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Writes the one log line of an end of this connection (design 6.12), or of an exception a handler or the send
-    /// path threw: the one place that maps why a connection ended to its event. Called, outside the send path's lock,
-    /// by the call that won the move to Closing, with no exception; and by the code that caught an exception, with it.
+    /// Writes the one log line of an end of this connection (design 6.12), or of an exception a handler, the send
+    /// path or the run threw: the one place that maps why a connection ended to its event. Called, outside the send
+    /// path's lock, by the call that won the move to Closing, with no exception; and by the code that caught an
+    /// exception, with it: <see cref="CloseCause.HandlerThrew"/> for event 15, <see cref="CloseCause.ConnectionLost"/>
+    /// for event 21 (the run ended with an exception that is not a failure of its link), and
+    /// <see cref="CloseCause.SendPathFaulted"/> for event 20.
     /// A line names the client by its client id; a connection that has none yet is named by its remote end point,
     /// through <see cref="WriteRemoteEndLine"/>. Each line carries the fields of its event, never a password, a
     /// payload, a topic or the host's reason string. With the event's level off nothing is read, built or boxed. It
     /// never throws: a logging provider that throws is swallowed here, and only here.
     /// </summary>
     /// <remarks>
-    /// A call that loses the move to Closing logs nothing, with one deliberate exception: the two lines that carry an
-    /// exception, <see cref="CloseCause.HandlerThrew"/> (event 15) and <see cref="CloseCause.SendPathFaulted"/>
-    /// (event 20), are written only by the code that caught the exception, after its own close has begun and whether
-    /// or not that close won. The winner of the move has no exception in hand, and an exception that is the host's bug,
-    /// or MqttWire's, must never be lost because another end came first. So an end can show two lines: the winner's
-    /// (for example 14, the host closed the connection, or 6, the keep-alive deadline) and then 15 or 20.
+    /// A call that loses the move to Closing logs nothing, with one deliberate exception: the lines that carry an
+    /// exception, <see cref="CloseCause.HandlerThrew"/> (event 15), <see cref="CloseCause.SendPathFaulted"/>
+    /// (event 20) and the run's (event 21), are written only by the code that caught the exception, after its own
+    /// close has begun and whether or not that close won. The winner of the move has no exception in hand, and an
+    /// exception that is the host's bug, or MqttWire's, must never be lost because another end came first. So an end
+    /// can show two lines: the winner's (for example 14, the host closed the connection, 6, the keep-alive deadline,
+    /// or 18, a lost connection) and then 15, 20 or 21.
     /// </remarks>
     /// <param name="cause">
     /// Why the connection ended.
@@ -801,6 +805,10 @@ public sealed partial class MqttWireConnection
             {
                 ServerLog.HandlerThrew(logger, ClientId, method ?? string.Empty, exception);
             }
+            else if (cause == CloseCause.ConnectionLost)
+            {
+                ServerLog.RunFaulted(logger, ClientId, exception);
+            }
             else
             {
                 ServerLog.SendPathFaulted(logger, ClientId, exception);
@@ -816,8 +824,8 @@ public sealed partial class MqttWireConnection
     /// <summary>
     /// Writes the line of an end of a connection that has no client id yet: it sent no CONNECT that was read, so the
     /// remote end point names it. Only these ends can happen then: a malformed or refused first packet or CONNECT
-    /// (events 1 and 2), the connect deadline (5), the server's stop (16), a lost link (18) and a fault of the send
-    /// path (20). The level is checked first, so that the end point is read and turned into text only for a line
+    /// (events 1 and 2), the connect deadline (5), the server's stop (16), a lost link (18), a fault of the send
+    /// path (20) and a run that faulted (21). The level is checked first, so that the end point is read and turned into text only for a line
     /// that is written. Called only by <see cref="LogEnd"/>, which swallows what a logging provider throws.
     /// </summary>
     /// <param name="logger">
@@ -830,8 +838,8 @@ public sealed partial class MqttWireConnection
     /// The reason code of the end.
     /// </param>
     /// <param name="exception">
-    /// What the send path threw, with <see cref="CloseCause.SendPathFaulted"/> from the code that caught it; otherwise
-    /// <see langword="null"/>.
+    /// What the send path threw, with <see cref="CloseCause.SendPathFaulted"/>, or the run, with
+    /// <see cref="CloseCause.ConnectionLost"/>, from the code that caught it; otherwise <see langword="null"/>.
     /// </param>
     private void WriteRemoteEndLine(ILogger logger, CloseCause cause, MqttReasonCode code, Exception? exception)
     {
@@ -857,6 +865,10 @@ public sealed partial class MqttWireConnection
 
             case CloseCause.ServerStopping:
                 ServerLog.ServerStoppingFrom(logger, remote);
+                break;
+
+            case CloseCause.ConnectionLost when exception is not null:
+                ServerLog.RunFaultedFrom(logger, remote, exception);
                 break;
 
             case CloseCause.ConnectionLost:

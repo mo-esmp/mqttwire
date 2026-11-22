@@ -36,8 +36,10 @@ public sealed partial class MqttWireConnection
     /// <c>mqtt</c>, no WebSocket keep-alive and no compression.
     /// </param>
     /// <returns>
-    /// A task that completes when the connection is Closed. It does not fail for anything the client does; it
-    /// fails only when the WebSocket cannot be accepted, before the connection takes its slot.
+    /// A task that completes when the connection is Closed. It does not fail for anything the client does, nor for
+    /// an exception inside the run, which ends the connection as a lost one and is logged as an error (event 21)
+    /// unless it is what a broken link gives; it fails only when the WebSocket cannot be accepted, before the
+    /// connection takes its slot.
     /// </returns>
     internal async Task RunAsync(IMqttLink? link)
     {
@@ -64,10 +66,15 @@ public sealed partial class MqttWireConnection
                 open = await HandleAvailableAsync().ConfigureAwait(false);
             }
         }
-        catch (Exception)
+        catch (Exception exception)
         {
             // The wait or a read failed: the link was aborted or lost. A reason recorded first is kept.
             BeginClose(CloseCause.ConnectionLost, MqttReasonCode.Success, reasonString: null);
+            if (!IsLinkFailure(exception))
+            {
+                // Anything else is a bug, of MqttWire or of what it runs on: never hidden behind a lost connection.
+                LogEnd(CloseCause.ConnectionLost, MqttReasonCode.Success, payloadLength: 0, method: null, exception);
+            }
         }
         finally
         {
@@ -116,6 +123,21 @@ public sealed partial class MqttWireConnection
             return;
         }
     }
+
+    /// <summary>
+    /// Tells whether an exception that ended the run is what a broken link gives: a WebSocket that failed or was
+    /// aborted, an I/O error, a cancellation (the request was aborted) or a disposed socket. ASP.NET Core's own
+    /// exceptions for an aborted or reset connection derive from these. Such an end is a lost connection and nothing
+    /// more; any other exception is logged as an error (event 21).
+    /// </summary>
+    /// <param name="exception">
+    /// What ended the run.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> for a failure of the link; <see langword="false"/> for anything else.
+    /// </returns>
+    private static bool IsLinkFailure(Exception exception) =>
+        exception is WebSocketException or IOException or OperationCanceledException or ObjectDisposedException;
 
     /// <summary>
     /// Accepts the WebSocket of the request, with the sub-protocol <c>mqtt</c>, the WebSocket's own keep-alive

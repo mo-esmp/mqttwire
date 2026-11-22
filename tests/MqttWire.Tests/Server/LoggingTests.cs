@@ -40,6 +40,16 @@ public sealed class LoggingTests
     private const int LastEndEvent = 18;
 
     /// <summary>
+    /// The event id of the log entry for a lost connection.
+    /// </summary>
+    private const int ConnectionLostEvent = 18;
+
+    /// <summary>
+    /// The event id of the log entry for a run that an exception ended that is not a failure of its link.
+    /// </summary>
+    private const int RunFaultedEvent = 21;
+
+    /// <summary>
     /// The password of the CONNECT of the test that looks for secrets in the log.
     /// </summary>
     private const string Password = "s3cret-PASSWORD";
@@ -407,6 +417,106 @@ public sealed class LoggingTests
         EndEvents(harness).ShouldBe([eventId]);
         harness.Log.Entries.Single(entry => entry.Id.Id == eventId).Message.ShouldStartWith(RemoteName);
         harness.Log.Entries.ShouldAllBe(static entry => !entry.Message.Contains("lient ", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Proves that an exception that ends a connection's run and is not what a broken link gives is not hidden behind
+    /// the debug line of a lost connection: it is logged as an error (event 21) with the client id and the exception,
+    /// and <c>OnClosed</c> still reports a lost connection.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task End_RunEndsWithAnExceptionThatIsNotALinkFailure_IsAnErrorWithTheException()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect();
+        InvalidOperationException thrown = new("A bug.");
+
+        // Act
+        connection.Link.FailReads(thrown);
+        await connection.RunEnded();
+
+        // Assert
+        List<(LogLevel Level, EventId Id, string Message, Exception? Exception)> lines = harness.Log.EntriesNow();
+        lines.Select(static line => line.Id.Id).ShouldBe([ConnectionLostEvent, RunFaultedEvent]);
+        lines[0].Level.ShouldBe(LogLevel.Debug);
+        lines[1].Level.ShouldBe(LogLevel.Error);
+        lines[1].Exception.ShouldBeSameAs(thrown);
+        lines[1].Message.ShouldContain("c1");
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
+    }
+
+    /// <summary>
+    /// Proves that the error line of a run that faulted before any CONNECT names the remote end point.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task End_RunFaultsBeforeAnyConnect_NamesTheRemoteEndPoint()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Accept(s_remote);
+        InvalidOperationException thrown = new("A bug.");
+
+        // Act
+        connection.Link.FailReads(thrown);
+        await connection.RunEnded();
+
+        // Assert
+        (LogLevel Level, EventId Id, string Message, Exception? Exception) line = harness.Log.EntriesNow()
+            .Where(static entry => entry.Id.Id == RunFaultedEvent).ShouldHaveSingleItem();
+        line.Level.ShouldBe(LogLevel.Error);
+        line.Exception.ShouldBeSameAs(thrown);
+        line.Message.ShouldContain("192.0.2.7:50123");
+    }
+
+    /// <summary>
+    /// Proves that what a broken link gives is a lost connection and nothing more: one debug line (event 18), no
+    /// error.
+    /// </summary>
+    /// <param name="kind">
+    /// Which exception the link's read fails with.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Theory]
+    [InlineData("WebSocketException")]
+    [InlineData("IOException")]
+    [InlineData("OperationCanceledException")]
+    [InlineData("ObjectDisposedException")]
+    [InlineData("ConnectionAbortedException")]
+    [InlineData("ConnectionResetException")]
+    public async Task End_LinkFails_IsOneDebugLineAndNoError(string kind)
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect();
+        Exception thrown = kind switch
+        {
+            "WebSocketException" => new System.Net.WebSockets.WebSocketException("The socket failed."),
+            "IOException" => new IOException("The socket failed."),
+            "OperationCanceledException" => new OperationCanceledException(),
+            "ObjectDisposedException" => new ObjectDisposedException("WebSocket"),
+            "ConnectionAbortedException" => new Microsoft.AspNetCore.Connections.ConnectionAbortedException(),
+            _ => new Microsoft.AspNetCore.Connections.ConnectionResetException("The connection was reset."),
+        };
+
+        // Act
+        connection.Link.FailReads(thrown);
+        await connection.RunEnded();
+
+        // Assert
+        (LogLevel Level, EventId Id, string Message, Exception? Exception) line =
+            harness.Log.EntriesNow().ShouldHaveSingleItem();
+        line.Id.Id.ShouldBe(ConnectionLostEvent);
+        line.Level.ShouldBe(LogLevel.Debug);
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 ConnectionLost"]);
     }
 
     /// <summary>
