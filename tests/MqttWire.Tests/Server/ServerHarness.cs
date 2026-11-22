@@ -182,13 +182,16 @@ internal sealed class ServerHarness
 
     /// <summary>
     /// Asserts what must hold at any moment (design 6.13 item 5): no buffer was returned twice or returned that
-    /// was not rented, and every connection's counts are within the limits of <see cref="ServerLimits"/> and the
-    /// options.
+    /// was not rented, no rent was larger than the largest buffer the server needs (64 KiB, or a whole PUBLISH of the
+    /// first band: the payload limit, its 5 KiB of room and a fixed header of at most 5 bytes), and every connection's
+    /// counts are within the limits of <see cref="ServerLimits"/> and the options.
     /// </summary>
     public void AssertBounds()
     {
         Pool.FaultyReturns.ShouldBe(0);
         MqttWireServerOptions options = Server.Options;
+        Pool.LargestRent.ShouldBeLessThanOrEqualTo(Math.Max(ServerLimits.MaxEncodingBufferBytes,
+            options.MaxPublishPayloadBytes + ServerLimits.PublishOverheadBytes + 5));
         foreach (MqttWireConnection? connection in Server.Registry.Slots)
         {
             if (connection is null)

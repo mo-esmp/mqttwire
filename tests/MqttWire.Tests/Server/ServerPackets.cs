@@ -218,6 +218,134 @@ internal static class ServerPackets
     public static byte[] Disconnect(MqttReasonCode code) => [0xE0, 0x01, (byte)code];
 
     /// <summary>
+    /// Builds a PUBACK refusing a publish with 0x97, quota exceeded, and the reason string "The message is too
+    /// large."; for identifier 1 it is <see cref="TooLargePubAck1"/>.
+    /// </summary>
+    /// <param name="packetIdentifier">
+    /// The packet identifier.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes.
+    /// </returns>
+    public static byte[] TooLargePubAck(ushort packetIdentifier) => TooLargeAck(0x40, packetIdentifier);
+
+    /// <summary>
+    /// Builds a PUBREC refusing a publish with 0x97, quota exceeded, and the reason string "The message is too
+    /// large."; for identifier 1 it is <see cref="TooLargePubRec1"/>.
+    /// </summary>
+    /// <param name="packetIdentifier">
+    /// The packet identifier.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes.
+    /// </returns>
+    public static byte[] TooLargePubRec(ushort packetIdentifier) => TooLargeAck(0x50, packetIdentifier);
+
+    /// <summary>
+    /// Builds an MQTT 5 PUBLISH from its parts, with neither DUP nor retain. The bytes are put together as given, so
+    /// they may be ones the codec refuses.
+    /// </summary>
+    /// <param name="qos">
+    /// The QoS, which sets the flags and whether the packet identifier is written.
+    /// </param>
+    /// <param name="topic">
+    /// The topic, written with its length prefix.
+    /// </param>
+    /// <param name="packetIdentifier">
+    /// The packet identifier, written at QoS 1 and 2 only.
+    /// </param>
+    /// <param name="properties">
+    /// The properties, without their length; the length is written in front of them.
+    /// </param>
+    /// <param name="payload">
+    /// The payload.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes, fixed header included.
+    /// </returns>
+    public static byte[] BuildPublish(
+        MqttQoS qos,
+        ReadOnlySpan<byte> topic,
+        ushort packetIdentifier,
+        ReadOnlySpan<byte> properties,
+        ReadOnlySpan<byte> payload)
+    {
+        byte[] identifier = qos == MqttQoS.AtMostOnce ? [] : [(byte)(packetIdentifier >> 8), (byte)packetIdentifier];
+        byte[] propertyLength = VariableByteInteger(properties.Length);
+        int remaining = 2 + topic.Length + identifier.Length + propertyLength.Length + properties.Length + payload.Length;
+        return
+        [
+            (byte)(0x30 | ((int)qos << 1)), .. VariableByteInteger(remaining), .. Field(topic), .. identifier,
+            .. propertyLength, .. properties, .. payload,
+        ];
+    }
+
+    /// <summary>
+    /// Builds a PUBLISH with no properties whose Remaining Length is exactly the one asked for: its topic is
+    /// <paramref name="topicLength"/> letters <c>a</c> and its payload, letters <c>x</c>, fills the rest.
+    /// </summary>
+    /// <param name="qos">
+    /// The QoS.
+    /// </param>
+    /// <param name="remainingLength">
+    /// The Remaining Length; at least what the topic, the identifier and the property length take.
+    /// </param>
+    /// <param name="topicLength">
+    /// The topic's length in bytes.
+    /// </param>
+    /// <param name="packetIdentifier">
+    /// The packet identifier, written at QoS 1 and 2 only.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes, fixed header included.
+    /// </returns>
+    public static byte[] BuildPublishOfLength(MqttQoS qos, int remainingLength, int topicLength = 3,
+        ushort packetIdentifier = 1)
+    {
+        int identifierLength = qos == MqttQoS.AtMostOnce ? 0 : 2;
+        int payloadLength = remainingLength - 2 - topicLength - identifierLength - 1;
+        return BuildPublish(qos, Letters('a', topicLength), packetIdentifier, properties: [],
+            payload: Letters('x', payloadLength));
+    }
+
+    /// <summary>
+    /// Builds a run of one ASCII letter, for topics and payloads of a given size.
+    /// </summary>
+    /// <param name="letter">
+    /// The letter.
+    /// </param>
+    /// <param name="count">
+    /// How many.
+    /// </param>
+    /// <returns>
+    /// The bytes.
+    /// </returns>
+    public static byte[] Letters(char letter, int count)
+    {
+        byte[] bytes = new byte[count];
+        bytes.AsSpan().Fill((byte)letter);
+        return bytes;
+    }
+
+    /// <summary>
+    /// Builds a PUBACK or PUBREC refusing with 0x97 and the reason string "The message is too large.".
+    /// </summary>
+    /// <param name="firstByte">
+    /// The packet's first byte: <c>0x40</c> for PUBACK, <c>0x50</c> for PUBREC.
+    /// </param>
+    /// <param name="packetIdentifier">
+    /// The packet identifier.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes.
+    /// </returns>
+    private static byte[] TooLargeAck(byte firstByte, ushort packetIdentifier) =>
+    [
+        firstByte, 0x20, (byte)(packetIdentifier >> 8), (byte)packetIdentifier, 0x97, 0x1C, 0x1F, 0x00, 0x19,
+        .. "The message is too large."u8,
+    ];
+
+    /// <summary>
     /// Encodes a variable byte integer (MQTT 5, 1.5.5).
     /// </summary>
     /// <param name="value">

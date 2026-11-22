@@ -115,13 +115,16 @@ public sealed partial class MqttWireConnection
     /// Acts on the deadlines that have passed; called by the sweep, from the timer's thread. An Accepted
     /// connection is aborted at the connect deadline; an Authenticating one has its cancellation source taken at the
     /// authentication deadline and handed to the thread pool, which cancels it (see
-    /// <see cref="CancelAuthentication"/>); a Closing one is aborted at the close deadline. Each check acts only on
+    /// <see cref="CancelAuthentication"/>); an Active one begins its close at the partial-packet deadline (0x82) and
+    /// at the keep-alive deadline (0x8D); a Closing one is aborted at the close deadline. Each check acts only on
     /// the state it read: the move out of Accepted is a compare-exchange that expects Accepted, the cancellation
-    /// source exists only while the connection is Authenticating and is taken from its field by one exchange, and the
+    /// source exists only while the connection is Authenticating and is taken from its field by one exchange, the
+    /// close of an Active one is <see cref="BeginClose"/>, which moves to Closing once by compare-exchange, and the
     /// close deadline is measured from the stamp that only the winner of the move to Closing writes. On the sweep's
-    /// thread it runs no host code and no part of the connection's end beyond an abort, and never throws; it
-    /// allocates only when it hands a source to the thread pool. An abort ends the link's pending reads, whose
-    /// continuations may run on the thread that aborts, as with any abort.
+    /// thread it runs no host code; beyond an abort, the only part of the connection's end it runs is the start of a
+    /// close: the DISCONNECT handed to the link and the WebSocket close, neither awaited. It never throws; it
+    /// allocates only when it hands a source to the thread pool or a write or close does not complete at once. An
+    /// abort ends the link's pending reads, whose continuations may run on the thread that aborts, as with any abort.
     /// </summary>
     /// <param name="now">
     /// The sweep's timestamp, from the server's clock.
@@ -147,6 +150,10 @@ public sealed partial class MqttWireConnection
                 CancelAuthentication();
             }
         }
+        else if (_state == ConnectionState.Active)
+        {
+            CheckReadDeadlines(now);
+        }
         else if (_state == ConnectionState.Closing)
         {
             // 0 until the winner of the move to Closing has stamped it: that sweep skips the connection.
@@ -155,6 +162,34 @@ public sealed partial class MqttWireConnection
             {
                 _link?.Abort();
             }
+        }
+    }
+
+    /// <summary>
+    /// Acts on the two deadlines of reading for an Active connection: begins the close with 0x82
+    /// (<see cref="MqttCloseReason.PartialPacketTimedOut"/>) when a packet has stayed incomplete for
+    /// <see cref="ServerLimits.PartialPacketDeadline"/> from its first byte, and with 0x8D
+    /// (<see cref="MqttCloseReason.KeepAliveTimedOut"/>) when no complete packet has come for 1.5 times the
+    /// keep-alive. A stamp the code that reads changes meanwhile is at worst one sweep old, so a close that races a
+    /// packet just completed ends a connection that was a moment from its deadline anyway.
+    /// </summary>
+    /// <param name="now">
+    /// The sweep's timestamp, from the server's clock.
+    /// </param>
+    private void CheckReadDeadlines(long now)
+    {
+        long partial = Volatile.Read(ref _partialPacketAt);
+        if (partial != 0 && now - partial >= _server.PartialPacketDeadlineLength)
+        {
+            BeginClose(MqttCloseReason.PartialPacketTimedOut, MqttReasonCode.ProtocolError, reasonString: null);
+            return;
+        }
+
+        long keepAlive = _keepAliveSeconds * _server.Time.TimestampFrequency * ServerLimits.KeepAliveFactorNumerator
+                         / ServerLimits.KeepAliveFactorDenominator;
+        if (now - Volatile.Read(ref _lastPacketAt) >= keepAlive)
+        {
+            BeginClose(MqttCloseReason.KeepAliveTimedOut, MqttReasonCode.KeepAliveTimeout, reasonString: null);
         }
     }
 

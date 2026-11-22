@@ -48,6 +48,47 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
+    /// Encodes a PUBACK, PUBREC, PUBREL or PUBCOMP into a buffer rented from the server's pool and writes it, as
+    /// <see cref="SendConnAck"/> does. The reason string is dropped when the client sent Request Problem Information
+    /// 0.
+    /// </summary>
+    /// <param name="type">
+    /// The packet's type, one of the four.
+    /// </param>
+    /// <param name="packetIdentifier">
+    /// The packet identifier, from 1 to 65,535.
+    /// </param>
+    /// <param name="code">
+    /// The reason code.
+    /// </param>
+    /// <param name="reasonString">
+    /// The reason string, at most 256 bytes, or <see langword="null"/>.
+    /// </param>
+    /// <exception cref="ArgumentException">
+    /// The reason string cannot be carried (the host's bug); nothing is rented or written.
+    /// </exception>
+    private void SendAck(PacketType type, ushort packetIdentifier, MqttReasonCode code, string? reasonString)
+    {
+        string? carried = _problemInformation ? reasonString : null;
+
+        // The size checks the reason string before anything is rented.
+        byte[] buffer = _server.Pool.Rent(AckCodec.GetSize(code, carried));
+        int length = AckCodec.Write(buffer, type, packetIdentifier, code, carried);
+        _ = WriteAndReturnAsync(buffer, length);
+    }
+
+    /// <summary>
+    /// Writes a PINGRESP from a buffer rented from the server's pool, as <see cref="SendConnAck"/> does.
+    /// </summary>
+    private void SendPingResp()
+    {
+        ReadOnlySpan<byte> pingResp = PingCodec.PingResp;
+        byte[] buffer = _server.Pool.Rent(pingResp.Length);
+        pingResp.CopyTo(buffer);
+        _ = WriteAndReturnAsync(buffer, pingResp.Length);
+    }
+
+    /// <summary>
     /// Writes an encoded packet and returns its buffer to the pool once the write has ended, whether it ended at
     /// once, later or with an exception; only this method returns it. A write that completes at once completes the
     /// method at once, without an allocation.

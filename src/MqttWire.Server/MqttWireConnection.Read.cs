@@ -12,6 +12,53 @@ namespace MqttWire.Server;
 public sealed partial class MqttWireConnection
 {
     /// <summary>
+    /// The reason string of the refusal of a publish too large.
+    /// </summary>
+    private const string MessageTooLarge = "The message is too large.";
+
+    /// <summary>
+    /// How a packet is read, judged by its fixed header.
+    /// </summary>
+    private enum PacketSize
+    {
+        /// <summary>
+        /// The packet is read whole into the buffer.
+        /// </summary>
+        Whole,
+
+        /// <summary>
+        /// The packet is a PUBLISH that is skipped without being buffered, then refused.
+        /// </summary>
+        Skip,
+
+        /// <summary>
+        /// The packet is too large to be read at all: the connection ends with 0x95.
+        /// </summary>
+        TooLarge,
+    }
+
+    /// <summary>
+    /// Where <see cref="FeedSkip"/> left the packet being skipped.
+    /// </summary>
+    private enum SkipStatus
+    {
+        /// <summary>
+        /// The packet has bytes still to come; the buffer is empty.
+        /// </summary>
+        NeedMoreData,
+
+        /// <summary>
+        /// Exactly the packet's length has been consumed.
+        /// </summary>
+        Complete,
+
+        /// <summary>
+        /// The skipped part was broken and the close has begun.
+        /// </summary>
+        Ended,
+    }
+
+    /// <summary>
     /// What <see cref="FrameConnect"/> found in the read buffer.
     /// </summary>
     private enum ConnectFrame
@@ -86,6 +133,12 @@ public sealed partial class MqttWireConnection
 
             _readBuffer.Advance(read);
             ConnectFrame frame = FrameConnect(out int length);
+            if (frame == ConnectFrame.Complete)
+            {
+                // The keep-alive runs from the CONNECT; the sweep reads the stamp only once the connection is Active.
+                Volatile.Write(ref _lastPacketAt, _server.Time.GetTimestamp());
+            }
+
             if (frame != ConnectFrame.NeedMoreData)
             {
                 return frame == ConnectFrame.Complete ? length : 0;
@@ -149,13 +202,14 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Handles what has arrived: rents the read buffer unless bytes from behind the CONNECT hold it already, reads,
-    /// hands every complete packet to <see cref="HandlePacket"/>, and reads on while a packet is incomplete. The
-    /// buffer is back in the pool before it returns, on every way out. It uses the pooling builder, so no state of
-    /// it outlives the call.
+    /// hands every complete packet to <see cref="HandlePacket"/>, and reads on while a packet is incomplete or being
+    /// skipped. While the connection is Closing, what is read is thrown away. The buffer is back in the pool before
+    /// it returns, on every way out. It uses the pooling builder, so no state of it outlives the call.
     /// </summary>
     /// <returns>
-    /// <see langword="true"/> when every byte read was handled and the connection waits for more;
-    /// <see langword="false"/> when the peer ended the link or the connection is ending, and the close has begun.
+    /// <see langword="true"/> when every byte read was handled, or thrown away because the connection is Closing,
+    /// and the connection waits for more; <see langword="false"/> when the peer ended the link or the handling of a
+    /// packet began the close.
     /// </returns>
     /// <exception cref="Exception">
     /// A read failed; the run records it. No buffer is held.
@@ -189,6 +243,13 @@ public sealed partial class MqttWireConnection
                 }
 
                 mustRead = true;
+                if (_state >= ConnectionState.Closing)
+                {
+                    // Closed from elsewhere (the host, the sweep, a takeover): read and thrown away until the link ends.
+                    _readBuffer.Consume(_readBuffer.Count);
+                    return true;
+                }
+
                 FramedPackets framed = HandleFramedPackets();
                 if (framed != FramedPackets.NeedMoreData)
                 {
@@ -204,17 +265,69 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Frames the packets in the read buffer and hands each complete one to <see cref="HandlePacket"/>, in order.
-    /// A malformed fixed header ends the connection with 0x81, and a packet longer than any the server reads with
-    /// 0x95. When a packet is incomplete, the buffer is compacted or grown so the rest of it fits.
+    /// Frames what is in the read buffer, in order: feeds a packet being skipped, hands each complete packet to
+    /// <see cref="HandlePacket"/>, and starts the skip of a PUBLISH too large to be read whole. Then it stamps the
+    /// deadlines of reading: the last packet when one was completed, and the partial packet when one is left
+    /// incomplete (from the first byte of that packet, so a packet completed in this call clears the older stamp).
     /// </summary>
     /// <returns>
     /// What is left in the buffer.
     /// </returns>
     private FramedPackets HandleFramedPackets()
     {
+        FramedPackets framed = FramePackets(out bool completed);
+        if (framed == FramedPackets.Ended)
+        {
+            return framed;
+        }
+
+        long now = _server.Time.GetTimestamp();
+        if (completed)
+        {
+            Volatile.Write(ref _lastPacketAt, now);
+            Volatile.Write(ref _partialPacketAt, 0);
+        }
+
+        if (framed == FramedPackets.NeedMoreData && Volatile.Read(ref _partialPacketAt) == 0)
+        {
+            Volatile.Write(ref _partialPacketAt, now);
+        }
+
+        return framed;
+    }
+
+    /// <summary>
+    /// Frames the packets in the read buffer and handles each complete one, in order. A malformed fixed header ends
+    /// the connection with 0x81. A PUBLISH is judged by its Remaining Length (plan decision 6): up to the payload
+    /// limit and <see cref="ServerLimits.PublishOverheadBytes"/> it is read whole; above that and up to
+    /// <see cref="ServerLimits.SkipFactor"/> times the limit it is skipped; above both, the connection ends with
+    /// 0x95. Any other packet over <see cref="ServerLimits.MaxControlPacketBytes"/> in total ends it with 0x95. When a
+    /// packet is incomplete, the buffer is compacted or grown so the rest of it fits; while one is skipped, the
+    /// buffer is emptied for the next read and never grows.
+    /// </summary>
+    /// <param name="completed">
+    /// <see langword="true"/> when at least one packet was completed, a skipped one included.
+    /// </param>
+    /// <returns>
+    /// What is left in the buffer.
+    /// </returns>
+    private FramedPackets FramePackets(out bool completed)
+    {
+        completed = false;
         while (true)
         {
+            if (_publishSkip.IsActive)
+            {
+                SkipStatus skipped = FeedSkip();
+                if (skipped != SkipStatus.Complete)
+                {
+                    return skipped == SkipStatus.Ended ? FramedPackets.Ended : FramedPackets.NeedMoreData;
+                }
+
+                completed = true;
+                continue;
+            }
+
             ReadOnlySpan<byte> data = _readBuffer.GetData();
             if (data.IsEmpty)
             {
@@ -234,12 +347,15 @@ public sealed partial class MqttWireConnection
                 return FramedPackets.Ended;
             }
 
-            // The bound on growth until each packet type has its own limit: the largest packet of any type.
-            if (header.TotalLength > Math.Max(ServerLimits.MaxControlPacketBytes,
-                    ServerLimits.PublishOverheadBytes + _server.Options.MaxPublishPayloadBytes))
+            PacketSize size = StartPacket(header);
+            if (size != PacketSize.Whole)
             {
-                BeginClose(MqttCloseReason.ProtocolError, MqttReasonCode.PacketTooLarge, reasonString: null);
-                return FramedPackets.Ended;
+                if (size == PacketSize.TooLarge)
+                {
+                    return FramedPackets.Ended;
+                }
+
+                continue;
             }
 
             if (data.Length < header.TotalLength)
@@ -248,6 +364,7 @@ public sealed partial class MqttWireConnection
                 return FramedPackets.NeedMoreData;
             }
 
+            completed = true;
             bool handled = HandlePacket(header, data[..header.TotalLength]);
             _readBuffer.Consume(header.TotalLength);
             if (!handled)
@@ -255,6 +372,58 @@ public sealed partial class MqttWireConnection
                 return FramedPackets.Ended;
             }
         }
+    }
+
+    /// <summary>
+    /// Judges a packet by its fixed header against the limit of its type, and acts on what is not read whole: a
+    /// packet too large begins the close with 0x95, answered from the fixed header alone before the buffer grows; a
+    /// PUBLISH to skip has its skip started and its fixed header consumed.
+    /// </summary>
+    /// <param name="header">
+    /// The packet's fixed header, at the start of the read buffer.
+    /// </param>
+    /// <returns>
+    /// Whether the packet is read whole, skipped, or too large to be read at all.
+    /// </returns>
+    private PacketSize StartPacket(in PacketHeader header)
+    {
+        PacketSize size = JudgeSize(header);
+        if (size == PacketSize.TooLarge)
+        {
+            BeginClose(MqttCloseReason.ProtocolError, MqttReasonCode.PacketTooLarge, reasonString: null);
+        }
+        else if (size == PacketSize.Skip)
+        {
+            _publishSkip.Start(header);
+            _readBuffer.Consume(header.HeaderLength);
+        }
+
+        return size;
+    }
+
+    /// <summary>
+    /// Judges a packet by its fixed header against the limit of its type.
+    /// </summary>
+    /// <param name="header">
+    /// The packet's fixed header.
+    /// </param>
+    /// <returns>
+    /// Whether the packet is read whole, skipped, or too large to be read at all.
+    /// </returns>
+    private PacketSize JudgeSize(in PacketHeader header)
+    {
+        if (header.Type != PacketType.Publish)
+        {
+            return header.TotalLength > ServerLimits.MaxControlPacketBytes ? PacketSize.TooLarge : PacketSize.Whole;
+        }
+
+        int limit = _server.Options.MaxPublishPayloadBytes;
+        if (header.RemainingLength <= limit + ServerLimits.PublishOverheadBytes)
+        {
+            return PacketSize.Whole;
+        }
+
+        return header.RemainingLength <= (long)ServerLimits.SkipFactor * limit ? PacketSize.Skip : PacketSize.TooLarge;
     }
 
     /// <summary>
@@ -277,9 +446,42 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Handles one complete packet received after the CONNACK. For now a DISCONNECT ends the connection with
-    /// <see cref="MqttCloseReason.ClientDisconnected"/>, and every other packet is accepted and ignored: the limits,
-    /// the deadlines and what each packet does come with later tasks.
+    /// Feeds the bytes in the read buffer to the packet being skipped and drops what it consumed. A broken skipped
+    /// part begins the close with its code. When exactly the packet's length has been consumed, the skip ends and the
+    /// packet is refused in the form of its QoS. When the packet still has bytes to come, the buffer is empty and is
+    /// reset so the next read fills it from its start, at the size it has.
+    /// </summary>
+    /// <returns>
+    /// Where the skip is: <see cref="SkipStatus.Complete"/> when the packet was refused and the connection goes on;
+    /// <see cref="SkipStatus.Ended"/> when the connection is ending.
+    /// </returns>
+    private SkipStatus FeedSkip()
+    {
+        int consumed = _publishSkip.Feed(_readBuffer.GetData(), out MqttReasonCode error);
+        _readBuffer.Consume(consumed);
+        if (error != MqttReasonCode.Success)
+        {
+            CloseUndecodable(error);
+            return SkipStatus.Ended;
+        }
+
+        if (_publishSkip.IsComplete)
+        {
+            MqttQoS qos = _publishSkip.QoS;
+            ushort packetIdentifier = _publishSkip.PacketIdentifier;
+            _publishSkip = default;
+            return RefuseTooLarge(qos, packetIdentifier) ? SkipStatus.Complete : SkipStatus.Ended;
+        }
+
+        // Every byte read was consumed: the next read starts at the buffer's start.
+        _readBuffer.Compact();
+        return SkipStatus.NeedMoreData;
+    }
+
+    /// <summary>
+    /// Handles one complete packet received after the CONNACK: a PUBLISH at QoS 0 and 1 goes to the host, a PINGREQ
+    /// is answered and a DISCONNECT ends the connection with <see cref="MqttCloseReason.ClientDisconnected"/>. Every
+    /// other packet is accepted and ignored for now: what each does comes with later tasks.
     /// </summary>
     /// <param name="header">
     /// The packet's fixed header.
@@ -291,16 +493,107 @@ public sealed partial class MqttWireConnection
     /// <see langword="true"/> to go on with the next packet; <see langword="false"/> when the connection is ending,
     /// and the close has begun.
     /// </returns>
-#pragma warning disable S1172, IDE0060 // The packet's bytes are read once the packets are handled in earnest.
     private bool HandlePacket(in PacketHeader header, ReadOnlySpan<byte> packet)
-#pragma warning restore S1172, IDE0060
     {
-        if (header.Type == PacketType.Disconnect)
+        switch (header.Type)
         {
-            BeginClose(MqttCloseReason.ClientDisconnected, MqttReasonCode.Success, reasonString: null);
+            case PacketType.Publish:
+                return HandlePublish(packet);
+
+            case PacketType.PingReq:
+                SendPingResp();
+                return _state == ConnectionState.Active;
+
+            case PacketType.Disconnect:
+                BeginClose(MqttCloseReason.ClientDisconnected, MqttReasonCode.Success, reasonString: null);
+                return false;
+
+            default:
+                return true;
+        }
+    }
+
+    /// <summary>
+    /// Handles a PUBLISH read whole: decodes it, refuses a payload over the limit with 0x97, and hands the rest to
+    /// the host's <see cref="IMqttWireHandler.OnPublish"/>, answering QoS 1 with PUBACK: success, or the host's
+    /// refusal. A packet the decoder refuses begins the close with the decoder's code. An exception the host throws
+    /// is not caught here.
+    /// </summary>
+    /// <param name="packet">
+    /// The whole packet, a view of the read buffer, valid only during the call.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> to go on with the next packet; <see langword="false"/> when the connection is ending.
+    /// </returns>
+    private bool HandlePublish(ReadOnlySpan<byte> packet)
+    {
+        MqttReasonCode code = PublishCodec.TryDecode(packet, PacketSource.Client, out PublishPacket publish);
+        if (code != MqttReasonCode.Success)
+        {
+            CloseUndecodable(code);
             return false;
         }
 
-        return true;
+        if (publish.Payload.Length > _server.Options.MaxPublishPayloadBytes)
+        {
+            return RefuseTooLarge(publish.QoS, publish.PacketIdentifier);
+        }
+
+        if (publish.QoS == MqttQoS.ExactlyOnce)
+        {
+            // Task 9: a QoS 2 publish that reaches the host (its record, OnPublish, PUBREC); unanswered until then.
+            return true;
+        }
+
+        MqttPublish message = new(publish.Topic, publish.Payload, publish.QoS, publish.Retain);
+        MqttPublishResult result = _server.Handler.OnPublish(this, message);
+        if (publish.QoS == MqttQoS.AtLeastOnce)
+        {
+            SendAck(PacketType.PubAck, publish.PacketIdentifier, result.ReasonCode, result.ReasonString);
+        }
+
+        return _state == ConnectionState.Active;
+    }
+
+    /// <summary>
+    /// Refuses a publish too large with 0x97 and "The message is too large." in the form its QoS calls for: a
+    /// PUBACK at QoS 1, a failing PUBREC at QoS 2, of which nothing is remembered, and nothing at QoS 0.
+    /// </summary>
+    /// <param name="qos">
+    /// The QoS of the publish.
+    /// </param>
+    /// <param name="packetIdentifier">
+    /// Its packet identifier; 0 at QoS 0.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> to go on with the next packet; <see langword="false"/> when the connection is ending.
+    /// </returns>
+    private bool RefuseTooLarge(MqttQoS qos, ushort packetIdentifier)
+    {
+        if (qos == MqttQoS.AtLeastOnce)
+        {
+            SendAck(PacketType.PubAck, packetIdentifier, MqttReasonCode.QuotaExceeded, MessageTooLarge);
+        }
+        else if (qos == MqttQoS.ExactlyOnce)
+        {
+            SendAck(PacketType.PubRec, packetIdentifier, MqttReasonCode.QuotaExceeded, MessageTooLarge);
+        }
+
+        return _state == ConnectionState.Active;
+    }
+
+    /// <summary>
+    /// Begins the close for a packet the decoder, or the skip, refused: with <see cref="MqttCloseReason.MalformedPacket"/>
+    /// for 0x81, and <see cref="MqttCloseReason.ProtocolError"/> for any other code; the DISCONNECT carries the code.
+    /// </summary>
+    /// <param name="code">
+    /// The code the decoder gave.
+    /// </param>
+    private void CloseUndecodable(MqttReasonCode code)
+    {
+        MqttCloseReason reason = code == MqttReasonCode.MalformedPacket
+            ? MqttCloseReason.MalformedPacket
+            : MqttCloseReason.ProtocolError;
+        BeginClose(reason, code, reasonString: null);
     }
 }

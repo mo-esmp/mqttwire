@@ -27,6 +27,26 @@ public sealed partial class MqttWireConnection
     private PacketReadBuffer _readBuffer = default;
 
     /// <summary>
+    /// The skip of a PUBLISH too large to be read whole; active only while such a packet is being skipped, and
+    /// otherwise its default value. Changed in place, like <see cref="_readBuffer"/>, by the code that reads alone.
+    /// </summary>
+    private PublishSkip _publishSkip = default;
+
+    /// <summary>
+    /// When the first byte of a packet that is not complete yet was read, a timestamp of the server's clock; 0 when
+    /// no packet is incomplete. Written by the code that reads, read by the sweep for the partial-packet deadline;
+    /// it covers a packet that is being skipped.
+    /// </summary>
+    private long _partialPacketAt;
+
+    /// <summary>
+    /// When the last complete packet from the client was read (the CONNECT, until another), a timestamp of the
+    /// server's clock. Written by the code that reads, read by the sweep for the keep-alive deadline; a skipped
+    /// packet counts once it has been consumed whole.
+    /// </summary>
+    private long _lastPacketAt;
+
+    /// <summary>
     /// When the Accepted or the Authenticating state was entered, a timestamp of the server's clock; 0 before the
     /// accept. The move to Closing never writes it, so a stamp written by a move that then lost its race is harmless.
     /// </summary>
@@ -78,13 +98,13 @@ public sealed partial class MqttWireConnection
     /// by the connect phase.
     /// </summary>
     private int _clientMaxPacketSize;
+#pragma warning restore S4487
 
     /// <summary>
     /// Whether acknowledgements may carry a reason string and user properties; <see langword="false"/> when the
     /// client sent Request Problem Information 0. Set by the connect phase.
     /// </summary>
     private bool _problemInformation;
-#pragma warning restore S4487
 
     /// <summary>
     /// The state; it moves forward only, by <see cref="Interlocked.CompareExchange{T}(ref T, T, T)"/> where two
