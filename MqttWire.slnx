@@ -8,6 +8,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/MqttWire.Interop.Tests/MqttWire.Interop.Tests.csproj" />
+    <Project Path="tests/MqttWire.TestHost/MqttWire.TestHost.csproj" />
     <Project Path="tests/MqttWire.Tests/MqttWire.Tests.csproj" />
   </Folder>
 </Solution>
