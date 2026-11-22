@@ -46,7 +46,13 @@ internal sealed class ConnectionRegistry
     private int _taken;
 
     /// <summary>
-    /// Completes when no slot is taken, or <see langword="null"/> when no one waits.
+    /// The connections that hold a slot the stop no longer waits for (<see cref="TryAbandon"/>), or
+    /// <see langword="null"/> while there is none, which is the normal case.
+    /// </summary>
+    private List<MqttWireConnection>? _abandoned;
+
+    /// <summary>
+    /// Completes when no slot is taken that the stop waits for, or <see langword="null"/> when no one waits.
     /// </summary>
     private TaskCompletionSource? _empty;
 
@@ -142,7 +148,8 @@ internal sealed class ConnectionRegistry
 
     /// <summary>
     /// Frees a connection's slot, the last step of its end. Completes <see cref="WhenEmptyAsync"/> when this was
-    /// the last slot taken. The table entry is not touched: <see cref="RemoveFromTable"/> removed it before.
+    /// the last slot taken that the stop waits for. The table entry is not touched: <see cref="RemoveFromTable"/>
+    /// removed it before.
     /// </summary>
     /// <param name="connection">
     /// The connection, which <see cref="Add"/> gave a slot.
@@ -157,7 +164,8 @@ internal sealed class ConnectionRegistry
             Volatile.Write(ref _slots[slot], value: null);
             _free[_freeCount++] = slot;
             _taken--;
-            if (_taken == 0)
+            _abandoned?.Remove(connection);
+            if (_taken == (_abandoned?.Count ?? 0))
             {
                 empty = _empty;
                 _empty = null;
@@ -165,6 +173,41 @@ internal sealed class ConnectionRegistry
         }
 
         empty?.TrySetResult();
+    }
+
+    /// <summary>
+    /// Stops counting a connection's slot for <see cref="WhenEmptyAsync"/>, for a connection whose run cannot end
+    /// before a call of the host returns: the stop does not wait for it. The slot stays taken, and the sweep goes on
+    /// visiting it, until <see cref="Release"/>. Completes <see cref="WhenEmptyAsync"/> when no other slot is taken.
+    /// </summary>
+    /// <param name="connection">
+    /// The connection.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when this call stopped counting the slot; <see langword="false"/> when an earlier call
+    /// had, or the connection no longer holds its slot, and nothing changed.
+    /// </returns>
+    public bool TryAbandon(MqttWireConnection connection)
+    {
+        TaskCompletionSource? empty = null;
+        lock (Gate)
+        {
+            if (!ReferenceEquals(_slots[connection.Slot], connection) || _abandoned?.Contains(connection) == true)
+            {
+                return false;
+            }
+
+            _abandoned ??= [];
+            _abandoned.Add(connection);
+            if (_taken == _abandoned.Count)
+            {
+                empty = _empty;
+                _empty = null;
+            }
+        }
+
+        empty?.TrySetResult();
+        return true;
     }
 
     /// <summary>
@@ -216,16 +259,17 @@ internal sealed class ConnectionRegistry
     }
 
     /// <summary>
-    /// Waits until no slot is taken.
+    /// Waits until no slot is taken, those that <see cref="TryAbandon"/> stopped counting aside.
     /// </summary>
     /// <returns>
-    /// A task that completes, never inline, when the last slot is freed; at once when none is taken now.
+    /// A task that completes, never inline, when the last slot that counts is freed or no longer counted; at once
+    /// when none is taken now.
     /// </returns>
     public Task WhenEmptyAsync()
     {
         lock (Gate)
         {
-            if (_taken == 0)
+            if (_taken == (_abandoned?.Count ?? 0))
             {
                 return Task.CompletedTask;
             }

@@ -178,7 +178,8 @@ internal static partial class ServerLog
 
     /// <summary>
     /// Logs that the host's <see cref="IMqttWireHandler.OnConnectAsync"/> did not answer within the authentication
-    /// deadline, so the connection was refused with CONNACK 0x88.
+    /// deadline, so the connection was refused: with CONNACK 0x88, or, when the call did not even come back from its
+    /// cancellation, by aborting the link.
     /// </summary>
     /// <param name="logger">
     /// The server's logger.
@@ -187,7 +188,7 @@ internal static partial class ServerLog
     /// The client identifier of the connection.
     /// </param>
     [LoggerMessage(EventId = 4, Level = LogLevel.Error,
-        Message = "OnConnectAsync did not answer for client {ClientId} within the authentication deadline; the connection was refused with 0x88.")]
+        Message = "OnConnectAsync did not answer for client {ClientId} within the authentication deadline; the connection was refused.")]
     public static partial void AuthenticationTimedOut(ILogger logger, string clientId);
 
     /// <summary>
@@ -431,4 +432,22 @@ internal static partial class ServerLog
     /// </param>
     [LoggerMessage(EventId = 20, Level = LogLevel.Error, Message = "Sending to client {ClientId} failed inside MqttWire; the connection was ended.")]
     public static partial void SendPathFaulted(ILogger logger, string clientId, Exception exception);
+
+    /// <summary>
+    /// Logs that a call of the host's handler had not returned one close deadline after its token was cancelled
+    /// while the server stops: the connection's link was aborted and the stop no longer waits for the connection,
+    /// which keeps its slot, and what only its run can release, until the call returns.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection.
+    /// </param>
+    /// <param name="method">
+    /// The name of the handler method that has not returned.
+    /// </param>
+    [LoggerMessage(EventId = 22, Level = LogLevel.Error,
+        Message = "{Method} for client {ClientId} had not returned when the server stopped; the stop does not wait for it.")]
+    public static partial void HostCallDidNotReturn(ILogger logger, string clientId, string method);
 }

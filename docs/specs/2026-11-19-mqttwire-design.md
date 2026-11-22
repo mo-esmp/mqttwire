@@ -490,7 +490,7 @@ Authenticating state.
 | Deadline | Length | What happens |
 |---|---|---|
 | Connect | 10 s from accept until a complete CONNECT has arrived | abort |
-| Authentication | 10 s for `OnConnectAsync` to answer | CONNACK `0x88` (server unavailable) if it can be written, then close |
+| Authentication | 10 s for `OnConnectAsync` to answer | CONNACK `0x88` (server unavailable) if it can be written, then close; abort when the call has not even come back 2 s after its token was cancelled |
 | Partial packet | 10 s from the moment the read buffer is rented for a packet (the wait for data has ended) to the packet's last byte; for a packet that follows another in the same read, from that read | close (`0x82`) |
 | Keep-alive | 1.5 times the connection's keep-alive without a packet from the client, counted from the move to Active until the first packet, so a slow `OnConnectAsync` or `OnAdmit` does not use it up | close (`0x8D`) |
 | Write | 15 s for one piece of at most 64 KB handed to the link to complete | abort |
@@ -517,6 +517,15 @@ into pieces.
   **A handler that ignores cancellation keeps running; MqttWire cannot stop it.** What it still
   holds is the request it was given, not the connection.
 - Whatever it returns or throws afterwards is observed, logged and discarded.
+- **A handler that blocks the calling thread** (it does not return a pending task, and it
+  ignores its token) keeps the connection's own thread inside the host, so the CONNACK, which
+  that thread would write, cannot be written. The sweep bounds the socket all the same: when the
+  call has not come back one close deadline (2 s) after its token was cancelled, the link is
+  aborted and the connection is Closing ("authentication timed out", or "server stopping"
+  during a stop). What only the connection's run can release stays held until the call returns:
+  the connection's slot, the read buffer if packets came behind the CONNECT (6.8), and the
+  request. A late answer changes nothing: the admission step refuses a connection that is no
+  longer Authenticating.
 
 #### Life of a connection
 
@@ -865,6 +874,14 @@ The whole takes a few seconds at most and does not depend on the host's handlers
 long work, because they do no long work on MqttWire's threads (6.2). A host must not wait on the
 stop from inside `OnClosed`.
 
+**The stop does not wait for an `OnConnectAsync` that does not return.** The stop completes
+when every connection that can end has ended. A connection whose `OnConnectAsync` has not come
+back one close deadline after its token was cancelled (which the stop does when it begins,
+unless the authentication deadline already had) has its link aborted, is logged as an error
+(6.12, event 22, with the client id and the method's name), and is no longer counted by the
+stop. It keeps its slot, and what the paragraph on `OnConnectAsync` lists, until the call
+returns; the sweep has stopped by then, and nothing more is done for it.
+
 ### 6.7 What is done with each MQTT property
 
 "Ignored" means: validated for form, then without effect, which MQTT 5 allows for that
@@ -1068,8 +1085,9 @@ releasing it, as `tests/MqttWire.TestHost/ExactTopicHandler.cs` does.
 ### 6.12 Logging: why a connection ended
 
 Every end of a connection is logged once, by whoever wins the move to Closing, with the client
-id and one of these reasons, each with its own event id. Event 19 is not an end: it is how a
-host task that the connection stopped waiting for ended. `MqttCloseReason` names the reasons
+id and one of these reasons, each with its own event id. Events 19 and 22 are not ends: 19 is
+how a host task that the connection stopped waiting for ended, 22 is a host call the stop did
+not wait for. `MqttCloseReason` names the reasons
 an admitted connection can end with, two of which the server does not decide:
 `ClientDisconnected` and `ConnectionLost`.
 
@@ -1078,7 +1096,7 @@ an admitted connection can end with, two of which the server does not decide:
 | 1 | malformed packet | debug; the reason code |
 | 2 | protocol error | debug; the reason code |
 | 3 | refused by the host | debug; the host's reason code |
-| 4 | authentication timed out | error |
+| 4 | authentication timed out: `OnConnectAsync` did not answer in time, and the connection was refused with CONNACK `0x88`, or aborted when the call did not come back | error |
 | 5 | connect timed out | debug; the remote end point instead of the client id |
 | 6 | keep-alive timed out | debug |
 | 7 | partial packet timed out | debug |
@@ -1095,6 +1113,7 @@ an admitted connection can end with, two of which the server does not decide:
 | 18 | the connection was lost | debug |
 | 19 | a late `OnConnectAsync` result, observed and discarded | debug; error, with the exception, when it threw |
 | 20 | a fault inside MqttWire: something threw while it sent (6.6, "Sending"), a link threw when it was aborted, or the sweep's check of the connection threw (6.6, "Closing, bounded"); a link whose write fails or throws is event 18 | error; the exception |
+| 22 | a host call had not returned when the server stopped; the stop does not wait for it (6.6, "When the host stops"). Not an end: the connection's end is logged with event 16 or 4 | error; the method's name |
 
 A connection whose CONNECT has not passed MqttWire's own checks has no client id yet: its line
 names the remote end point instead. An incoming packet that is too large, a topic alias, an
@@ -1360,6 +1379,10 @@ owner:
     6.12).
 32. The partial-packet deadline runs from the rent of the read buffer, and an empty binary
     message does not end the link's wait for data, on the client too (6.5, 6.6).
+33. An `OnConnectAsync` that blocks its calling thread: the link is aborted, with no CONNACK,
+    2 s after the token was cancelled; the stop then no longer waits for that connection and
+    logs event 22; its slot and a read buffer kept behind the CONNECT stay held until the call
+    returns (6.6, 6.12).
 
 ## 11. Left to the builder
 

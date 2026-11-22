@@ -255,7 +255,8 @@ public sealed partial class MqttWireConnection
     /// Acts on the deadlines that have passed; called by the sweep, from the timer's thread. An Accepted
     /// connection is aborted at the connect deadline; an Authenticating one has its cancellation source taken at the
     /// authentication deadline and handed to the thread pool, which cancels it (see
-    /// <see cref="CancelAuthentication"/>); an Active one is aborted at the write deadline
+    /// <see cref="CancelAuthentication"/>), and is aborted when its host's call has not come back one close deadline
+    /// later (<see cref="EndUnanswered"/>); an Active one is aborted at the write deadline
     /// (<see cref="AbortStalledWrite"/>), and begins its close at the acknowledgement deadline (0x82, see
     /// <see cref="CheckAcknowledgementDeadline"/>), at the partial-packet deadline (0x82) and at the keep-alive
     /// deadline (0x8D); a Closing one is aborted at the close deadline. Each check acts only on the state
@@ -286,12 +287,7 @@ public sealed partial class MqttWireConnection
         }
         else if (_state == ConnectionState.Authenticating)
         {
-            // Stamped before the move to Authenticating, so this is that state's stamp.
-            long entered = Volatile.Read(ref _stateEnteredAt);
-            if (now - entered >= _server.AuthenticationDeadlineLength)
-            {
-                CancelAuthentication();
-            }
+            CheckAuthenticationDeadline(now);
         }
         else if (_state == ConnectionState.Active)
         {
@@ -318,7 +314,113 @@ public sealed partial class MqttWireConnection
             {
                 AbortLink();
             }
+
+            // A connection ended because its host's call did not come back keeps its slot until the call returns:
+            // a stop that began since does not wait for it either.
+            if (IsHostCallCancelled && _server.IsStopping
+                && now - Volatile.Read(ref _stateEnteredAt) >= _server.CloseDeadlineLength)
+            {
+                LeaveToTheHost();
+            }
         }
+    }
+
+    /// <summary>
+    /// Acts on the deadlines of an Authenticating connection: at the authentication deadline, cancels the token of
+    /// the host's <see cref="IMqttWireHandler.OnConnectAsync"/> (<see cref="CancelAuthentication"/>); and when the
+    /// call has not come back one close deadline after its token was cancelled, by this or by the stop, ends the
+    /// connection without it (<see cref="EndUnanswered"/>).
+    /// </summary>
+    /// <param name="now">
+    /// The sweep's timestamp, from the server's clock.
+    /// </param>
+    private void CheckAuthenticationDeadline(long now)
+    {
+        // The mark is read before the stamp: whoever cancels writes the stamp first, then the mark.
+        if (IsHostCallCancelled)
+        {
+            if (now - Volatile.Read(ref _stateEnteredAt) >= _server.CloseDeadlineLength)
+            {
+                EndUnanswered();
+            }
+
+            return;
+        }
+
+        // Stamped before the move to Authenticating, so this is that state's stamp.
+        long entered = Volatile.Read(ref _stateEnteredAt);
+        if (now - entered >= _server.AuthenticationDeadlineLength)
+        {
+            CancelAuthentication();
+        }
+    }
+
+    /// <summary>
+    /// Ends a connection whose host's <see cref="IMqttWireHandler.OnConnectAsync"/> has not come back one close
+    /// deadline after its token was cancelled (design 6.6, "<c>OnConnectAsync</c> and its deadline"): a host that
+    /// blocks the calling thread and ignores the token. The run's thread is inside the host, so nothing of the
+    /// connect phase can run: the connection is moved to Closing, only from Authenticating and only while the call
+    /// is still out, with <see cref="CloseCause.ServerStopping"/> when the server is stopping and
+    /// <see cref="CloseCause.AuthenticationTimedOut"/> otherwise, its end is logged, and its link is aborted; no
+    /// CONNACK is written. The decision is made in a hold of the send path's lock, which the admission step takes
+    /// too: a call that comes back at this moment either finds the connection Closing and is refused, or came back
+    /// first, and then this does nothing and the connect phase ends the connection itself.
+    /// </summary>
+    /// <remarks>
+    /// What stays held until the host's call returns is what only the run can let go of: the connection's slot, the
+    /// read buffer when bytes came behind the CONNECT (design 6.8: only the code that awaits a read returns its
+    /// buffer), and the request with its <see cref="HttpContext"/>. When the server is stopping, the stop no longer
+    /// waits for that slot (<see cref="LeaveToTheHost"/>).
+    /// </remarks>
+    private void EndUnanswered()
+    {
+        bool stopping = _server.IsStopping;
+        CloseCause cause = stopping ? CloseCause.ServerStopping : CloseCause.AuthenticationTimedOut;
+        IMqttLink? aborted;
+        lock (_sendLock)
+        {
+            if (!IsHostCallCancelled || !TryEnterClosingFrom(ConnectionState.Authenticating, cause))
+            {
+                return;
+            }
+
+            aborted = BeginAbort();
+        }
+
+        // The connection was never admitted, so no OnClosed reports the reason.
+        LogEnd(cause, stopping ? MqttReasonCode.ServerShuttingDown : MqttReasonCode.ServerUnavailable,
+            payloadLength: 0, method: null, exception: null);
+        FinishAbort(aborted);
+        if (stopping)
+        {
+            LeaveToTheHost();
+        }
+    }
+
+    /// <summary>
+    /// Tells the stop not to wait for this connection, whose host's <see cref="IMqttWireHandler.OnConnectAsync"/>
+    /// has not returned one close deadline after its token was cancelled (design 6.6, "When the host stops"): its
+    /// link has been aborted, and its run cannot end before the call returns. Logged once, as an error (event 22).
+    /// The connection keeps its slot, which it frees when the call returns, whenever that is.
+    /// </summary>
+    private void LeaveToTheHost()
+    {
+        if (!_server.Registry.TryAbandon(this))
+        {
+            return;
+        }
+
+        // Swallowed for the reason LogEnd gives: the sweep has nowhere to report a logging provider that throws.
+#pragma warning disable RCS1075 // Avoid empty catch clause that catches System.Exception: see the comment above.
+        try
+        {
+            ServerLog.HostCallDidNotReturn(_server.Logger, ClientId, nameof(IMqttWireHandler.OnConnectAsync));
+        }
+        catch (Exception)
+        {
+            // Nowhere left to report it.
+        }
+#pragma warning restore RCS1075
     }
 
     /// <summary>
@@ -527,16 +629,28 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Ends the host's wait at the authentication deadline: takes the cancellation source out of its field, on the
-    /// sweep's thread, and hands it to the thread pool, which cancels and disposes it. When the connect phase took it
-    /// first, the host has answered and nothing is done. So the source is still cancelled and disposed exactly once,
-    /// and the token's callbacks (the host's, and the connect phase's continuation with the CONNACK 0x88 and the end
-    /// of the run) never run on the sweep's thread.
+    /// Ends the host's wait at the authentication deadline, or when the server stops: takes the cancellation source
+    /// out of its field, on the calling thread, leaving the mark that the host's call was cancelled
+    /// (<see cref="s_hostCallCancelled"/>) in its place, and hands the source to the thread pool, which cancels and
+    /// disposes it. When the connect phase took it first, the host has answered and nothing is done. So the source
+    /// is still cancelled and disposed exactly once, and the token's callbacks (the host's, and the connect phase's
+    /// continuation with the CONNACK 0x88 and the end of the run) never run on the sweep's thread or on the thread
+    /// that stops the server. The time is written to <see cref="_stateEnteredAt"/> before the mark is set, so
+    /// whoever sees the mark reads the time of this cancellation: the sweep measures from it how long the host's
+    /// call has stayed out (<see cref="EndUnanswered"/>).
     /// </summary>
     private void CancelAuthentication()
     {
-        CancellationTokenSource? source = Interlocked.Exchange(ref _authentication, null);
-        if (source is null)
+        CancellationTokenSource? source = Volatile.Read(ref _authentication);
+        if (source is null || ReferenceEquals(source, s_hostCallCancelled))
+        {
+            return;
+        }
+
+        // Should the exchange lose (the host answered at this moment), the stamp is unused: the connect phase is on
+        // its way out of Authenticating.
+        Volatile.Write(ref _stateEnteredAt, _server.Time.GetTimestamp());
+        if (!ReferenceEquals(Interlocked.CompareExchange(ref _authentication, s_hostCallCancelled, source), source))
         {
             return;
         }

@@ -15,6 +15,14 @@ public sealed partial class MqttWireConnection
     private readonly MqttWireServer _server;
 
     /// <summary>
+    /// The mark left in <see cref="_authentication"/> when the sweep or the stop has taken a connection's
+    /// cancellation source to cancel it: while it is there, the host's
+    /// <see cref="IMqttWireHandler.OnConnectAsync"/> was cancelled and the connect phase has not come back from it.
+    /// It is shared by every connection and is never cancelled or disposed, so it costs a connection no field.
+    /// </summary>
+    private static readonly CancellationTokenSource s_hostCallCancelled = new();
+
+    /// <summary>
     /// The lock of the send path: it guards <see cref="_writing"/>, <see cref="_aborting"/>, <see cref="_waiting"/>,
     /// <see cref="_control"/>, <see cref="_outgoingBytes"/>, <see cref="_writingBytes"/>, <see cref="_closeStatus"/>,
     /// <see cref="_sendIdle"/>, <see cref="_records"/> and <see cref="_lastDeliveryIdentifier"/>, and the end of
@@ -63,8 +71,11 @@ public sealed partial class MqttWireConnection
     private long _lastPacketAt;
 
     /// <summary>
-    /// When the Accepted or the Authenticating state was entered, a timestamp of the server's clock; 0 before the
-    /// accept. The move to Closing never writes it, so a stamp written by a move that then lost its race is harmless.
+    /// When the Accepted or the Authenticating state was entered, or, once the token of the host's
+    /// <see cref="IMqttWireHandler.OnConnectAsync"/> has been cancelled, when it was; a timestamp of the server's
+    /// clock, and 0 before the accept. The move to Closing never writes it, so a stamp written by a move that then
+    /// lost its race is harmless, and a connection ended because its host's call did not come back still tells when
+    /// that call was cancelled.
     /// </summary>
     private long _stateEnteredAt;
 
@@ -77,8 +88,10 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// The cancellation source of the host's <see cref="IMqttWireHandler.OnConnectAsync"/>; it exists only in the
-    /// Authenticating state. Whoever takes it out of the field with <see cref="Interlocked.Exchange{T}(ref T, T)"/>
-    /// disposes it: the connect phase when the host has answered, or the sweep at the authentication deadline.
+    /// Authenticating state. Whoever takes it out of the field disposes it: the connect phase when the host has
+    /// answered, or the sweep at the authentication deadline, or the stop. The sweep and the stop leave
+    /// <see cref="s_hostCallCancelled"/> in its place, which the connect phase takes out when the host's call has
+    /// come back; otherwise <see langword="null"/>.
     /// </summary>
     private CancellationTokenSource? _authentication;
 
@@ -243,6 +256,12 @@ public sealed partial class MqttWireConnection
     /// Gets the state now; it may change at any moment after it is read.
     /// </summary>
     internal ConnectionState StateNow => _state;
+
+    /// <summary>
+    /// Gets a value indicating whether the token of the host's <see cref="IMqttWireHandler.OnConnectAsync"/> was
+    /// cancelled, by the sweep or the stop, and the connect phase has not come back from the call.
+    /// </summary>
+    private bool IsHostCallCancelled => ReferenceEquals(Volatile.Read(ref _authentication), s_hostCallCancelled);
 
     /// <summary>
     /// Gets why the connection ended, recorded by the call that moved it to Closing; meaningless before. It is

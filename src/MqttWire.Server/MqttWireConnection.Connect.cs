@@ -513,10 +513,18 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Takes the cancellation source of the Authenticating state out of its field and disposes it, unless the
-    /// sweep took it first and disposes it itself.
+    /// Takes the cancellation source of the Authenticating state out of its field and disposes it, unless the sweep
+    /// or the stop took it first and disposes it itself; the mark that one of them left
+    /// (<see cref="s_hostCallCancelled"/>) is taken out too, which says that the host's call has come back.
     /// </summary>
-    private void ReleaseAuthentication() => Interlocked.Exchange(ref _authentication, null)?.Dispose();
+    private void ReleaseAuthentication()
+    {
+        CancellationTokenSource? source = Interlocked.Exchange(ref _authentication, null);
+        if (source is not null && !ReferenceEquals(source, s_hostCallCancelled))
+        {
+            source.Dispose();
+        }
+    }
 
     /// <summary>
     /// Attaches to a host task the connection no longer waits for a continuation that observes its outcome and logs
