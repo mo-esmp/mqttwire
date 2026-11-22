@@ -35,6 +35,13 @@ public sealed class StopTests
     private static readonly TimeSpan s_justShort = TimeSpan.FromMilliseconds(1);
 
     /// <summary>
+    /// Whether the current thread is inside the call that stops the server; set and cleared by the test's own
+    /// thread, and read by a callback to learn whether it runs inside that call.
+    /// </summary>
+    [ThreadStatic]
+    private static bool t_insideTheStop;
+
+    /// <summary>
     /// Proves that the stop writes DISCONNECT 0x8B to every Active connection, closes its WebSocket with status 1000,
     /// and reports each one closed with <see cref="MqttCloseReason.ServerStopping"/> once its peer has ended the link.
     /// </summary>
@@ -71,6 +78,51 @@ public sealed class StopTests
             ["OnClosed c1 ServerStopping", "OnClosed c2 ServerStopping", "OnClosed c3 ServerStopping"],
             ignoreOrder: true);
         harness.Server.ConnectionCount.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that the stop cancels the token of a host that is still deciding on a thread-pool thread, not inside
+    /// the call that stops the server: a callback the host registered on the token does not run on the stopping
+    /// thread while <c>StopAsync</c> runs, and the connection gets CONNACK 0x8B.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task StopAsync_AuthenticatingConnection_CancelsTheHostsTokenOffTheStoppingThread()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TaskCompletionSource<MqttConnectResult> never = new();
+        TaskCompletionSource<bool> ranInsideTheStop = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Handler.Connect = (_, cancellationToken) =>
+        {
+            cancellationToken.Register(() => ranInsideTheStop.TrySetResult(t_insideTheStop));
+            return new ValueTask<MqttConnectResult>(never.Task);
+        };
+        TestConnection connection = harness.Accept();
+        connection.Deliver(ServerPackets.Connect);
+
+        // Act
+        Task stop;
+        t_insideTheStop = true;
+        try
+        {
+            stop = harness.Server.StopAsync();
+        }
+        finally
+        {
+            t_insideTheStop = false;
+        }
+
+        Task<bool> callback = ranInsideTheStop.Task;
+        await callback.Within("The host's token callback");
+        await stop.Within("The server's stop");
+        await connection.RunEnded();
+
+        // Assert
+        (await callback).ShouldBeFalse();
+        connection.TakeWritten().ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.ServerShuttingDown));
     }
 
     /// <summary>

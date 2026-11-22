@@ -65,6 +65,32 @@ public sealed class AcceptTests
     }
 
     /// <summary>
+    /// Proves that a first packet whose fixed header is malformed gets no MQTT answer and the WebSocket is closed
+    /// with 1002, without a handler call.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task RunAsync_FirstPacketHasAMalformedFixedHeader_ClosesWith1002()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Accept();
+
+        // Act: an AUTH whose flags are not 0.
+        connection.Deliver(Hex.Parse("FF FF FF FF FF"));
+
+        // Assert
+        connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.ProtocolError);
+        connection.TakeWritten().ShouldBeEmpty();
+        connection.Link.IsAborted.ShouldBeFalse();
+        await connection.RunEnded();
+        harness.Handler.CallsNow().ShouldBeEmpty();
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves that a link the peer ends before any CONNECT ends the run with every rented buffer back in the pool.
     /// </summary>
     /// <returns>

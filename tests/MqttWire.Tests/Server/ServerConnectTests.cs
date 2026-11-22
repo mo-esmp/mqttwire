@@ -29,6 +29,13 @@ public sealed class ServerConnectTests
     private const int LateConnectResultEvent = 19;
 
     /// <summary>
+    /// Whether the current thread is inside the call that runs the sweep; set and cleared by the test's own thread,
+    /// and read by a callback to learn whether it runs inside that call.
+    /// </summary>
+    [ThreadStatic]
+    private static bool t_insideTheSweep;
+
+    /// <summary>
     /// Gets the CONNECT packets that MqttWire refuses itself, each with the CONNACK it answers.
     /// </summary>
     public static TheoryData<byte[], byte[]> NotAcceptable { get; } = new()
@@ -48,6 +55,26 @@ public sealed class ServerConnectTests
         {
             ServerPackets.BuildConnect(flags: 0x02, properties: Hex.Parse("21 00 00"), payload: ServerPackets.Field("c1"u8)),
             ServerPackets.ConnAckRefused(MqttReasonCode.ProtocolError)
+        },
+        {
+            // Maximum Packet Size 0.
+            ServerPackets.BuildConnect(flags: 0x02, properties: Hex.Parse("27 00 00 00 00"), payload: ServerPackets.Field("c1"u8)),
+            ServerPackets.ConnAckRefused(MqttReasonCode.ProtocolError)
+        },
+        {
+            // Authentication Data without an Authentication Method: the codec's own answer.
+            ServerPackets.BuildConnect(flags: 0x02, properties: Hex.Parse("16 00 01 AA"), payload: ServerPackets.Field("c1"u8)),
+            ServerPackets.ConnAckRefused(MqttReasonCode.ProtocolError)
+        },
+        {
+            // Topic Alias Maximum twice: ignored, but validated for form.
+            ServerPackets.BuildConnect(flags: 0x02, properties: Hex.Parse("22 00 0A 22 00 0A"), payload: ServerPackets.Field("c1"u8)),
+            ServerPackets.ConnAckRefused(MqttReasonCode.MalformedPacket)
+        },
+        {
+            // Request Response Information twice.
+            ServerPackets.BuildConnect(flags: 0x02, properties: Hex.Parse("19 01 19 01"), payload: ServerPackets.Field("c1"u8)),
+            ServerPackets.ConnAckRefused(MqttReasonCode.MalformedPacket)
         },
         {
             ServerPackets.BuildConnect(flags: 0x02, properties: [], payload: ServerPackets.Field([0xC3, 0x28])),
@@ -198,6 +225,57 @@ public sealed class ServerConnectTests
         seen.Password.ToArray().ShouldBe([0x70]);
         harness.Pool.IsViewIntoRentedBuffer(seen.Password.Span).ShouldBeFalse();
         connection.TakeWritten().ShouldBe(ServerPackets.ConnAck);
+    }
+
+    /// <summary>
+    /// Proves that a User Property of the CONNECT reaches the host in the request, as a copy that stays readable
+    /// after the read buffer is back in the pool and has been overwritten.
+    /// </summary>
+    [Fact]
+    public void Connect_UserProperty_ReachesTheHostAsACopy()
+    {
+        // Arrange
+        OverwritingPool pool = new();
+        ServerHarness harness = ServerHarness.Create(pool: pool);
+        MqttConnectRequest? seen = null;
+        harness.Handler.Connect = (request, _) =>
+        {
+            seen = request;
+            return ValueTask.FromResult(MqttConnectResult.Accept());
+        };
+        TestConnection connection = harness.Accept();
+
+        // Act: the property "k" = "v".
+        connection.Deliver(ServerPackets.BuildConnect(flags: 0x02, properties: Hex.Parse("26 00 01 6B 00 01 76"),
+            payload: ServerPackets.Field("c1"u8)));
+
+        // Assert: every buffer is back, and the pool has filled each with its filler.
+        pool.Outstanding.ShouldBe(0);
+        seen.ShouldNotBeNull();
+        MqttWireUserProperty property = seen.UserProperties.ShouldHaveSingleItem();
+        property.Name.ShouldBe("k");
+        property.Value.ShouldBe("v");
+        connection.TakeWritten().ShouldBe(ServerPackets.ConnAck);
+    }
+
+    /// <summary>
+    /// Proves that Topic Alias Maximum and Request Response Information in a CONNECT are ignored: validated for form,
+    /// then without effect, so the CONNECT is accepted with the usual CONNACK.
+    /// </summary>
+    [Fact]
+    public void Connect_TopicAliasMaximumAndRequestResponseInformation_AreIgnored()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Accept();
+
+        // Act: Topic Alias Maximum 10 and Request Response Information 1.
+        connection.Deliver(ServerPackets.BuildConnect(flags: 0x02, properties: Hex.Parse("22 00 0A 19 01"),
+            payload: ServerPackets.Field("c1"u8)));
+
+        // Assert
+        connection.TakeWritten().ShouldBe(ServerPackets.ConnAck);
+        harness.Handler.CallsNow().ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-"]);
     }
 
     /// <summary>
@@ -553,6 +631,49 @@ public sealed class ServerConnectTests
             && entry.Exception is AggregateException
             && ((AggregateException)entry.Exception).InnerExceptions.Contains(thrown));
         harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that at the authentication deadline the host's token is cancelled on a thread-pool thread, not inside
+    /// the sweep: a callback the host registered on the token does not run on the sweep's thread while the sweep
+    /// runs.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Connect_AuthenticationDeadline_CancelsTheHostsTokenOffTheSweepsThread()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TaskCompletionSource<MqttConnectResult> never = new();
+        TaskCompletionSource<bool> ranInsideTheSweep = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Handler.Connect = (_, cancellationToken) =>
+        {
+            cancellationToken.Register(() => ranInsideTheSweep.TrySetResult(t_insideTheSweep));
+            return new ValueTask<MqttConnectResult>(never.Task);
+        };
+        TestConnection connection = harness.Accept();
+        connection.Deliver(ServerPackets.Connect);
+
+        // Act: the fake clock runs the sweep on this thread, inside Advance.
+        t_insideTheSweep = true;
+        try
+        {
+            harness.Advance(ServerLimits.AuthenticationDeadline);
+        }
+        finally
+        {
+            t_insideTheSweep = false;
+        }
+
+        Task<bool> callback = ranInsideTheSweep.Task;
+        await callback.Within("The host's token callback");
+        await connection.RunEnded();
+
+        // Assert
+        (await callback).ShouldBeFalse();
+        connection.TakeWritten().ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.ServerUnavailable));
     }
 
     /// <summary>
