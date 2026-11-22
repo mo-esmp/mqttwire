@@ -281,6 +281,58 @@ internal static class ServerPackets
     }
 
     /// <summary>
+    /// Builds an MQTT 5 SUBSCRIBE from its parts. The bytes are put together as given, so they may be ones the codec
+    /// refuses.
+    /// </summary>
+    /// <param name="packetIdentifier">
+    /// The packet identifier.
+    /// </param>
+    /// <param name="properties">
+    /// The properties, without their length; the length is written in front of them.
+    /// </param>
+    /// <param name="entries">
+    /// Each topic filter, written as UTF-8 with its length prefix, and its subscription options byte.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes, fixed header included.
+    /// </returns>
+    public static byte[] BuildSubscribe(ushort packetIdentifier, ReadOnlySpan<byte> properties,
+        IEnumerable<(string Filter, byte Options)> entries)
+    {
+        List<byte> payload = [];
+        foreach ((string filter, byte options) in entries)
+        {
+            payload.AddRange(Field(Encoding.UTF8.GetBytes(filter)));
+            payload.Add(options);
+        }
+
+        return BuildWithIdentifier(0x82, packetIdentifier, properties, [.. payload]);
+    }
+
+    /// <summary>
+    /// Builds an MQTT 5 UNSUBSCRIBE with no properties from its topic filters.
+    /// </summary>
+    /// <param name="packetIdentifier">
+    /// The packet identifier.
+    /// </param>
+    /// <param name="filters">
+    /// The topic filters, each written as UTF-8 with its length prefix.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes, fixed header included.
+    /// </returns>
+    public static byte[] BuildUnsubscribe(ushort packetIdentifier, IEnumerable<string> filters)
+    {
+        List<byte> payload = [];
+        foreach (string filter in filters)
+        {
+            payload.AddRange(Field(Encoding.UTF8.GetBytes(filter)));
+        }
+
+        return BuildWithIdentifier(0xA2, packetIdentifier, properties: [], [.. payload]);
+    }
+
+    /// <summary>
     /// Builds a PUBLISH with no properties whose Remaining Length is exactly the one asked for: its topic is
     /// <paramref name="topicLength"/> letters <c>a</c> and its payload, letters <c>x</c>, fills the rest.
     /// </summary>
@@ -344,6 +396,36 @@ internal static class ServerPackets
         firstByte, 0x20, (byte)(packetIdentifier >> 8), (byte)packetIdentifier, 0x97, 0x1C, 0x1F, 0x00, 0x19,
         .. "The message is too large."u8,
     ];
+
+    /// <summary>
+    /// Builds a packet whose variable header is a packet identifier and properties, followed by a payload.
+    /// </summary>
+    /// <param name="firstByte">
+    /// The packet's first byte: its type and flags.
+    /// </param>
+    /// <param name="packetIdentifier">
+    /// The packet identifier.
+    /// </param>
+    /// <param name="properties">
+    /// The properties, without their length; the length is written in front of them.
+    /// </param>
+    /// <param name="payload">
+    /// The payload.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes, fixed header included.
+    /// </returns>
+    private static byte[] BuildWithIdentifier(byte firstByte, ushort packetIdentifier, ReadOnlySpan<byte> properties,
+        ReadOnlySpan<byte> payload)
+    {
+        byte[] propertyLength = VariableByteInteger(properties.Length);
+        int remaining = 2 + propertyLength.Length + properties.Length + payload.Length;
+        return
+        [
+            firstByte, .. VariableByteInteger(remaining), (byte)(packetIdentifier >> 8), (byte)packetIdentifier,
+            .. propertyLength, .. properties, .. payload,
+        ];
+    }
 
     /// <summary>
     /// Encodes a variable byte integer (MQTT 5, 1.5.5).

@@ -102,8 +102,9 @@ public sealed class ReadTests
     }
 
     /// <summary>
-    /// Proves that a packet that stays incomplete for ten seconds from its first byte closes the connection with
-    /// DISCONNECT 0x82 and <see cref="MqttCloseReason.PartialPacketTimedOut"/>, and that its buffer comes back.
+    /// Proves that a packet that stays incomplete is still open after eight seconds from its first byte, and at ten
+    /// closes the connection with DISCONNECT 0x82 and <see cref="MqttCloseReason.PartialPacketTimedOut"/>, and that
+    /// its buffer comes back.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -117,12 +118,17 @@ public sealed class ReadTests
         connection.Deliver(Hex.Parse("32 0A 00"));
 
         // Act
-        harness.Advance(TimeSpan.FromSeconds(10));
+        harness.Advance(TimeSpan.FromSeconds(8));
+        byte[] writtenAt8 = connection.TakeWritten();
+        WebSocketCloseStatus? closedAt8 = connection.Link.ClosedWith;
+        harness.Advance(TimeSpan.FromSeconds(2));
         byte[] written = connection.TakeWritten();
         connection.Link.EndFromPeer();
         await connection.Run;
 
         // Assert
+        writtenAt8.ShouldBeEmpty();
+        closedAt8.ShouldBeNull();
         written.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ProtocolError));
         connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
         harness.Handler.Calls.ShouldContain("OnClosed c1 PartialPacketTimedOut");
@@ -156,6 +162,41 @@ public sealed class ReadTests
         writtenAt46.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.KeepAliveTimeout));
         harness.Handler.Calls.ShouldContain("OnClosed c1 KeepAliveTimedOut");
         harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that the keep-alive is measured from the moment the connection becomes Active, not from the CONNECT: with
+    /// keep-alive 2 and a host that answers after 8 seconds, the connection is open at the first sweep after the
+    /// CONNACK and closed with 0x8D at the first sweep 3 seconds or more after it.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Read_SlowOnConnectWithAShortKeepAlive_MeasuresTheKeepAliveFromTheConnAck()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TaskCompletionSource<MqttConnectResult> answer = new();
+        harness.Handler.Connect = (_, _) => new ValueTask<MqttConnectResult>(answer.Task);
+        TestConnection connection = harness.Accept();
+        connection.Deliver(Hex.Parse("10 0F 00 04 4D 51 54 54 05 02 00 02 00 00 02 63 31"));
+        harness.Advance(TimeSpan.FromSeconds(8));
+        Task connAckWritten = connection.Link.WhenWrittenAsync(1);
+        answer.SetResult(MqttConnectResult.Accept());
+        await connAckWritten;
+        byte[] connAck = connection.TakeWritten();
+
+        // Act
+        harness.Advance(TimeSpan.FromSeconds(2));
+        byte[] writtenAt2 = connection.TakeWritten();
+        harness.Advance(TimeSpan.FromSeconds(2));
+        byte[] writtenAt4 = connection.TakeWritten();
+
+        // Assert
+        connAck.ShouldBe(ServerPackets.ConnAck);
+        writtenAt2.ShouldBeEmpty();
+        writtenAt4.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.KeepAliveTimeout));
     }
 
     /// <summary>

@@ -1,6 +1,5 @@
 ﻿using System.Net.WebSockets;
 using Microsoft.Extensions.Logging;
-using MqttWire.Codec;
 using MqttWire.Link;
 using MqttWire.Server.Internal;
 
@@ -27,12 +26,9 @@ public sealed partial class MqttWireConnection
     /// The reason code the end carries; <see cref="MqttReasonCode.Success"/> when it carries none.
     /// </param>
     /// <param name="reasonString">
-    /// The reason string, at most 256 bytes, or <see langword="null"/>.
+    /// The reason string, or <see langword="null"/>; validated where the host handed it over, so it can be encoded.
+    /// It is cut, and left out where the client's Request Problem Information or Maximum Packet Size calls for it.
     /// </param>
-    /// <exception cref="ArgumentException">
-    /// The reason string cannot be carried (the host's bug); the connection is Closing and its close has begun all
-    /// the same, without the packet.
-    /// </exception>
     internal void BeginClose(MqttCloseReason reason, MqttReasonCode code, string? reasonString)
     {
         if (!TryEnterClosing(reason, out ConnectionState left))
@@ -56,7 +52,7 @@ public sealed partial class MqttWireConnection
                 // Not admitted: this close's CONNACK, if any, is the first packet.
                 if ((byte)code >= 0x80)
                 {
-                    SendConnAck(new ConnAckFields { ReasonCode = code, ReasonString = reasonString });
+                    SendConnAckRefusal(code, reasonString);
                 }
             }
             else if (progress == ConnAckProgress.Handed && left == ConnectionState.Active

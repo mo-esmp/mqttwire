@@ -582,6 +582,7 @@ loop:
 | PINGREQ | PINGRESP. |
 | DISCONNECT | Close. |
 | A second CONNECT, AUTH | DISCONNECT `0x82` (protocol error), close. |
+| A packet the server never reads: CONNACK, SUBACK, UNSUBACK, PINGRESP, the reserved type 0 | DISCONNECT `0x82` (protocol error), close. |
 | A malformed packet | DISCONNECT `0x81` (malformed packet), close. |
 
 #### Sending: taken at once, written when the socket allows
@@ -642,6 +643,10 @@ a slow consumer is noticed after "what those buffers hold, plus the limits".
 `0x95`. Every control packet then fits, because its variable parts are bounded: a reason string
 is cut to 256 bytes, and the user properties a host may put into CONNACK are limited to 1 KiB
 in total. A reason string that would still make a packet too large for the client is left out.
+The one exception is a SUBACK or UNSUBACK, which carries a reason code per topic filter: one that
+would be too large even without a reason string (thousands of filters against a client that
+announced 4 KiB) cannot be sent, so the connection is closed with `0x95` and the host is not
+called for that packet.
 A message for a connection that is larger than what that connection announced cannot be sent to
 it; dropping it silently could leave the client waiting for ever, so `TrySend` says "too large"
 and the connection is closed with `0x95`.

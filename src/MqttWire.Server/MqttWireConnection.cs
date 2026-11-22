@@ -40,8 +40,8 @@ public sealed partial class MqttWireConnection
     private long _partialPacketAt;
 
     /// <summary>
-    /// When the last complete packet from the client was read (the CONNECT, until another), a timestamp of the
-    /// server's clock. Written by the code that reads, read by the sweep for the keep-alive deadline; a skipped
+    /// When the last complete packet from the client was read (until the first, the moment the connection became
+    /// Active), a timestamp of the server's clock. Written by the code that reads, read by the sweep for the keep-alive deadline; a skipped
     /// packet counts once it has been consumed whole.
     /// </summary>
     private long _lastPacketAt;
@@ -92,13 +92,13 @@ public sealed partial class MqttWireConnection
     /// 256 when it sent none. Set by the connect phase.
     /// </summary>
     private int _clientWindow;
+#pragma warning restore S4487
 
     /// <summary>
-    /// The client's Maximum Packet Size, in bytes; <see cref="int.MaxValue"/> when it sent none or a larger one. Set
-    /// by the connect phase.
+    /// The client's Maximum Packet Size, in bytes; <see cref="int.MaxValue"/> when it sent none or a larger one, and
+    /// until the connect phase has read the CONNECT, so a CONNACK that refuses an unread CONNECT is not limited.
     /// </summary>
-    private int _clientMaxPacketSize;
-#pragma warning restore S4487
+    private int _clientMaxPacketSize = int.MaxValue;
 
     /// <summary>
     /// Whether acknowledgements may carry a reason string and user properties; <see langword="false"/> when the
@@ -191,10 +191,13 @@ public sealed partial class MqttWireConnection
     /// <param name="reasonString">
     /// A human-readable reason, or <see langword="null"/>; it is cut to 256 UTF-8 bytes.
     /// </param>
-    public void Close(MqttReasonCode reason, string? reasonString = null)
-    {
-        // A shell: the task that lets the host close a connection fills it in.
-    }
+    /// <exception cref="ArgumentException">
+    /// The reason string holds U+0000 or an unpaired surrogate, which no packet can carry; nothing changes.
+    /// </exception>
+#pragma warning disable S2325 // A shell beyond the check; the task that lets the host close a connection makes it an instance member in earnest.
+    public void Close(MqttReasonCode reason, string? reasonString = null) =>
+        ReasonStrings.ThrowIfNotEncodable(reasonString: reasonString, paramName: nameof(reasonString));
+#pragma warning restore S2325
 
     /// <summary>
     /// Tells what the connection holds now, for the tests of its bounds. Counts that do not exist yet are 0.

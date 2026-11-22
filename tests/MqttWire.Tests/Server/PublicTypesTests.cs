@@ -33,6 +33,61 @@ public sealed class PublicTypesTests
     }
 
     /// <summary>
+    /// Proves that a reason string no packet can carry (U+0000, an unpaired surrogate) is refused with an argument
+    /// exception where the host hands it over: by every refusal and by <see cref="MqttWireConnection.Close"/>.
+    /// </summary>
+    /// <remarks>
+    /// A fact rather than a theory: xUnit would carry an unpaired surrogate in inline data as U+FFFD.
+    /// </remarks>
+    [Fact]
+    public void Refuse_UnencodableReasonString_Throws()
+    {
+        // Arrange
+        MqttReasonCode code = MqttReasonCode.NotAuthorized;
+        MqttWireConnection connection = new(ServerHarness.Create().Server, new DefaultHttpContext());
+        string[] reasonStrings = ["a\0b", "a\uD800b", "a\uDC00", "\uDE00\uD83D"];
+
+        foreach (string reasonString in reasonStrings)
+        {
+            // Act
+            Action connect = () => MqttConnectResult.Refuse(code, reasonString);
+            Action admit = () => MqttAdmitResult.Refuse(code, reasonString);
+            Action subscribe = () => MqttSubscribeResult.Refuse(code, reasonString);
+            Action publish = () => MqttPublishResult.Refuse(code, reasonString);
+            Action close = () => connection.Close(code, reasonString);
+
+            // Assert
+            connect.ShouldThrow<ArgumentException>().ParamName.ShouldBe("reasonString");
+            admit.ShouldThrow<ArgumentException>().ParamName.ShouldBe("reasonString");
+            subscribe.ShouldThrow<ArgumentException>().ParamName.ShouldBe("reasonString");
+            publish.ShouldThrow<ArgumentException>().ParamName.ShouldBe("reasonString");
+            close.ShouldThrow<ArgumentException>().ParamName.ShouldBe("reasonString");
+        }
+    }
+
+    /// <summary>
+    /// Proves that a reason string with a surrogate pair, and no reason string at all, are accepted by every refusal.
+    /// </summary>
+    [Fact]
+    public void Refuse_EncodableReasonString_IsAccepted()
+    {
+        // Arrange
+        string pair = "a😀b";
+
+        // Act
+        Action connect = () => MqttConnectResult.Refuse(MqttReasonCode.NotAuthorized, pair);
+        Action admit = () => MqttAdmitResult.Refuse(MqttReasonCode.NotAuthorized, pair);
+        Action subscribe = () => MqttSubscribeResult.Refuse(MqttReasonCode.NotAuthorized, pair);
+        Action publish = () => MqttPublishResult.Refuse(MqttReasonCode.NotAuthorized, reasonString: null);
+
+        // Assert
+        connect.ShouldNotThrow();
+        admit.ShouldNotThrow();
+        subscribe.ShouldNotThrow();
+        publish.ShouldNotThrow();
+    }
+
+    /// <summary>
     /// Proves that user properties over 1,024 encoded bytes are refused and exactly 1,024 bytes are accepted.
     /// </summary>
     [Fact]

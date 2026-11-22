@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using System.Runtime.CompilerServices;
 using MqttWire.Codec;
 using MqttWire.Link;
@@ -15,6 +15,11 @@ public sealed partial class MqttWireConnection
     /// The reason string of the refusal of a publish too large.
     /// </summary>
     private const string MessageTooLarge = "The message is too large.";
+
+    /// <summary>
+    /// The position of the packet type in the first byte of a fixed header.
+    /// </summary>
+    private const int PacketTypeShift = 4;
 
     /// <summary>
     /// How a packet is read, judged by its fixed header.
@@ -133,12 +138,6 @@ public sealed partial class MqttWireConnection
 
             _readBuffer.Advance(read);
             ConnectFrame frame = FrameConnect(out int length);
-            if (frame == ConnectFrame.Complete)
-            {
-                // The keep-alive runs from the CONNECT; the sweep reads the stamp only once the connection is Active.
-                Volatile.Write(ref _lastPacketAt, _server.Time.GetTimestamp());
-            }
-
             if (frame != ConnectFrame.NeedMoreData)
             {
                 return frame == ConnectFrame.Complete ? length : 0;
@@ -285,7 +284,7 @@ public sealed partial class MqttWireConnection
         if (completed)
         {
             Volatile.Write(ref _lastPacketAt, now);
-            Volatile.Write(ref _partialPacketAt, 0);
+            Volatile.Write(ref _partialPacketAt, value: 0);
         }
 
         if (framed == FramedPackets.NeedMoreData && Volatile.Read(ref _partialPacketAt) == 0)
@@ -298,8 +297,10 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Frames the packets in the read buffer and handles each complete one, in order. A malformed fixed header ends
-    /// the connection with 0x81. A PUBLISH is judged by its Remaining Length (plan decision 6): up to the payload
-    /// limit and <see cref="ServerLimits.PublishOverheadBytes"/> it is read whole; above that and up to
+    /// the connection with 0x81, one of the reserved type 0 with 0x82, and a PUBLISH whose flags carry a QoS above
+    /// <see cref="MqttWireServerOptions.MaxQoS"/> with 0x9B, all from the fixed header alone. A PUBLISH is judged by
+    /// its Remaining Length (plan decision 6): up to the payload limit and
+    /// <see cref="ServerLimits.PublishOverheadBytes"/> it is read whole; above that and up to
     /// <see cref="ServerLimits.SkipFactor"/> times the limit it is skipped; above both, the connection ends with
     /// 0x95. Any other packet over <see cref="ServerLimits.MaxControlPacketBytes"/> in total ends it with 0x95. When a
     /// packet is incomplete, the buffer is compacted or grown so the rest of it fits; while one is skipped, the
@@ -341,9 +342,9 @@ public sealed partial class MqttWireConnection
                 return FramedPackets.NeedMoreData;
             }
 
-            if (status != OperationStatus.Done)
+            if (status != OperationStatus.Done || IsQoSAboveMax(header))
             {
-                BeginClose(MqttCloseReason.MalformedPacket, MqttReasonCode.MalformedPacket, reasonString: null);
+                RefuseHeader(status, data[0]);
                 return FramedPackets.Ended;
             }
 
@@ -372,6 +373,44 @@ public sealed partial class MqttWireConnection
                 return FramedPackets.Ended;
             }
         }
+    }
+
+    /// <summary>
+    /// Tells whether a packet is a PUBLISH whose QoS, read from the flags of its fixed header, is above
+    /// <see cref="MqttWireServerOptions.MaxQoS"/> (design 6.6, plan decision 6).
+    /// </summary>
+    /// <param name="header">
+    /// The packet's fixed header.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the connection is to end with 0x9B.
+    /// </returns>
+    private bool IsQoSAboveMax(in PacketHeader header) =>
+        header.Type == PacketType.Publish && PublishSkip.GetQoS(header) > _server.Options.MaxQoS;
+
+    /// <summary>
+    /// Begins the close for a packet refused from its fixed header alone, before anything is buffered or skipped: a
+    /// header that is not valid ends the connection with 0x81, or with 0x82 when its type is the reserved 0, a packet
+    /// the server never reads; a valid one is a PUBLISH whose QoS is above
+    /// <see cref="MqttWireServerOptions.MaxQoS"/>, and ends it with 0x9B.
+    /// </summary>
+    /// <param name="status">
+    /// What <see cref="PacketHeader.TryRead"/> said of the header: <see cref="OperationStatus.Done"/> or a failure.
+    /// </param>
+    /// <param name="firstByte">
+    /// The packet's first byte.
+    /// </param>
+    private void RefuseHeader(OperationStatus status, byte firstByte)
+    {
+        if (status == OperationStatus.Done)
+        {
+            BeginClose(MqttCloseReason.ProtocolError, MqttReasonCode.QoSNotSupported, reasonString: null);
+            return;
+        }
+
+        CloseUndecodable(firstByte >> PacketTypeShift == 0
+            ? MqttReasonCode.ProtocolError
+            : MqttReasonCode.MalformedPacket);
     }
 
     /// <summary>
@@ -476,83 +515,6 @@ public sealed partial class MqttWireConnection
         // Every byte read was consumed: the next read starts at the buffer's start.
         _readBuffer.Compact();
         return SkipStatus.NeedMoreData;
-    }
-
-    /// <summary>
-    /// Handles one complete packet received after the CONNACK: a PUBLISH at QoS 0 and 1 goes to the host, a PINGREQ
-    /// is answered and a DISCONNECT ends the connection with <see cref="MqttCloseReason.ClientDisconnected"/>. Every
-    /// other packet is accepted and ignored for now: what each does comes with later tasks.
-    /// </summary>
-    /// <param name="header">
-    /// The packet's fixed header.
-    /// </param>
-    /// <param name="packet">
-    /// The whole packet, fixed header included; a view of the read buffer, valid only during the call.
-    /// </param>
-    /// <returns>
-    /// <see langword="true"/> to go on with the next packet; <see langword="false"/> when the connection is ending,
-    /// and the close has begun.
-    /// </returns>
-    private bool HandlePacket(in PacketHeader header, ReadOnlySpan<byte> packet)
-    {
-        switch (header.Type)
-        {
-            case PacketType.Publish:
-                return HandlePublish(packet);
-
-            case PacketType.PingReq:
-                SendPingResp();
-                return _state == ConnectionState.Active;
-
-            case PacketType.Disconnect:
-                BeginClose(MqttCloseReason.ClientDisconnected, MqttReasonCode.Success, reasonString: null);
-                return false;
-
-            default:
-                return true;
-        }
-    }
-
-    /// <summary>
-    /// Handles a PUBLISH read whole: decodes it, refuses a payload over the limit with 0x97, and hands the rest to
-    /// the host's <see cref="IMqttWireHandler.OnPublish"/>, answering QoS 1 with PUBACK: success, or the host's
-    /// refusal. A packet the decoder refuses begins the close with the decoder's code. An exception the host throws
-    /// is not caught here.
-    /// </summary>
-    /// <param name="packet">
-    /// The whole packet, a view of the read buffer, valid only during the call.
-    /// </param>
-    /// <returns>
-    /// <see langword="true"/> to go on with the next packet; <see langword="false"/> when the connection is ending.
-    /// </returns>
-    private bool HandlePublish(ReadOnlySpan<byte> packet)
-    {
-        MqttReasonCode code = PublishCodec.TryDecode(packet, PacketSource.Client, out PublishPacket publish);
-        if (code != MqttReasonCode.Success)
-        {
-            CloseUndecodable(code);
-            return false;
-        }
-
-        if (publish.Payload.Length > _server.Options.MaxPublishPayloadBytes)
-        {
-            return RefuseTooLarge(publish.QoS, publish.PacketIdentifier);
-        }
-
-        if (publish.QoS == MqttQoS.ExactlyOnce)
-        {
-            // Task 9: a QoS 2 publish that reaches the host (its record, OnPublish, PUBREC); unanswered until then.
-            return true;
-        }
-
-        MqttPublish message = new(publish.Topic, publish.Payload, publish.QoS, publish.Retain);
-        MqttPublishResult result = _server.Handler.OnPublish(this, message);
-        if (publish.QoS == MqttQoS.AtLeastOnce)
-        {
-            SendAck(PacketType.PubAck, publish.PacketIdentifier, result.ReasonCode, result.ReasonString);
-        }
-
-        return _state == ConnectionState.Active;
     }
 
     /// <summary>

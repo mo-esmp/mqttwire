@@ -110,6 +110,9 @@ public readonly struct MqttConnectResult
     /// <exception cref="ArgumentOutOfRangeException">
     /// The reason code is below 0x80.
     /// </exception>
+    /// <exception cref="ArgumentException">
+    /// The reason string holds U+0000 or an unpaired surrogate, which no packet can carry.
+    /// </exception>
     public static MqttConnectResult Refuse(MqttReasonCode reasonCode, string? reasonString = null)
     {
         if ((byte)reasonCode < 0x80)
@@ -117,6 +120,8 @@ public readonly struct MqttConnectResult
             throw new ArgumentOutOfRangeException(paramName: nameof(reasonCode), actualValue: reasonCode,
                 message: "A refusal needs a reason code of 0x80 or above.");
         }
+
+        ReasonStrings.ThrowIfNotEncodable(reasonString: reasonString, paramName: nameof(reasonString));
 
         return new MqttConnectResult(reasonCode: reasonCode, reasonString: ReasonStrings.Cut(reasonString: reasonString),
             state: null, userProperties: null);

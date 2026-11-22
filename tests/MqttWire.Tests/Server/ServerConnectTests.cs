@@ -481,7 +481,7 @@ public sealed class ServerConnectTests
     /// Proves that packets sent right behind the CONNECT, in the same WebSocket message, are handled in order after
     /// the CONNACK, neither lost nor answered before it.
     /// </summary>
-    [Fact(Skip = "Task 7")]
+    [Fact]
     public void Connect_PacketsBehindTheConnect_AreHandledAfterTheConnAck()
     {
         // Arrange

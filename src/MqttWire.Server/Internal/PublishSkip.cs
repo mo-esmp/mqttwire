@@ -84,8 +84,19 @@ internal struct PublishSkip
         _consumed = 0;
         _topicLength = 0;
         _identifier = 0;
-        QoS = (MqttQoS)((header.Flags >> QoSShift) & QoSMask);
+        QoS = GetQoS(header);
     }
+
+    /// <summary>
+    /// Reads the QoS of a PUBLISH from the flags of its fixed header.
+    /// </summary>
+    /// <param name="header">
+    /// The PUBLISH's fixed header; <see cref="PacketHeader.TryRead"/> has refused the flags that carry QoS 3.
+    /// </param>
+    /// <returns>
+    /// The QoS.
+    /// </returns>
+    public static MqttQoS GetQoS(in PacketHeader header) => (MqttQoS)((header.Flags >> QoSShift) & QoSMask);
 
     /// <summary>
     /// Consumes bytes of the packet, up to what the packet still has: reads the topic's length and the packet
@@ -96,7 +107,8 @@ internal struct PublishSkip
     /// </param>
     /// <param name="error">
     /// <see cref="MqttReasonCode.Success"/>; <see cref="MqttReasonCode.MalformedPacket"/> when the topic's length
-    /// runs past the packet or the packet ends before its identifier; <see cref="MqttReasonCode.ProtocolError"/>
+    /// runs past the packet, the packet ends before its identifier, or it ends where its property length should
+    /// start (right after the topic at QoS 0, right after the identifier at QoS 1 and 2); <see cref="MqttReasonCode.ProtocolError"/>
     /// for a packet identifier of 0 at QoS 1 or 2, the code <see cref="PublishCodec"/> gives it. After an error the
     /// skip is in no meaningful state and the connection is to end.
     /// </param>
@@ -116,7 +128,10 @@ internal struct PublishSkip
                 _topicLength = (ushort)((_topicLength << 8) | bytes[index]);
                 index++;
                 _consumed++;
-                if (_consumed == FieldSize && IdentifierEnd > _length)
+                // At QoS 0 the property length must follow the topic; at QoS 1 and 2 the identifier must, and is
+                // read before the property length is missed, since the codec judges an identifier of 0 first.
+                if (_consumed == FieldSize
+                    && (IdentifierEnd > _length || (QoS == MqttQoS.AtMostOnce && IdentifierEnd == _length)))
                 {
                     error = MqttReasonCode.MalformedPacket;
                     return index;
@@ -131,9 +146,11 @@ internal struct PublishSkip
                 _identifier = (ushort)((_identifier << 8) | bytes[index]);
                 index++;
                 _consumed++;
-                if (_consumed == IdentifierEnd && _identifier == 0)
+                if (_consumed == IdentifierEnd && (_identifier == 0 || _consumed == _length))
                 {
-                    error = MqttReasonCode.ProtocolError;
+                    // An identifier of 0 is a protocol error; a packet that ends with its identifier has no property
+                    // length, and is malformed, as PublishCodec judges both in the first band.
+                    error = _identifier == 0 ? MqttReasonCode.ProtocolError : MqttReasonCode.MalformedPacket;
                     return index;
                 }
 

@@ -348,6 +348,10 @@ public sealed partial class MqttWireConnection
     /// </returns>
     private bool Admit()
     {
+        // The keep-alive runs from the moment the connection becomes Active, which this step makes it, with the
+        // CONNACK right behind: a slow OnConnectAsync does not use up the client's keep-alive. Stamped before the
+        // move to Active, so the first sweep that sees Active never reads an older stamp.
+        Volatile.Write(ref _lastPacketAt, _server.Time.GetTimestamp());
         MqttAdmitResult admission;
         MqttWireConnection? replaced;
         try

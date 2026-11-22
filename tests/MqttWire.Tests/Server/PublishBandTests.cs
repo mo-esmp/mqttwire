@@ -1,4 +1,5 @@
-﻿using MqttWire.Server;
+﻿using System.Net.WebSockets;
+using MqttWire.Server;
 using MqttWire.Tests.Client;
 using MqttWire.Tests.Codec;
 
@@ -195,6 +196,111 @@ public sealed class PublishBandTests
     }
 
     /// <summary>
+    /// Proves that a PUBLISH whose Remaining Length is exactly the end of the first band, 6,144, is read whole: a
+    /// buffer larger than the first read's is rented, and its payload over the limit is refused with 0x97.
+    /// </summary>
+    [Fact]
+    public void Publish_RemainingLengthAtTheEndOfBandOne_IsReadWhole()
+    {
+        // Arrange
+        ServerHarness harness = CreateHarness();
+        TestConnection connection = harness.Connect();
+        byte[] packet = ServerPackets.BuildPublishOfLength(MqttQoS.AtLeastOnce, Limit + 5_120);
+
+        // Act
+        connection.Deliver(packet);
+
+        // Assert
+        connection.TakeWritten().ShouldBe(ServerPackets.TooLargePubAck1);
+        PublishCalls(harness).ShouldBeEmpty();
+        harness.Pool.LargestRent.ShouldBeGreaterThan(4_096);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a PUBLISH whose Remaining Length is one byte past the end of the first band, 6,145, is skipped: no
+    /// buffer larger than the first read's is rented, and it is refused with 0x97.
+    /// </summary>
+    [Fact]
+    public void Publish_RemainingLengthOnePastBandOne_IsSkipped()
+    {
+        // Arrange
+        ServerHarness harness = CreateHarness();
+        TestConnection connection = harness.Connect();
+        byte[] packet = ServerPackets.BuildPublishOfLength(MqttQoS.AtLeastOnce, Limit + 5_120 + 1);
+
+        // Act
+        connection.Deliver(packet);
+
+        // Assert
+        connection.TakeWritten().ShouldBe(ServerPackets.TooLargePubAck1);
+        PublishCalls(harness).ShouldBeEmpty();
+        harness.Pool.LargestRent.ShouldBeLessThanOrEqualTo(4_096);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a skipped PUBLISH that ends right where its property length should start is malformed (0x81),
+    /// exactly as the codec judges the same shape in the first band: at QoS 0 right after its topic, at QoS 1 and 2
+    /// right after its packet identifier.
+    /// </summary>
+    /// <param name="qos">
+    /// The QoS of the publish.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Theory]
+    [InlineData(MqttQoS.AtMostOnce)]
+    [InlineData(MqttQoS.AtLeastOnce)]
+    [InlineData(MqttQoS.ExactlyOnce)]
+    public async Task Publish_SkipBandEndsWithoutAPropertyLength_ClosesWith0x81(MqttQoS qos)
+    {
+        // Arrange
+        ServerHarness harness = CreateHarness();
+        TestConnection connection = harness.Connect();
+        int identifierLength = qos == MqttQoS.AtMostOnce ? 0 : 2;
+        byte[] topic = ServerPackets.Field(ServerPackets.Letters('a', SkipBandEnd - 2 - identifierLength));
+        byte[] identifier = qos == MqttQoS.AtMostOnce ? [] : [0x00, 0x01];
+        byte[] packet = [(byte)(0x30 | ((int)qos << 1)), 0x80, 0x80, 0x01, .. topic, .. identifier];
+
+        // Act
+        connection.Deliver(packet);
+        await connection.Run;
+
+        // Assert
+        packet.Length.ShouldBe(SkipBandEnd + 4);
+        connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.MalformedPacket));
+        harness.Handler.Calls.ShouldContain("OnClosed c1 MalformedPacket");
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a skipped QoS 1 PUBLISH with packet identifier 0 that ends right after it is a protocol error
+    /// (0x82), as the codec judges it in the first band, where the identifier is checked before the properties.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Publish_SkipBandIdentifierZeroAtTheEnd_ClosesWith0x82()
+    {
+        // Arrange
+        ServerHarness harness = CreateHarness();
+        TestConnection connection = harness.Connect();
+        byte[] packet = [0x32, 0x80, 0x80, 0x01, .. ServerPackets.Field(ServerPackets.Letters('a', SkipBandEnd - 4)), 0x00, 0x00];
+
+        // Act
+        connection.Deliver(packet);
+        await connection.Run;
+
+        // Assert
+        connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ProtocolError));
+        harness.Handler.Calls.ShouldContain("OnClosed c1 ProtocolError");
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves that the skip passes over a topic of 8,000 bytes to find the packet identifier, which the refusal
     /// carries.
     /// </summary>
@@ -357,8 +463,9 @@ public sealed class PublishBandTests
     }
 
     /// <summary>
-    /// Proves that the partial-packet deadline covers a packet that is being skipped: one that stalls for ten seconds
-    /// closes the connection with DISCONNECT 0x82 and <see cref="MqttCloseReason.PartialPacketTimedOut"/>.
+    /// Proves that the partial-packet deadline covers a packet that is being skipped: one that stalls is still open
+    /// after eight seconds and is closed at ten with DISCONNECT 0x82 and
+    /// <see cref="MqttCloseReason.PartialPacketTimedOut"/>.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -373,12 +480,17 @@ public sealed class PublishBandTests
         connection.Deliver(packet.AsSpan(0, packet.Length / 2));
 
         // Act
-        harness.Advance(TimeSpan.FromSeconds(10));
+        harness.Advance(TimeSpan.FromSeconds(8));
+        byte[] writtenAt8 = connection.TakeWritten();
+        WebSocketCloseStatus? closedAt8 = connection.Link.ClosedWith;
+        harness.Advance(TimeSpan.FromSeconds(2));
         byte[] written = connection.TakeWritten();
         connection.Link.EndFromPeer();
         await connection.Run;
 
         // Assert
+        writtenAt8.ShouldBeEmpty();
+        closedAt8.ShouldBeNull();
         written.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ProtocolError));
         harness.Handler.Calls.ShouldContain("OnClosed c1 PartialPacketTimedOut");
         harness.Pool.Outstanding.ShouldBe(0);
