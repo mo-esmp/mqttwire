@@ -182,6 +182,89 @@ public sealed class WebSocketLinkTests
     }
 
     /// <summary>
+    /// Proves the link starts one close frame when its own close for a text message is still waiting behind a write
+    /// in progress and a caller closes it meanwhile: the caller's close completes at once without sending, and the
+    /// peer reads the whole message and then the one close, with 1003.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task CloseAsync_WhileTheTextCloseWaitsBehindAWrite_SendsNoSecondClose()
+    {
+        // Arrange
+        (WebSocket client, WebSocket server) = WebSocketPair.Create();
+        using WebSocket clientSocket = client;
+        using WebSocket serverSocket = server;
+        WebSocketLink link = new(clientSocket);
+        byte[] message = new byte[200_000];
+
+        // More than the pipe takes before its reader reads, so the write stays pending.
+        ValueTask write = link.WriteAsync(message, CancellationToken.None);
+        write.IsCompleted.ShouldBeFalse();
+        await serverSocket.SendAsync("x"u8.ToArray(), WebSocketMessageType.Text, true, CancellationToken.None);
+
+        // The wait sees the text message, so the read starts the link's own close before it awaits anything.
+        await link.WaitForDataAsync(CancellationToken.None);
+        Task<int> read = link.ReadAsync(new byte[16], CancellationToken.None).AsTask();
+        read.IsCompleted.ShouldBeFalse();
+
+        // Act
+        ValueTask close = link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
+        bool closedAtOnce = close.IsCompletedSuccessfully;
+        byte[] buffer = new byte[256_000];
+        int received = 0;
+        WebSocketReceiveResult result;
+        do
+        {
+            result = await serverSocket.ReceiveAsync(new ArraySegment<byte>(buffer, received, buffer.Length - received), CancellationToken.None);
+            received += result.Count;
+        }
+        while (result.MessageType == WebSocketMessageType.Binary);
+
+        await write;
+        await close;
+
+        // Assert
+        closedAtOnce.ShouldBeTrue();
+        received.ShouldBe(message.Length);
+        result.MessageType.ShouldBe(WebSocketMessageType.Close);
+        result.CloseStatus.ShouldBe(WebSocketCloseStatus.InvalidMessageType);
+        (await read).ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves the link starts one close frame when a caller closed it before a text message arrived: the read that
+    /// meets the text message sends no close with 1003, returns zero without failing, and the peer sees the caller's
+    /// close.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task ReadAsync_TextMessageAfterTheCallerClosed_SendsNoSecondCloseAndReturnsZero()
+    {
+        // Arrange
+        (WebSocket client, WebSocket server) = WebSocketPair.Create();
+        using WebSocket clientSocket = client;
+        using WebSocket serverSocket = server;
+        WebSocketLink link = new(clientSocket);
+        await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
+        await serverSocket.SendAsync("x"u8.ToArray(), WebSocketMessageType.Text, true, CancellationToken.None);
+        byte[] buffer = new byte[16];
+
+        // Act
+        int read = await link.ReadAsync(buffer, CancellationToken.None);
+        WebSocketReceiveResult closeResult = await serverSocket.ReceiveAsync(buffer, CancellationToken.None);
+
+        // Assert
+        read.ShouldBe(0);
+        closeResult.MessageType.ShouldBe(WebSocketMessageType.Close);
+        closeResult.CloseStatus.ShouldBe(WebSocketCloseStatus.NormalClosure);
+        clientSocket.State.ShouldBe(WebSocketState.CloseSent);
+    }
+
+    /// <summary>
     /// Proves an empty text message that the zero-byte wait takes whole still ends the link: the read after the
     /// wait returns zero and the peer sees close status 1003, though binary data follows the text message.
     /// </summary>
