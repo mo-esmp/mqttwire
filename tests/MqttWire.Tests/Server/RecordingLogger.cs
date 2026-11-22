@@ -15,9 +15,45 @@ internal sealed class RecordingLogger : ILogger<MqttWireServer>
     private readonly Lock _gate = new();
 
     /// <summary>
+    /// Completes when an entry with <see cref="_awaitedEventId"/> is logged, or <see langword="null"/> when no one
+    /// waits.
+    /// </summary>
+    private TaskCompletionSource? _awaited;
+
+    /// <summary>
+    /// The event id <see cref="_awaited"/> waits for.
+    /// </summary>
+    private int _awaitedEventId;
+
+    /// <summary>
     /// Gets every entry logged, oldest first, with its message formatted.
     /// </summary>
     public List<(LogLevel Level, EventId Id, string Message, Exception? Exception)> Entries { get; } = [];
+
+    /// <summary>
+    /// Waits until an entry with an event id is logged, for entries written on another thread. One waiter at a time.
+    /// </summary>
+    /// <param name="eventId">
+    /// The event id to wait for.
+    /// </param>
+    /// <returns>
+    /// A task that completes, never inline, once such an entry is in <see cref="Entries"/>; at once when one is
+    /// there already.
+    /// </returns>
+    public Task WhenLoggedAsync(int eventId)
+    {
+        lock (_gate)
+        {
+            if (Entries.Exists(entry => entry.Id.Id == eventId))
+            {
+                return Task.CompletedTask;
+            }
+
+            _awaitedEventId = eventId;
+            _awaited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            return _awaited.Task;
+        }
+    }
 
     /// <summary>
     /// Starts no scope: the logger does not record scopes.
@@ -74,6 +110,11 @@ internal sealed class RecordingLogger : ILogger<MqttWireServer>
         lock (_gate)
         {
             Entries.Add((logLevel, eventId, message, exception));
+            if (_awaited is not null && eventId.Id == _awaitedEventId)
+            {
+                _awaited.SetResult();
+                _awaited = null;
+            }
         }
     }
 }

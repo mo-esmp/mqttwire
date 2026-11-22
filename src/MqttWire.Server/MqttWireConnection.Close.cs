@@ -1,4 +1,5 @@
 ﻿using System.Net.WebSockets;
+using Microsoft.Extensions.Logging;
 using MqttWire.Codec;
 using MqttWire.Link;
 using MqttWire.Server.Internal;
@@ -81,13 +82,15 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Acts on the deadlines that have passed; called by the sweep, from the timer's thread. An Accepted
-    /// connection is aborted at the connect deadline; an Authenticating one has the token of the host's
-    /// <see cref="IMqttWireHandler.OnConnectAsync"/> cancelled at the authentication deadline, and the connect phase
-    /// then refuses it; a Closing one is aborted at the close deadline. Each check acts only on the state it read:
-    /// the move out of Accepted is a compare-exchange that expects Accepted, the cancellation source exists only
-    /// while the connection is Authenticating and is taken from its field by one exchange, and the close deadline is
-    /// measured from the stamp that only the winner of the move to Closing writes. It allocates nothing and never
-    /// throws.
+    /// connection is aborted at the connect deadline; an Authenticating one has its cancellation source taken at the
+    /// authentication deadline and handed to the thread pool, which cancels it (see
+    /// <see cref="CancelAuthentication"/>); a Closing one is aborted at the close deadline. Each check acts only on
+    /// the state it read: the move out of Accepted is a compare-exchange that expects Accepted, the cancellation
+    /// source exists only while the connection is Authenticating and is taken from its field by one exchange, and the
+    /// close deadline is measured from the stamp that only the winner of the move to Closing writes. On the sweep's
+    /// thread it runs no host code and no part of the connection's end beyond an abort, and never throws; it
+    /// allocates only when it hands a source to the thread pool. An abort ends the link's pending reads, whose
+    /// continuations may run on the thread that aborts, as with any abort.
     /// </summary>
     /// <param name="now">
     /// The sweep's timestamp, from the server's clock.
@@ -151,10 +154,11 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Cancels the token of the host's <see cref="IMqttWireHandler.OnConnectAsync"/> at the authentication deadline:
-    /// takes the cancellation source out of its field, cancels it and disposes it. When the connect phase took it
-    /// first, the host has answered and nothing is done. The cancellation runs the token's callbacks on this thread,
-    /// the host's among them; one that throws is the host's bug and does not stop the sweep.
+    /// Ends the host's wait at the authentication deadline: takes the cancellation source out of its field, on the
+    /// sweep's thread, and hands it to the thread pool, which cancels and disposes it. When the connect phase took it
+    /// first, the host has answered and nothing is done. So the source is still cancelled and disposed exactly once,
+    /// and the token's callbacks (the host's, and the connect phase's continuation with the CONNACK 0x88 and the end
+    /// of the run) never run on the sweep's thread.
     /// </summary>
     private void CancelAuthentication()
     {
@@ -164,13 +168,33 @@ public sealed partial class MqttWireConnection
             return;
         }
 
+        ThreadPool.UnsafeQueueUserWorkItem(static state => CancelOnThreadPool(state.Source, state.Logger, state.ClientId),
+            (Source: source, Logger: (ILogger)_server.Logger, ClientId), preferLocal: false);
+    }
+
+    /// <summary>
+    /// Cancels and disposes a cancellation source of the Authenticating state, on a thread-pool thread. A token
+    /// callback that throws is the host's bug: it is logged as an error of <see cref="IMqttWireHandler.OnConnectAsync"/>
+    /// and the token is cancelled all the same.
+    /// </summary>
+    /// <param name="source">
+    /// The source; nothing else cancels or disposes it.
+    /// </param>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection.
+    /// </param>
+    private static void CancelOnThreadPool(CancellationTokenSource source, ILogger logger, string clientId)
+    {
         try
         {
             source.Cancel();
         }
-        catch (AggregateException)
+        catch (AggregateException exception)
         {
-            // A callback of the host's threw; the token is cancelled all the same, and the sweep goes on.
+            ServerLog.HandlerThrew(logger, clientId, nameof(IMqttWireHandler.OnConnectAsync), exception);
         }
         finally
         {

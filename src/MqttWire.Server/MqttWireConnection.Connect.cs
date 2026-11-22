@@ -303,7 +303,10 @@ public sealed partial class MqttWireConnection
     /// <summary>
     /// Ends a connection whose host did not answer before its token fired: CONNACK 0x88 and the close when the
     /// authentication deadline passed; the close alone when the request was aborted, since no CONNACK can reach the
-    /// client then. A host task still running is observed later.
+    /// client then. A host task still running is observed later. What tells the two apart is the request's own
+    /// token: only the sweep and an abort cancel the linked source, and an abort cancels the request's token before
+    /// the linked one, so when the request's token is not cancelled here, the deadline fired. When the request is
+    /// aborted after the deadline fired but before this runs, the socket is gone and no CONNACK is written either.
     /// </summary>
     /// <param name="pending">
     /// The host's task, or <see langword="null"/> when the host answered at once (with a cancellation).

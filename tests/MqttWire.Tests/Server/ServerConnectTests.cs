@@ -383,6 +383,45 @@ public sealed class ServerConnectTests
     }
 
     /// <summary>
+    /// Proves that a token callback of the host's that throws at the authentication deadline is logged as an error
+    /// of <c>OnConnectAsync</c>, and the connection still gets CONNACK 0x88 and ends.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Connect_HostTokenCallbackThrowsAtTheDeadline_LogsItAndAnswersConnAck0x88()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TaskCompletionSource<MqttConnectResult> never = new();
+        InvalidOperationException thrown = new("The host's callback failed.");
+        harness.Handler.Connect = (_, cancellationToken) =>
+        {
+            cancellationToken.Register(() => throw thrown);
+            return new ValueTask<MqttConnectResult>(never.Task);
+        };
+        TestConnection connection = harness.Accept();
+        connection.Deliver(ServerPackets.Connect);
+        Task logged = harness.Log.WhenLoggedAsync(HandlerThrewEvent);
+
+        // Act
+        harness.Advance(ServerLimits.AuthenticationDeadline);
+        await connection.Run;
+        await logged;
+
+        // Assert
+        connection.TakeWritten().ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.ServerUnavailable));
+        connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
+        harness.Log.Entries.ShouldContain(entry =>
+            entry.Id.Id == HandlerThrewEvent && entry.Level == LogLevel.Error
+            && entry.Message.Contains("OnConnectAsync", StringComparison.Ordinal)
+            && entry.Exception is AggregateException
+            && ((AggregateException)entry.Exception).InnerExceptions.Contains(thrown));
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves that the host's token is cancelled as soon as the WebSocket request is aborted, before the
     /// authentication deadline, and that the connection then ends without a CONNACK.
     /// </summary>
