@@ -1,4 +1,5 @@
 using System.Text;
+using Microsoft.AspNetCore.Http;
 using MqttWire.Server;
 using MqttWire.Server.Internal;
 
@@ -243,22 +244,22 @@ public sealed class PublicTypesTests
     }
 
     /// <summary>
-    /// Proves that a connection shell reports its client id and state and a send that finds it not open.
+    /// Proves that a connection that has not been admitted has no client id and no state, and a send finds it not
+    /// open.
     /// </summary>
     [Fact]
-    public void TrySend_ShellConnection_ReturnsNotOpen()
+    public void TrySend_ConnectionNotAdmitted_ReturnsNotOpen()
     {
         // Arrange
-        object state = new();
-        MqttWireConnection connection = new("c1", state);
+        MqttWireConnection connection = new(ServerHarness.Create().Server, new DefaultHttpContext());
 
         // Act
         MqttSendResult result = connection.TrySend(MqttTopic.Create("a"), ReadOnlyMemory<byte>.Empty, MqttQoS.AtMostOnce);
 
         // Assert
         result.ShouldBe(MqttSendResult.NotOpen);
-        connection.ClientId.ShouldBe("c1");
-        connection.State.ShouldBeSameAs(state);
+        connection.ClientId.ShouldBeEmpty();
+        connection.State.ShouldBeNull();
     }
 
     /// <summary>
