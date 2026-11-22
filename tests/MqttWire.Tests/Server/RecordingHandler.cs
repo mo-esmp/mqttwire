@@ -72,6 +72,13 @@ internal sealed class RecordingHandler : IMqttWireHandler
     public Action<MqttWireConnection, MqttCloseReason>? Closed { get; set; }
 
     /// <summary>
+    /// Gets or sets a value indicating whether calls are recorded in <see cref="Calls"/>; <see langword="true"/> by
+    /// default. A test that measures what the server allocates turns it off, so that the handler's own text is not
+    /// counted; the connections are still kept in <see cref="Admitted"/>.
+    /// </summary>
+    public bool RecordsCalls { get; set; } = true;
+
+    /// <summary>
     /// Records the call and answers with <see cref="Connect"/>, or accepts.
     /// </summary>
     /// <param name="request">
@@ -167,8 +174,12 @@ internal sealed class RecordingHandler : IMqttWireHandler
     public MqttPublishResult OnPublish(MqttWireConnection connection, in MqttPublish publish)
     {
         ArgumentNullException.ThrowIfNull(connection);
-        string payload = Encoding.UTF8.GetString(publish.Payload);
-        Record($"OnPublish {connection.ClientId} {publish.GetTopic()} {payload} q{(int)publish.QoS} retain={(publish.Retain ? 1 : 0)}");
+        if (RecordsCalls)
+        {
+            string payload = Encoding.UTF8.GetString(publish.Payload);
+            Record($"OnPublish {connection.ClientId} {publish.GetTopic()} {payload} q{(int)publish.QoS} retain={(publish.Retain ? 1 : 0)}");
+        }
+
         return Publish is null ? MqttPublishResult.Accepted : Publish(connection, publish);
     }
 
@@ -189,13 +200,18 @@ internal sealed class RecordingHandler : IMqttWireHandler
     }
 
     /// <summary>
-    /// Adds a call to <see cref="Calls"/>.
+    /// Adds a call to <see cref="Calls"/>, unless <see cref="RecordsCalls"/> is off.
     /// </summary>
     /// <param name="call">
     /// The call as text.
     /// </param>
     private void Record(string call)
     {
+        if (!RecordsCalls)
+        {
+            return;
+        }
+
         lock (_gate)
         {
             Calls.Add(call);

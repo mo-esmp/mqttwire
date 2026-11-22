@@ -93,6 +93,30 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     public Action<ReadOnlyMemory<byte>>? Writing { get; set; }
 
     /// <summary>
+    /// Gets or sets a value indicating whether a write that succeeds is only counted in <see cref="WriteCount"/>, its
+    /// bytes not kept for <see cref="TakeWritten"/>; <see langword="false"/> by default. For a test that writes more
+    /// than it could keep, and must not allocate while it measures.
+    /// </summary>
+    public bool DiscardsWritten
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return field;
+            }
+        }
+
+        set
+        {
+            lock (_gate)
+            {
+                field = value;
+            }
+        }
+    }
+
+    /// <summary>
     /// Gets the number of writes that completed successfully since the link was created.
     /// </summary>
     public int WriteCount
@@ -789,13 +813,19 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     }
 
     /// <summary>
-    /// Appends a written packet to the written bytes and counts it. The caller holds the lock.
+    /// Appends a written packet to the written bytes, unless <see cref="DiscardsWritten"/> is set, and counts it. The
+    /// caller holds the lock.
     /// </summary>
     /// <param name="bytes">
     /// The packet.
     /// </param>
     private void AppendWritten(ReadOnlySpan<byte> bytes)
     {
+        if (DiscardsWritten)
+        {
+            bytes = [];
+        }
+
         if (_writtenCount + bytes.Length > _written.Length)
         {
             Array.Resize(ref _written, Math.Max(_written.Length * 2, _writtenCount + bytes.Length));

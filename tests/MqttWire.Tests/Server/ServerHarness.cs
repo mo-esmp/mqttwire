@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Net;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Time.Testing;
+using MqttWire.Codec;
 using MqttWire.Server;
 using MqttWire.Server.Internal;
 using MqttWire.Tests.Client;
@@ -22,11 +23,23 @@ internal sealed class ServerHarness
     private static readonly TimeSpan s_sweepStep = ServerLimits.SweepInterval;
 
     /// <summary>
-    /// The most buffers one connection has out of the pool at a moment: its read buffer, the buffer of the write in
-    /// progress, the control buffer of the packets that wait, and the buffer an answer is encoded into before it is
-    /// written or copied behind them (or, while a SUBSCRIBE of more than 256 filters is handled, its reason codes).
+    /// The most buffers one connection has out of the pool between two steps of a test: its read buffer, the buffer
+    /// of the write in progress (an encoding buffer), and the control buffer of the packets that wait. The buffer an
+    /// answer is encoded into, and that of the reason codes of a SUBSCRIBE of more than 256 filters, are back before
+    /// the step that rented them returns.
     /// </summary>
-    private const int MaxBuffersPerConnection = 4;
+    private const int MaxBuffersPerConnection = 3;
+
+    /// <summary>
+    /// Guards <see cref="_windows"/>.
+    /// </summary>
+    private readonly Lock _windowsGate = new();
+
+    /// <summary>
+    /// The window of each connection whose CONNECT carried a Receive Maximum below 256, by the HTTP context of its
+    /// request, as the test computed it from the CONNECT it sent; a connection that is not here has the window 256.
+    /// </summary>
+    private readonly Dictionary<HttpContext, int> _windows = [];
 
     /// <summary>
     /// Creates the harness around a started server.
@@ -47,7 +60,7 @@ internal sealed class ServerHarness
     /// The clock the server is given, over <paramref name="time"/>.
     /// </param>
     /// <param name="pool">
-    /// The pool the server rents from.
+    /// The pool the bounds are asserted on.
     /// </param>
     private ServerHarness(
         MqttWireServer server,
@@ -91,7 +104,9 @@ internal sealed class ServerHarness
     public CountingTimeProvider Timers { get; }
 
     /// <summary>
-    /// Gets the pool the server rents from.
+    /// Gets the counting pool the bounds are asserted on: the pool the server rents from, the inner pool of a
+    /// <see cref="ThrowingPool"/> it rents from, or, when a test gave a pool of another kind, one the server never
+    /// rents from.
     /// </summary>
     public CountingPool Pool { get; }
 
@@ -102,8 +117,9 @@ internal sealed class ServerHarness
     /// Changes the default options, or <see langword="null"/> to keep them.
     /// </param>
     /// <param name="pool">
-    /// The pool the server rents from, or <see langword="null"/> for <see cref="Pool"/>; a test that gives its own
-    /// pool asserts on it itself.
+    /// The pool the server rents from, or <see langword="null"/> for a new <see cref="CountingPool"/>. A
+    /// <see cref="CountingPool"/> given here is <see cref="Pool"/>, and so is the inner pool of a
+    /// <see cref="ThrowingPool"/>; a test that gives a pool of another kind asserts on it itself.
     /// </param>
     /// <param name="pools">
     /// The pools of queues and exchange records, or <see langword="null"/> for the server's own; for the tests of a
@@ -121,7 +137,12 @@ internal sealed class ServerHarness
         RecordingLogger log = new();
         FakeTimeProvider time = new();
         CountingTimeProvider timers = new(time);
-        CountingPool counting = new();
+        CountingPool counting = pool switch
+        {
+            CountingPool given => given,
+            ThrowingPool throwing => throwing.Inner,
+            _ => new CountingPool(),
+        };
         MqttWireServer server = new(handler, options, log, timers, pool ?? counting, pools);
         server.Start();
         return new ServerHarness(server, handler, log, time, timers, counting);
@@ -186,7 +207,8 @@ internal sealed class ServerHarness
     }
 
     /// <summary>
-    /// Moves the fake clock forward in steps of the sweep interval, so that every sweep in between runs.
+    /// Moves the fake clock forward in steps of the sweep interval, so that every sweep in between runs, and asserts
+    /// the bounds after each step (design 6.13 item 5).
     /// </summary>
     /// <param name="time">
     /// How far to move the clock.
@@ -199,18 +221,50 @@ internal sealed class ServerHarness
             TimeSpan step = remaining < s_sweepStep ? remaining : s_sweepStep;
             Time.Advance(step);
             remaining -= step;
+            AssertBounds();
         }
     }
 
     /// <summary>
-    /// Asserts what must hold at any moment (design 6.13 item 5): no buffer was returned twice or returned that
-    /// was not rented, no rent was larger than the largest buffer the server needs (64 KiB, or a whole PUBLISH of the
-    /// first band: the payload limit, its 5 KiB of room and a fixed header of at most 5 bytes), every connection's
-    /// counts are within the limits of <see cref="ServerLimits"/> and the options (the exchange records, the count
-    /// against the receive maximum, the deliveries in the client's window, at most its Receive Maximum or 256, the
-    /// waiting deliveries, the waiting control packets and the bytes on the way out), and the buffers out of the pool
-    /// are no more than
-    /// <see cref="MaxBuffersPerConnection"/> for each connection that has a slot: one that has ended holds none.
+    /// Notes the client's window from bytes a test delivers to a connection that start with a whole CONNECT: the
+    /// client's Receive Maximum or 256, whichever is smaller (design 6.6, "Deliveries at QoS 1 or 2", item 3). Only a
+    /// window below 256 is kept, and only the first one for a connection, so a connection without one costs nothing
+    /// here. Bytes that are not a whole CONNECT, or a CONNECT the codec refuses, change nothing.
+    /// </summary>
+    /// <param name="httpContext">
+    /// The HTTP context of the connection's request.
+    /// </param>
+    /// <param name="bytes">
+    /// The bytes delivered.
+    /// </param>
+    public void NoteConnect(HttpContext httpContext, ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.IsEmpty || bytes[0] != 0x10
+            || PacketHeader.TryRead(bytes, out PacketHeader header) != OperationStatus.Done
+            || bytes.Length < header.TotalLength
+            || ConnectCodec.TryDecode(bytes[..header.TotalLength], out ConnectPacket connect) != MqttReasonCode.Success
+            || !connect.Properties.TryGetInteger(PropertyId.ReceiveMaximum, out uint receiveMaximum)
+            || receiveMaximum >= ServerLimits.ReceiveMaximum)
+        {
+            return;
+        }
+
+        lock (_windowsGate)
+        {
+            _windows.TryAdd(httpContext, (int)receiveMaximum);
+        }
+    }
+
+    /// <summary>
+    /// Asserts what must hold between any two steps of a test (design 6.13 item 5): no buffer was returned twice or
+    /// returned that was not rented, no rent was larger than the largest buffer the server needs (64 KiB, or a whole
+    /// PUBLISH of the first band: the payload limit, its 5 KiB of room and a fixed header of at most 5 bytes), every
+    /// connection's counts are within the limits of <see cref="ServerLimits"/> and the options (the exchange records,
+    /// the count against the receive maximum, the deliveries in the client's window, at most the window the test
+    /// computed from the CONNECT it sent, the waiting deliveries, the waiting control packets and the bytes on the way
+    /// out), and the buffers out of the pool are no more than <see cref="MaxBuffersPerConnection"/> for each
+    /// connection that has a slot: one that has ended holds none. Called by <see cref="TestConnection"/> after every
+    /// delivery, by <see cref="Advance"/> after every step of the clock, and by the tests after every send.
     /// </summary>
     public void AssertBounds()
     {
@@ -230,7 +284,7 @@ internal sealed class ServerHarness
             ConnectionCounts counts = connection.GetCounts();
             counts.IncomingRecords.ShouldBeLessThanOrEqualTo(ServerLimits.ReceiveMaximum);
             counts.IncomingInFlight.ShouldBeLessThanOrEqualTo(ServerLimits.ReceiveMaximum);
-            counts.DeliveryRecords.ShouldBeLessThanOrEqualTo(connection.ClientWindow);
+            counts.DeliveryRecords.ShouldBeLessThanOrEqualTo(WindowOf(connection.HttpContext));
             counts.WaitingControlPackets.ShouldBeLessThanOrEqualTo(ServerLimits.MaxWaitingControlPackets);
             counts.WaitingDeliveries.ShouldBeLessThanOrEqualTo(options.MaxOutgoingMessages);
             counts.OutgoingBytes.ShouldBeLessThanOrEqualTo(options.MaxOutgoingBytes);
@@ -238,5 +292,22 @@ internal sealed class ServerHarness
         }
 
         Pool.Outstanding.ShouldBeLessThanOrEqualTo(MaxBuffersPerConnection * connections);
+    }
+
+    /// <summary>
+    /// Gets the client's window the test computed from the CONNECT it sent (<see cref="NoteConnect"/>).
+    /// </summary>
+    /// <param name="httpContext">
+    /// The HTTP context of the connection's request.
+    /// </param>
+    /// <returns>
+    /// The client's Receive Maximum when it was below 256; otherwise 256.
+    /// </returns>
+    private int WindowOf(HttpContext httpContext)
+    {
+        lock (_windowsGate)
+        {
+            return _windows.TryGetValue(httpContext, out int window) ? window : ServerLimits.ReceiveMaximum;
+        }
     }
 }

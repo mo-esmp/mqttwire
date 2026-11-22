@@ -57,13 +57,15 @@ internal sealed class TestConnection(
         harness.Handler.Admitted.Find(connection => connection.HttpContext == HttpContext);
 
     /// <summary>
-    /// Delivers bytes from the client, then asserts the harness's bounds.
+    /// Delivers bytes from the client, then asserts the harness's bounds. A whole CONNECT at the start of the bytes
+    /// gives the harness the client's window first (<see cref="ServerHarness.NoteConnect"/>).
     /// </summary>
     /// <param name="bytes">
     /// The bytes the server reads, as one chunk.
     /// </param>
     public void Deliver(ReadOnlySpan<byte> bytes)
     {
+        harness.NoteConnect(HttpContext, bytes);
         Link.Deliver(bytes);
         harness.AssertBounds();
     }
