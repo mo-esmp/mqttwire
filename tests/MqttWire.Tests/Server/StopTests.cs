@@ -307,6 +307,49 @@ public sealed class StopTests
     }
 
     /// <summary>
+    /// Proves that a stop that begins when a takeover has been admitted and the replaced connection is still
+    /// Closing, its peer not having answered the close, ends both once: the replaced one keeps "taken over", the new
+    /// one is closed with DISCONNECT 0x8B and gets "server stopping", and the stop completes when the close deadline
+    /// has aborted both links, not before.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task StopAsync_AfterATakeoverWhoseReplacedConnectionIsStillClosing_EndsBothConnectionsOnce()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection replaced = harness.Connect();
+        TestConnection replacement = harness.Connect();
+        byte[] takenOver = replaced.TakeWritten();
+        ConnectionState replacedBeforeTheStop = replaced.Connection.ShouldNotBeNull().StateNow;
+
+        // Act
+        Task stop = harness.Server.StopAsync();
+        byte[] shuttingDown = replacement.TakeWritten();
+        harness.Advance(ServerLimits.CloseDeadline - s_justShort);
+        harness.Server.Sweep();
+        bool completedBeforeTheDeadline = stop.IsCompleted;
+        harness.Advance(s_justShort);
+        await stop.Within("The server's stop");
+        await replaced.RunEnded();
+        await replacement.RunEnded();
+
+        // Assert
+        takenOver.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.SessionTakenOver));
+        replacedBeforeTheStop.ShouldBe(ConnectionState.Closing);
+        shuttingDown.ShouldBe(s_disconnectShuttingDown);
+        completedBeforeTheDeadline.ShouldBeFalse();
+        replaced.Link.IsAborted.ShouldBeTrue();
+        replacement.Link.IsAborted.ShouldBeTrue();
+        replaced.TakeWritten().ShouldBeEmpty();
+        ClosedCalls(harness).ShouldBe(["OnClosed c1 TakenOver", "OnClosed c1 ServerStopping"], ignoreOrder: true);
+        harness.Server.ConnectionCount.ShouldBe(0);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves that an Authenticating connection whose request is aborted during the stop gets nothing written, no
     /// CONNACK, and no <c>OnAdmit</c>, and that the stop completes: the stop cancels the host's token, and the request
     /// is aborted from inside that cancellation, before the connect phase looks at why its wait ended.
