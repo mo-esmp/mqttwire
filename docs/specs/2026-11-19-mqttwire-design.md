@@ -859,8 +859,9 @@ moment). So every abort goes through one rule, under the lock of the send path:
   registration in a second hold. With an abort in flight, a second one is not issued: the first
   does its work.
 - The run ends only in a hold that finds no write in progress and no abort in flight, and in
-  that hold it lets go of the link. From then on nothing aborts: a late `Close`, `TrySend` or
-  sweep finds the link gone.
+  that hold it lets go of the link and of the request's `HttpContext`. From then on nothing
+  aborts: a late `Close`, `TrySend` or sweep finds the link gone. And a connection object the
+  host keeps after `OnClosed` keeps neither the socket nor the request alive.
 - A run that finds an abort in flight waits for it as it waits for a write in progress, and
   carries on on a thread-pool thread; so the end of a connection, `OnClosed` included, never
   runs inside an abort.
@@ -1406,6 +1407,8 @@ owner:
     logged as an error, and still reported to `OnClosed` as a lost connection (6.12).
 37. A connection closed after its admission gets no CONNACK up to the step, under the lock of
     the send path, that starts the CONNACK's write (6.6).
+38. A connection lets go of its link and of the request's `HttpContext` when its run ends, so a
+    connection object the host keeps holds nothing of the request (6.6).
 
 ## 11. Left to the builder
 

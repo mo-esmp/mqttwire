@@ -124,11 +124,11 @@ public sealed partial class MqttWireConnection
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<int> ReadConnectAsync(IMqttLink link)
     {
-        await link.WaitForDataAsync(HttpContext.RequestAborted).ConfigureAwait(false);
+        await link.WaitForDataAsync(RunningContext.RequestAborted).ConfigureAwait(false);
         _readBuffer.Rent(_server.Pool, ServerLimits.FirstReadBufferBytes);
         while (true)
         {
-            int read = await link.ReadAsync(_readBuffer.GetReadMemory(), HttpContext.RequestAborted)
+            int read = await link.ReadAsync(_readBuffer.GetReadMemory(), RunningContext.RequestAborted)
                 .ConfigureAwait(false);
             if (read == 0)
             {
@@ -240,7 +240,7 @@ public sealed partial class MqttWireConnection
             {
                 if (mustRead)
                 {
-                    int read = await link.ReadAsync(_readBuffer.GetReadMemory(), HttpContext.RequestAborted)
+                    int read = await link.ReadAsync(_readBuffer.GetReadMemory(), RunningContext.RequestAborted)
                         .ConfigureAwait(false);
                     if (read == 0)
                     {

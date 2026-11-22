@@ -320,10 +320,16 @@ internal sealed class ServerHarness
     /// The HTTP context of the connection's request.
     /// </param>
     /// <returns>
-    /// The client's Receive Maximum when it was below 256; otherwise 256.
+    /// The client's Receive Maximum when it was below 256; otherwise 256, also for a connection whose run has just
+    /// decided to end and let go of its context, which holds no record any more.
     /// </returns>
-    private int WindowOf(HttpContext httpContext)
+    private int WindowOf(HttpContext? httpContext)
     {
+        if (httpContext is null)
+        {
+            return ServerLimits.ReceiveMaximum;
+        }
+
         lock (_windowsGate)
         {
             return _windows.TryGetValue(httpContext, out int window) ? window : ServerLimits.ReceiveMaximum;

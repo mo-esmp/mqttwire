@@ -220,11 +220,11 @@ public sealed partial class MqttWireConnection
                 Encoding.UTF8.GetString(pair.Value)));
         }
 
-        IPAddress? address = HttpContext.Connection.RemoteIpAddress;
-        IPEndPoint? remoteEndPoint = address is null ? null : new IPEndPoint(address, HttpContext.Connection.RemotePort);
+        IPAddress? address = RunningContext.Connection.RemoteIpAddress;
+        IPEndPoint? remoteEndPoint = address is null ? null : new IPEndPoint(address, RunningContext.Connection.RemotePort);
         return new MqttConnectRequest(ClientId, userName, password,
-            userProperties ?? (IReadOnlyList<MqttWireUserProperty>)[], remoteEndPoint, HttpContext.Request.IsHttps,
-            HttpContext);
+            userProperties ?? (IReadOnlyList<MqttWireUserProperty>)[], remoteEndPoint, RunningContext.Request.IsHttps,
+            RunningContext);
     }
 
     /// <summary>
@@ -251,7 +251,7 @@ public sealed partial class MqttWireConnection
             return null;
         }
 
-        CancellationTokenSource source = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+        CancellationTokenSource source = CancellationTokenSource.CreateLinkedTokenSource(RunningContext.RequestAborted);
         CancellationToken token = source.Token;
         Volatile.Write(ref _authentication, source);
 
@@ -475,7 +475,7 @@ public sealed partial class MqttWireConnection
             ObserveLateResult(pending);
         }
 
-        if (HttpContext.RequestAborted.IsCancellationRequested)
+        if (RunningContext.RequestAborted.IsCancellationRequested)
         {
             BeginClose(CloseCause.ConnectionLost, MqttReasonCode.Success, reasonString: null);
             return;

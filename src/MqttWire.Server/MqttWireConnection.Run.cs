@@ -25,6 +25,13 @@ public sealed partial class MqttWireConnection
         _link!; // Set before the slot is taken, cleared when the run ends: only the run and a holder of the path read it.
 
     /// <summary>
+    /// Gets the context of the WebSocket request, for the code of the run itself, which ends before the context is
+    /// let go.
+    /// </summary>
+    private HttpContext RunningContext =>
+        HttpContext!; // Set by the constructor and cleared only when the run has decided to end: only the run reads it.
+
+    /// <summary>
     /// Runs the connection from its accept until it is Closed. It is the only async method whose state lives as
     /// long as the connection (plan decision 3), so it keeps as few locals alive across its awaits as it can: it
     /// reads the link from <see cref="_link"/>, holds no buffer while it waits for data, and hands what arrives to
@@ -60,7 +67,7 @@ public sealed partial class MqttWireConnection
                 // Bytes that came behind the CONNECT are in the buffer already; otherwise wait, holding nothing.
                 if (!_readBuffer.IsHeld)
                 {
-                    await RunningLink.WaitForDataAsync(HttpContext.RequestAborted).ConfigureAwait(false);
+                    await RunningLink.WaitForDataAsync(RunningContext.RequestAborted).ConfigureAwait(false);
                 }
 
                 open = await HandleAvailableAsync().ConfigureAwait(false);
@@ -152,7 +159,7 @@ public sealed partial class MqttWireConnection
         {
             SubProtocol = SubProtocol, KeepAliveInterval = TimeSpan.Zero, DangerousEnableCompression = false,
         };
-        WebSocket webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync(accept).ConfigureAwait(false);
+        WebSocket webSocket = await RunningContext.WebSockets.AcceptWebSocketAsync(accept).ConfigureAwait(false);
         return new WebSocketLink(webSocket);
     }
 
@@ -193,8 +200,9 @@ public sealed partial class MqttWireConnection
     /// The one hold of the send path's lock in which the run decides to end. With the send path taken or an abort of
     /// the link in flight, the run does not end: it is given what to wait on. With neither, the run ends in this
     /// hold: it lets go of the link, so that every later look at <see cref="_link"/> under the lock finds
-    /// <see langword="null"/> and no abort is issued any more (<see cref="BeginAbort"/>). The request can only end
-    /// after this hold, and no abort can begin after it, so a link is never aborted once its request has ended.
+    /// <see langword="null"/> and no abort is issued any more (<see cref="BeginAbort"/>), and of the request's
+    /// context. The request can only end after this hold, and no abort can begin after it, so a link is never
+    /// aborted once its request has ended, and a connection the host keeps holds nothing of the request.
     /// </summary>
     /// <param name="busy">
     /// When the result is <see langword="false"/>, a task that completes, never inline, when the send path has been
@@ -218,6 +226,7 @@ public sealed partial class MqttWireConnection
             }
 
             _link = null;
+            HttpContext = null;
             busy = null;
             return true;
         }

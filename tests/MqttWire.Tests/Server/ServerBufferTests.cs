@@ -1372,10 +1372,7 @@ public sealed class ServerBufferTests
     /// </returns>
     private static long ReadHeap(ServerHarness harness)
     {
-        harness.Handler.Calls.Clear();
-        harness.Handler.Calls.TrimExcess();
-        harness.Handler.Admitted.Clear();
-        harness.Handler.Admitted.TrimExcess();
+        harness.Handler.Forget();
         harness.Log.Entries.Clear();
         harness.Log.Entries.TrimExcess();
         GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);

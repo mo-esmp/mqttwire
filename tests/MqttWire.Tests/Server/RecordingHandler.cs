@@ -1,4 +1,5 @@
 using System.Text;
+using Microsoft.AspNetCore.Http;
 using MqttWire.Server;
 
 namespace MqttWire.Tests.Server;
@@ -11,9 +12,15 @@ namespace MqttWire.Tests.Server;
 internal sealed class RecordingHandler : IMqttWireHandler
 {
     /// <summary>
-    /// Guards <see cref="Calls"/> and <see cref="Admitted"/> while they are added to.
+    /// Guards <see cref="Calls"/>, <see cref="Admitted"/> and <see cref="_byContext"/>.
     /// </summary>
     private readonly Lock _gate = new();
+
+    /// <summary>
+    /// Every connection <see cref="OnAdmit"/> was called with, by the HTTP context of its request, which the
+    /// connection itself lets go of when its run ends.
+    /// </summary>
+    private readonly Dictionary<HttpContext, MqttWireConnection> _byContext = [];
 
     /// <summary>
     /// Answers <see cref="OnPublish"/> for a test that sets <see cref="Publish"/>.
@@ -79,6 +86,41 @@ internal sealed class RecordingHandler : IMqttWireHandler
     public bool RecordsCalls { get; set; } = true;
 
     /// <summary>
+    /// Finds the connection <see cref="OnAdmit"/> was called with for a request, also after that connection has
+    /// ended.
+    /// </summary>
+    /// <param name="httpContext">
+    /// The HTTP context of the request.
+    /// </param>
+    /// <returns>
+    /// The connection, or <see langword="null"/> when <see cref="OnAdmit"/> has not seen one for the request.
+    /// </returns>
+    public MqttWireConnection? FindAdmitted(HttpContext httpContext)
+    {
+        lock (_gate)
+        {
+            return _byContext.GetValueOrDefault(httpContext);
+        }
+    }
+
+    /// <summary>
+    /// Forgets every call and every connection recorded so far and gives their storage back, for a test that reads
+    /// the heap and must not count the handler's own records.
+    /// </summary>
+    public void Forget()
+    {
+        lock (_gate)
+        {
+            Calls.Clear();
+            Calls.TrimExcess();
+            Admitted.Clear();
+            Admitted.TrimExcess();
+            _byContext.Clear();
+            _byContext.TrimExcess();
+        }
+    }
+
+    /// <summary>
     /// Copies <see cref="Calls"/> under the handler's lock, for a test that reads the calls while server threads may
     /// still add to them.
     /// </summary>
@@ -130,6 +172,10 @@ internal sealed class RecordingHandler : IMqttWireHandler
         lock (_gate)
         {
             Admitted.Add(connection);
+            if (connection.HttpContext is { } httpContext)
+            {
+                _byContext[httpContext] = connection;
+            }
         }
 
         Record($"OnAdmit {connection.ClientId} replaces={replaces?.ClientId ?? "-"}");

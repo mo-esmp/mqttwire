@@ -57,6 +57,36 @@ public sealed class ServerCloseTests
     }
 
     /// <summary>
+    /// Proves that a connection the host keeps after its end keeps nothing of the request: it has let go of the
+    /// request's context, and a late <c>Close</c> or <c>TrySend</c> changes nothing and aborts nothing.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Close_AfterTheConnectionEnded_HoldsNothingOfTheRequestAndChangesNothing()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        bool heldWhileOpen = server.HttpContext is not null;
+        connection.Link.EndFromPeer();
+        await connection.RunEnded();
+
+        // Act
+        server.Close(MqttReasonCode.AdministrativeAction);
+        MqttSendResult sent = server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
+
+        // Assert
+        heldWhileOpen.ShouldBeTrue();
+        server.HttpContext.ShouldBeNull();
+        sent.ShouldBe(MqttSendResult.NotOpen);
+        connection.Link.AbortCalls.ShouldBe(0);
+        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+    }
+
+    /// <summary>
     /// Proves that the reason string the host hands to <c>Close</c> is carried in the DISCONNECT, cut to 256 bytes at
     /// a character boundary: 300 two-byte characters to 128.
     /// </summary>

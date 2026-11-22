@@ -148,11 +148,5 @@ public sealed class IdleCostTests
     /// <param name="harness">
     /// The harness.
     /// </param>
-    private static void ForgetCalls(ServerHarness harness)
-    {
-        harness.Handler.Calls.Clear();
-        harness.Handler.Calls.TrimExcess();
-        harness.Handler.Admitted.Clear();
-        harness.Handler.Admitted.TrimExcess();
-    }
+    private static void ForgetCalls(ServerHarness harness) => harness.Handler.Forget();
 }

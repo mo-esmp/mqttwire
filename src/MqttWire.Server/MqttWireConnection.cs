@@ -248,9 +248,12 @@ public sealed partial class MqttWireConnection
     public object? State { get; private set; }
 
     /// <summary>
-    /// Gets the context of the WebSocket request.
+    /// Gets the context of the WebSocket request while the connection runs; <see langword="null"/> once the run has
+    /// decided to end, in the same hold of <see cref="_sendLock"/> in which it lets go of the link
+    /// (<see cref="TryEndRun"/>). The context belongs to the request: once the request has ended the web server
+    /// reuses it, so a connection the host keeps after its end must neither keep it alive nor reach into it.
     /// </summary>
-    internal HttpContext HttpContext { get; }
+    internal HttpContext? HttpContext { get; private set; }
 
     /// <summary>
     /// Gets the state now; it may change at any moment after it is read.

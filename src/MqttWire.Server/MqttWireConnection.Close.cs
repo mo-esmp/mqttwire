@@ -893,11 +893,17 @@ public sealed partial class MqttWireConnection
     /// </summary>
     /// <returns>
     /// The address and port (for example <c>192.0.2.7:50123</c>, or <c>[2001:db8::1]:50123</c>), or "unknown" when
-    /// the request has no remote address.
+    /// the request has no remote address, or the run has ended and let go of the request's context.
     /// </returns>
     private string GetRemoteEndPoint()
     {
-        ConnectionInfo connection = HttpContext.Connection;
+        // Read once: a line written from another thread can meet the end of the run.
+        if (HttpContext is not { } httpContext)
+        {
+            return "unknown";
+        }
+
+        ConnectionInfo connection = httpContext.Connection;
         return connection.RemoteIpAddress is { } address
             ? new IPEndPoint(address, connection.RemotePort).ToString()
             : "unknown";
