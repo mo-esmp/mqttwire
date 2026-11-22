@@ -49,6 +49,7 @@ public sealed class MqttWireServer
         CloseDeadlineLength = ToTimestampLength(ServerLimits.CloseDeadline, time);
         PartialPacketDeadlineLength = ToTimestampLength(ServerLimits.PartialPacketDeadline, time);
         WriteDeadlineLength = ToTimestampLength(ServerLimits.WriteDeadline, time);
+        AcknowledgementDeadlineLength = ToTimestampLength(ServerLimits.AcknowledgementDeadline, time);
     }
 
     /// <summary>
@@ -121,6 +122,11 @@ public sealed class MqttWireServer
     /// Gets <see cref="ServerLimits.WriteDeadline"/> in units of <see cref="Time"/>'s timestamps.
     /// </summary>
     internal long WriteDeadlineLength { get; }
+
+    /// <summary>
+    /// Gets <see cref="ServerLimits.AcknowledgementDeadline"/> in units of <see cref="Time"/>'s timestamps.
+    /// </summary>
+    internal long AcknowledgementDeadlineLength { get; }
 
     /// <summary>
     /// Looks up an open connection by client identifier.

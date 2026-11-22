@@ -16,8 +16,8 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// The lock of the send path: it guards <see cref="_writing"/>, <see cref="_waiting"/>, <see cref="_control"/>,
-    /// <see cref="_outgoingBytes"/>, <see cref="_writingBytes"/>, <see cref="_closeStatus"/> and
-    /// <see cref="_sendIdle"/>, and every move to Closing is made under it. It is held for a few field updates and a
+    /// <see cref="_outgoingBytes"/>, <see cref="_writingBytes"/>, <see cref="_closeStatus"/>,
+    /// <see cref="_sendIdle"/> and <see cref="_records"/>, and every move to Closing is made under it. It is held for a few field updates and a
     /// copy of at most one control packet, never across a write, a close, an abort or a call of the host's handler,
     /// so a host may call <see cref="TrySend"/> and <see cref="Close"/> from inside its callbacks. It is taken inside
     /// the registry's lock (the admission step), never the other way round.
@@ -95,6 +95,14 @@ public sealed partial class MqttWireConnection
     /// while none waits. Guarded by <see cref="_sendLock"/>.
     /// </summary>
     private WaitingDeliveries? _waiting;
+
+    /// <summary>
+    /// The records of the QoS 1 and 2 exchanges in progress; taken from the server's pool with the first record and
+    /// given back with the last, or by the end of the connection, so <see langword="null"/> while there is none.
+    /// Changed under <see cref="_sendLock"/>, always with <see cref="Volatile.Write{T}(ref T, T)"/>, so that the sweep
+    /// can read the reference without the lock and skip a connection that holds none.
+    /// </summary>
+    private ExchangeRecords? _records;
 
     /// <summary>
     /// The control packets that wait behind the write in progress, already encoded; it holds a rented array only
@@ -286,7 +294,7 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Tells what the connection holds now, for the tests of its bounds. Counts that do not exist yet are 0.
+    /// Tells what the connection holds now, for the tests of its bounds.
     /// </summary>
     /// <returns>
     /// The counts. Those of the send path are read in one hold of its lock, so they belong to one moment; whether a
@@ -296,9 +304,11 @@ public sealed partial class MqttWireConnection
     {
         lock (_sendLock)
         {
-            return new ConnectionCounts(IncomingRecords: 0, DeliveryRecords: 0, WaitingDeliveries: _waiting?.Count ?? 0,
-                WaitingControlPackets: _control.PacketCount, OutgoingBytes: _outgoingBytes, IsWriting: _writing,
-                HoldsReadBuffer: _readBuffer.IsHeld);
+            int incomingRecords = _records?.IncomingCount ?? 0;
+            return new ConnectionCounts(IncomingRecords: incomingRecords, DeliveryRecords: _records?.DeliveryCount ?? 0,
+                IncomingInFlight: incomingRecords + _control.PublishAnswerCount, HoldsRecords: _records is not null,
+                WaitingDeliveries: _waiting?.Count ?? 0, WaitingControlPackets: _control.PacketCount,
+                OutgoingBytes: _outgoingBytes, IsWriting: _writing, HoldsReadBuffer: _readBuffer.IsHeld);
         }
     }
 }

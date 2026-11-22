@@ -95,6 +95,20 @@ public sealed partial class MqttWireConnection
         public int Count { get; init; }
 
         /// <summary>
+        /// Gets a value indicating whether the answer is the last one to a QoS 1 or 2 publish of the client, which
+        /// counts against the receive maximum the server announced while it waits (plan decision 13): a PUBACK, a
+        /// PUBCOMP that ends a remembered exchange (success), or a failing PUBREC. A successful PUBREC is not: the
+        /// exchange's record counts instead; nor is a PUBCOMP 0x92, which answers no publish.
+        /// </summary>
+        public bool EndsIncomingPublish => Type switch
+        {
+            PacketType.PubAck => true,
+            PacketType.PubRec => (byte)Code >= 0x80,
+            PacketType.PubComp => Code == MqttReasonCode.Success,
+            _ => false,
+        };
+
+        /// <summary>
         /// Gets the size of the encoded packet.
         /// </summary>
         /// <returns>
@@ -446,7 +460,7 @@ public sealed partial class MqttWireConnection
             else
             {
                 buffer.AsSpan(start: 0, size).CopyTo(_control.Reserve(pool, size));
-                _control.Commit(size, isPingResp);
+                _control.Commit(size, isPingResp, answer.EndsIncomingPublish);
                 _outgoingBytes += size;
             }
         }
@@ -696,7 +710,9 @@ public sealed partial class MqttWireConnection
     /// in this order: the next piece of the payload being written, the waiting control packets as one piece, the
     /// first waiting delivery; with none of them, it goes idle (<see cref="TakeOpenStep"/>). What was dropped goes
     /// back once the lock is released: the queue of deliveries to the server's pool, the control buffer to the buffer
-    /// pool; and whoever waits for the send path to be idle is told then.
+    /// pool, the exchange records to theirs; and whoever waits for the send path to be idle is told then. This is the
+    /// one place where the end of a connection drops what it holds on the way out, the exchange records included:
+    /// nothing is added to a Closing connection, so what is taken here is taken once.
     /// </summary>
     /// <param name="failed">
     /// Whether the write that has just ended failed, so that no WebSocket close is attempted.
@@ -726,6 +742,7 @@ public sealed partial class MqttWireConnection
         closeStatus = default;
         WaitingDeliveries? emptied = null;
         ControlBuffer dropped = default;
+        ExchangeRecords? records = null;
         TaskCompletionSource? idle = null;
         SendStep step;
         lock (_sendLock)
@@ -737,6 +754,8 @@ public sealed partial class MqttWireConnection
                 _waiting = null;
                 dropped = _control;
                 _control = default;
+                records = _records;
+                Volatile.Write(ref _records, value: null);
                 step = TakeClosingStep(failed, out closeStatus, out idle);
             }
             else
@@ -749,6 +768,12 @@ public sealed partial class MqttWireConnection
         if (emptied is not null)
         {
             _server.Pools.Waiting.Return(emptied);
+        }
+
+        // The pool's policy clears the records, so the next connection starts with none.
+        if (records is not null)
+        {
+            _server.Pools.Records.Return(records);
         }
 
         dropped.Release(_server.Pool);

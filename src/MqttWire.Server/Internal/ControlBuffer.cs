@@ -40,6 +40,13 @@ internal struct ControlBuffer
     public bool HasPingResp { get; private set; }
 
     /// <summary>
+    /// Gets the number of waiting packets that are the last answer to a QoS 1 or 2 publish of the client: PUBACK,
+    /// PUBCOMP success, or a failing PUBREC. They count against the receive maximum the server announced until they
+    /// are handed to the link (<see cref="Detach"/>) or dropped (<see cref="Release"/>).
+    /// </summary>
+    public int PublishAnswerCount { get; private set; }
+
+    /// <summary>
     /// Makes room for one more packet behind those that wait and hands the room out. The first packet rents the
     /// array; when the array is too small it grows by renting the next size, copying the packets that wait and
     /// returning the old array. Nothing waits more until <see cref="Commit"/>.
@@ -84,11 +91,16 @@ internal struct ControlBuffer
     /// <param name="isPingResp">
     /// Whether the packet is a PINGRESP.
     /// </param>
-    public void Commit(int size, bool isPingResp)
+    /// <param name="isPublishAnswer">
+    /// Whether the packet is the last answer to a QoS 1 or 2 publish of the client, counted in
+    /// <see cref="PublishAnswerCount"/>.
+    /// </param>
+    public void Commit(int size, bool isPingResp, bool isPublishAnswer)
     {
         ByteCount += size;
         PacketCount++;
         HasPingResp |= isPingResp;
+        PublishAnswerCount += isPublishAnswer ? 1 : 0;
     }
 
     /// <summary>

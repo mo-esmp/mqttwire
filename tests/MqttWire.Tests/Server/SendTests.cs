@@ -23,7 +23,8 @@ public sealed class SendTests
     /// <summary>
     /// What <c>GetCounts</c> reports for a connection that holds nothing and writes nothing.
     /// </summary>
-    private static readonly ConnectionCounts s_idle = new(IncomingRecords: 0, DeliveryRecords: 0, WaitingDeliveries: 0,
+    private static readonly ConnectionCounts s_idle = new(IncomingRecords: 0, DeliveryRecords: 0, IncomingInFlight: 0,
+        HoldsRecords: false, WaitingDeliveries: 0,
         WaitingControlPackets: 0, OutgoingBytes: 0, IsWriting: false, HoldsReadBuffer: false);
 
     /// <summary>

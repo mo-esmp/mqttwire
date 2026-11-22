@@ -519,7 +519,9 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Refuses a publish too large with 0x97 and "The message is too large." in the form its QoS calls for: a
-    /// PUBACK at QoS 1, a failing PUBREC at QoS 2, of which nothing is remembered, and nothing at QoS 0.
+    /// PUBACK at QoS 1, a failing PUBREC at QoS 2, of which nothing is remembered, and nothing at QoS 0. At QoS 1
+    /// and 2 the publish counts against the receive maximum like any other: one that would pass it ends the connection
+    /// with 0x93 instead.
     /// </summary>
     /// <param name="qos">
     /// The QoS of the publish.
@@ -532,6 +534,11 @@ public sealed partial class MqttWireConnection
     /// </returns>
     private bool RefuseTooLarge(MqttQoS qos, ushort packetIdentifier)
     {
+        if (qos != MqttQoS.AtMostOnce && !TryTakeReceivePlace(qos, packetIdentifier, out _))
+        {
+            return false;
+        }
+
         if (qos == MqttQoS.AtLeastOnce)
         {
             SendAck(PacketType.PubAck, packetIdentifier, MqttReasonCode.QuotaExceeded, MessageTooLarge);

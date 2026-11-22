@@ -11,6 +11,13 @@ namespace MqttWire.Server.Internal;
 /// <param name="DeliveryRecords">
 /// The exchange records of QoS 1 and 2 deliveries to the client.
 /// </param>
+/// <param name="IncomingInFlight">
+/// The client's publishes counted against the receive maximum the server announced: the QoS 2 publishes that wait
+/// for their PUBREL, and the PUBACKs, PUBCOMPs and failing PUBRECs that wait in the control buffer.
+/// </param>
+/// <param name="HoldsRecords">
+/// Whether the connection holds an exchange records object from the server's pool.
+/// </param>
 /// <param name="WaitingDeliveries">
 /// The deliveries that wait behind the write in progress.
 /// </param>
@@ -28,5 +35,5 @@ namespace MqttWire.Server.Internal;
 /// </param>
 [StructLayout(LayoutKind.Auto)]
 internal readonly record struct ConnectionCounts(
-    int IncomingRecords, int DeliveryRecords, int WaitingDeliveries, int WaitingControlPackets,
+    int IncomingRecords, int DeliveryRecords, int IncomingInFlight, bool HoldsRecords, int WaitingDeliveries, int WaitingControlPackets,
     long OutgoingBytes, bool IsWriting, bool HoldsReadBuffer);

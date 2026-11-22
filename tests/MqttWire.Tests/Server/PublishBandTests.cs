@@ -23,11 +23,6 @@ public sealed class PublishBandTests
     private const int SkipBandEnd = 16 * Limit;
 
     /// <summary>
-    /// The reason the QoS 2 rows in which the host receives the publish are skipped for now.
-    /// </summary>
-    private const string QoS2ReachesTheHost = "Task 9";
-
-    /// <summary>
     /// Proves that a payload of exactly the limit reaches the host and is answered in the form of its QoS.
     /// </summary>
     /// <param name="qos">
@@ -36,7 +31,7 @@ public sealed class PublishBandTests
     [Theory]
     [InlineData(MqttQoS.AtMostOnce)]
     [InlineData(MqttQoS.AtLeastOnce)]
-    [InlineData(MqttQoS.ExactlyOnce, Skip = QoS2ReachesTheHost)]
+    [InlineData(MqttQoS.ExactlyOnce)]
     public void Publish_PayloadAtTheLimit_ReachesTheHost(MqttQoS qos)
     {
         // Arrange
@@ -89,7 +84,7 @@ public sealed class PublishBandTests
     /// Proves that the failing PUBREC of a publish refused as too large leaves nothing remembered: a later PUBREL for
     /// its identifier is answered PUBCOMP 0x92 (packet identifier not found).
     /// </summary>
-    [Fact(Skip = "Task 9: PUBREL is answered there")]
+    [Fact]
     public void Publish_PayloadOverTheLimitAtQoS2_RemembersNothing()
     {
         // Arrange
@@ -115,7 +110,7 @@ public sealed class PublishBandTests
     [Theory]
     [InlineData(MqttQoS.AtMostOnce)]
     [InlineData(MqttQoS.AtLeastOnce)]
-    [InlineData(MqttQoS.ExactlyOnce, Skip = QoS2ReachesTheHost)]
+    [InlineData(MqttQoS.ExactlyOnce)]
     public void Publish_LargeTopicSmallPayloadInBandOne_ReachesTheHost(MqttQoS qos)
     {
         // Arrange
@@ -143,7 +138,7 @@ public sealed class PublishBandTests
     [Theory]
     [InlineData(MqttQoS.AtMostOnce)]
     [InlineData(MqttQoS.AtLeastOnce)]
-    [InlineData(MqttQoS.ExactlyOnce, Skip = QoS2ReachesTheHost)]
+    [InlineData(MqttQoS.ExactlyOnce)]
     public void Publish_LargePropertiesSmallPayloadInBandOne_ReachesTheHost(MqttQoS qos)
     {
         // Arrange
@@ -363,7 +358,8 @@ public sealed class PublishBandTests
 
     /// <summary>
     /// Proves that a PUBLISH of the first band or of the skip band gives the same result wherever it is cut in two,
-    /// and that the packet behind it, a PINGREQ, is answered.
+    /// and that the packet behind it, a PINGREQ, is answered. An accepted QoS 2 publish is released by a PUBREL behind
+    /// the PINGREQ, so that its identifier is new again for the next cut.
     /// </summary>
     /// <param name="skipBand">
     /// <see langword="true"/> for a packet at the top of the skip band; <see langword="false"/> for one of the first
@@ -375,7 +371,7 @@ public sealed class PublishBandTests
     [Theory]
     [InlineData(false, MqttQoS.AtMostOnce)]
     [InlineData(false, MqttQoS.AtLeastOnce)]
-    [InlineData(false, MqttQoS.ExactlyOnce, Skip = QoS2ReachesTheHost)]
+    [InlineData(false, MqttQoS.ExactlyOnce)]
     [InlineData(true, MqttQoS.AtMostOnce)]
     [InlineData(true, MqttQoS.AtLeastOnce)]
     [InlineData(true, MqttQoS.ExactlyOnce)]
@@ -388,15 +384,22 @@ public sealed class PublishBandTests
             ? ServerPackets.BuildPublishOfLength(qos, SkipBandEnd)
             : ServerPackets.BuildPublish(qos, "a/b"u8, packetIdentifier: 1, properties: [],
                 payload: ServerPackets.Letters('x', Limit));
-        byte[] expected = [.. (skipBand ? Refusal(qos, packetIdentifier: 1) : Acceptance(qos)), ..ClientPackets.PingResp];
+        bool release = !skipBand && qos == MqttQoS.ExactlyOnce;
+        byte[] behind = release ? [.. ClientPackets.PingReq, .. ClientPackets.PubRel1] : ClientPackets.PingReq;
+        byte[] expected =
+        [
+            .. (skipBand ? Refusal(qos, packetIdentifier: 1) : Acceptance(qos)), .. ClientPackets.PingResp,
+            .. (release ? ClientPackets.PubComp1 : []),
+        ];
         int publishes = 0;
 
-        // One connection for every cut: the packets of the two bands leave nothing remembered behind them.
+        // One connection for every cut: the packets of the two bands leave nothing remembered behind them once a
+        // QoS 2 publish that was accepted has been released.
         for (int cut = 1; cut < packet.Length; cut++)
         {
             // Act
             connection.Deliver(packet.AsSpan(0, cut));
-            connection.Deliver([.. packet.AsSpan(cut), .. ClientPackets.PingReq]);
+            connection.Deliver([.. packet.AsSpan(cut), .. behind]);
 
             // Assert
             publishes += skipBand ? 0 : 1;

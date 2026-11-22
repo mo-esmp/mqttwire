@@ -191,8 +191,8 @@ internal sealed class ServerHarness
     /// Asserts what must hold at any moment (design 6.13 item 5): no buffer was returned twice or returned that
     /// was not rented, no rent was larger than the largest buffer the server needs (64 KiB, or a whole PUBLISH of the
     /// first band: the payload limit, its 5 KiB of room and a fixed header of at most 5 bytes), every connection's
-    /// counts are within the limits of <see cref="ServerLimits"/> and the options (the waiting deliveries, the
-    /// waiting control packets and the bytes on the way out), and the buffers out of the pool are no more than
+    /// counts are within the limits of <see cref="ServerLimits"/> and the options (the exchange records, the count
+    /// against the receive maximum, the waiting deliveries, the waiting control packets and the bytes on the way out), and the buffers out of the pool are no more than
     /// <see cref="MaxBuffersPerConnection"/> for each connection that has a slot: one that has ended holds none.
     /// </summary>
     public void AssertBounds()
@@ -212,6 +212,7 @@ internal sealed class ServerHarness
             connections++;
             ConnectionCounts counts = connection.GetCounts();
             counts.IncomingRecords.ShouldBeLessThanOrEqualTo(ServerLimits.ReceiveMaximum);
+            counts.IncomingInFlight.ShouldBeLessThanOrEqualTo(ServerLimits.ReceiveMaximum);
             counts.WaitingControlPackets.ShouldBeLessThanOrEqualTo(ServerLimits.MaxWaitingControlPackets);
             counts.WaitingDeliveries.ShouldBeLessThanOrEqualTo(options.MaxOutgoingMessages);
             counts.OutgoingBytes.ShouldBeLessThanOrEqualTo(options.MaxOutgoingBytes);

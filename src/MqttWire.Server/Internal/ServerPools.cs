@@ -17,6 +17,43 @@ internal sealed class ServerPools
         new DefaultObjectPool<WaitingDeliveries>(new WaitingDeliveriesPolicy(), ServerLimits.MaxPooledObjects);
 
     /// <summary>
+    /// Gets the pool of the exchange records; it keeps at most <see cref="ServerLimits.MaxPooledObjects"/>, and an
+    /// object that comes back holds no record.
+    /// </summary>
+    public ObjectPool<ExchangeRecords> Records { get; } =
+        new DefaultObjectPool<ExchangeRecords>(new ExchangeRecordsPolicy(), ServerLimits.MaxPooledObjects);
+
+    /// <summary>
+    /// Creates the exchange records and clears each object that comes back.
+    /// </summary>
+    private sealed class ExchangeRecordsPolicy : IPooledObjectPolicy<ExchangeRecords>
+    {
+        /// <summary>
+        /// Creates an object that holds no record.
+        /// </summary>
+        /// <returns>
+        /// The records.
+        /// </returns>
+        public ExchangeRecords Create() => new();
+
+        /// <summary>
+        /// Clears an object that comes back, so that the next connection starts with no record and its identifier
+        /// counter at 1.
+        /// </summary>
+        /// <param name="obj">
+        /// The records.
+        /// </param>
+        /// <returns>
+        /// <see langword="true"/>, always: no object is refused.
+        /// </returns>
+        public bool Return(ExchangeRecords obj)
+        {
+            obj.Clear();
+            return true;
+        }
+    }
+
+    /// <summary>
     /// Creates the queues of waiting deliveries and clears each one that comes back.
     /// </summary>
     private sealed class WaitingDeliveriesPolicy : IPooledObjectPolicy<WaitingDeliveries>

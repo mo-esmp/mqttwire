@@ -191,8 +191,9 @@ public sealed partial class MqttWireConnection
     /// connection is aborted at the connect deadline; an Authenticating one has its cancellation source taken at the
     /// authentication deadline and handed to the thread pool, which cancels it (see
     /// <see cref="CancelAuthentication"/>); an Active one is aborted at the write deadline
-    /// (<see cref="AbortStalledWrite"/>), and begins its close at the partial-packet deadline (0x82) and at the
-    /// keep-alive deadline (0x8D); a Closing one is aborted at the close deadline. Each check acts only on the state
+    /// (<see cref="AbortStalledWrite"/>), and begins its close at the acknowledgement deadline (0x82, see
+    /// <see cref="CheckAcknowledgementDeadline"/>), at the partial-packet deadline (0x82) and at the keep-alive
+    /// deadline (0x8D); a Closing one is aborted at the close deadline. Each check acts only on the state
     /// it read: the move out of Accepted is a compare-exchange that expects Accepted, the cancellation source exists
     /// only while the connection is Authenticating and is taken from its field by one exchange, the write deadline
     /// acts only on the write whose stamp it read, the close of an Active one is <see cref="BeginClose"/>, which
@@ -232,6 +233,11 @@ public sealed partial class MqttWireConnection
             if (writing != 0 && now - writing >= _server.WriteDeadlineLength)
             {
                 AbortStalledWrite(writing);
+                return;
+            }
+
+            if (CheckAcknowledgementDeadline(now))
+            {
                 return;
             }
 

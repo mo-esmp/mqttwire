@@ -17,9 +17,10 @@ public sealed partial class MqttWireConnection
     private const int MaxStackReasonCodes = 256;
 
     /// <summary>
-    /// Handles one complete packet received after the CONNACK, by its type. PUBLISH, SUBSCRIBE, UNSUBSCRIBE, PINGREQ
-    /// and DISCONNECT do what design 6.6 says; a second CONNECT, AUTH and the packets only a server sends (CONNACK,
-    /// SUBACK, UNSUBACK, PINGRESP) end the connection with 0x82. A packet that cannot be decoded ends it with the
+    /// Handles one complete packet received after the CONNACK, by its type. PUBLISH, PUBREL, SUBSCRIBE, UNSUBSCRIBE,
+    /// PINGREQ and DISCONNECT do what design 6.6 says; PUBACK, PUBREC and PUBCOMP are validated and belong to the
+    /// deliveries; a second CONNECT, AUTH and the packets only a server sends (CONNACK, SUBACK, UNSUBACK, PINGRESP) end
+    /// the connection with 0x82. A packet that cannot be decoded ends it with the
     /// decoder's code.
     /// </summary>
     /// <param name="header">
@@ -52,14 +53,12 @@ public sealed partial class MqttWireConnection
                 return HandleDisconnect(packet);
 
             case PacketType.PubRel:
-                // Task 9: PUBREL ends a QoS 2 exchange of the client's (PUBCOMP, or 0x92 for an unknown identifier).
-                return true;
+                return HandlePubRel(packet);
 
             case PacketType.PubAck:
             case PacketType.PubRec:
             case PacketType.PubComp:
-                // Task 10: the client's acknowledgements of the server's QoS 1 and 2 deliveries.
-                return true;
+                return HandleDeliveryAck(packet);
 
             default:
                 // A second CONNECT, AUTH, or a packet only a server sends.
@@ -70,9 +69,12 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Handles a PUBLISH read whole: decodes it, ends the connection with 0x94 for a topic alias, refuses a payload
-    /// over the limit with 0x97, and hands the rest to the host's <see cref="IMqttWireHandler.OnPublish"/>, answering
-    /// QoS 1 with PUBACK: success, or the host's refusal. A packet the decoder refuses begins the close with the
-    /// decoder's code. A QoS above <see cref="MqttWireServerOptions.MaxQoS"/> was refused from the fixed header.
+    /// over the limit with 0x97, ends it with 0x93 for a QoS 1 or 2 publish that passes the receive maximum, answers a
+    /// QoS 2 publish whose identifier is remembered with PUBREC success without the host, and hands the rest to the
+    /// host's <see cref="IMqttWireHandler.OnPublish"/>, answering QoS 1 with PUBACK and QoS 2 with PUBREC: success,
+    /// or the host's refusal. An accepted QoS 2 publish is remembered until its PUBREL. A packet the decoder refuses
+    /// begins the close with the decoder's code. A QoS above <see cref="MqttWireServerOptions.MaxQoS"/> was refused
+    /// from the fixed header.
     /// </summary>
     /// <param name="packet">
     /// The whole packet, a view of the read buffer, valid only during the call.
@@ -101,10 +103,18 @@ public sealed partial class MqttWireConnection
             return RefuseTooLarge(publish.QoS, publish.PacketIdentifier);
         }
 
-        if (publish.QoS == MqttQoS.ExactlyOnce)
+        bool remembered = false;
+        if (publish.QoS != MqttQoS.AtMostOnce
+            && !TryTakeReceivePlace(publish.QoS, publish.PacketIdentifier, out remembered))
         {
-            // Task 9: a QoS 2 publish that reaches the host (its record, OnPublish, PUBREC); unanswered until then.
-            return true;
+            return false;
+        }
+
+        if (remembered)
+        {
+            // Whatever its DUP flag says, the host has had it already (design 6.6, QoS 2 item 2).
+            SendAck(PacketType.PubRec, publish.PacketIdentifier, MqttReasonCode.Success, reasonString: null);
+            return _state == ConnectionState.Active;
         }
 
         MqttPublish message = new(publish.Topic, publish.Payload, publish.QoS, publish.Retain);
@@ -117,6 +127,11 @@ public sealed partial class MqttWireConnection
         {
             CloseHandlerThrew(nameof(IMqttWireHandler.OnPublish), exception);
             return false;
+        }
+
+        if (publish.QoS == MqttQoS.ExactlyOnce)
+        {
+            return AnswerPublishQoS2(publish.PacketIdentifier, result);
         }
 
         if (publish.QoS == MqttQoS.AtLeastOnce && _state == ConnectionState.Active)
