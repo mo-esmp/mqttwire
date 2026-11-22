@@ -172,6 +172,19 @@ internal static class ServerPackets
     }
 
     /// <summary>
+    /// Builds the CONNECT of <see cref="Connect"/> for another client id: keep-alive 30, a clean start and no
+    /// properties. For <c>"c1"</c> it is <see cref="Connect"/> itself.
+    /// </summary>
+    /// <param name="clientId">
+    /// The client id, carried as UTF-8.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes, fixed header included.
+    /// </returns>
+    public static byte[] ConnectFor(string clientId) =>
+        BuildConnect(flags: 0x02, properties: [], payload: Field(Encoding.UTF8.GetBytes(clientId)));
+
+    /// <summary>
     /// Builds a field with its two-byte length prefix, as a UTF-8 string or binary data is carried.
     /// </summary>
     /// <param name="value">

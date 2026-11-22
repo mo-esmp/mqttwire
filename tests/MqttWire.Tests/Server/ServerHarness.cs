@@ -130,6 +130,40 @@ internal sealed class ServerHarness
     }
 
     /// <summary>
+    /// Opens a connection and connects it: delivers a CONNECT, asserts that the server answered with a success
+    /// CONNACK, and takes what was written, so the connection's link starts empty.
+    /// </summary>
+    /// <param name="clientId">
+    /// The client id of the CONNECT built when <paramref name="connect"/> is <see langword="null"/>.
+    /// </param>
+    /// <param name="connect">
+    /// The CONNECT to deliver, or <see langword="null"/> for <see cref="ServerPackets.ConnectFor"/> of
+    /// <paramref name="clientId"/>, which is answered with <see cref="ServerPackets.ConnAck"/>.
+    /// </param>
+    /// <returns>
+    /// The connection, Active.
+    /// </returns>
+    public TestConnection Connect(string clientId = "c1", byte[]? connect = null)
+    {
+        TestConnection connection = Accept();
+        connection.Deliver(connect ?? ServerPackets.ConnectFor(clientId));
+        byte[] written = connection.TakeWritten();
+        if (connect is null)
+        {
+            written.ShouldBe(ServerPackets.ConnAck);
+        }
+        else
+        {
+            // A CONNACK whose reason code, after the flags, is success.
+            written.Length.ShouldBeGreaterThan(3);
+            written[0].ShouldBe((byte)0x20);
+            written[3].ShouldBe((byte)MqttReasonCode.Success);
+        }
+
+        return connection;
+    }
+
+    /// <summary>
     /// Moves the fake clock forward in steps of the sweep interval, so that every sweep in between runs.
     /// </summary>
     /// <param name="time">

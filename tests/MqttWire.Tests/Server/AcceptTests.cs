@@ -111,7 +111,7 @@ public sealed class AcceptTests
             connection.Deliver(connect.AsSpan(cut));
 
             // Assert
-            harness.Handler.Calls.ShouldBe(["OnConnectAsync c1"], $"cut at {cut}");
+            harness.Handler.Calls.ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-"], $"cut at {cut}");
             connection.Link.EndFromPeer();
             await connection.Run;
             harness.Pool.Outstanding.ShouldBe(0);

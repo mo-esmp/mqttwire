@@ -52,6 +52,13 @@ public sealed partial class MqttWireConnection
     /// </summary>
     private ushort _keepAliveSeconds;
 
+    /// <summary>
+    /// Whether the host's <see cref="IMqttWireHandler.OnAdmit"/> accepted the connection, so that its end calls
+    /// <see cref="IMqttWireHandler.OnClosed"/>. Written once, under the registry's lock, by the admission step of the
+    /// connection's own run, and read by the end of that run.
+    /// </summary>
+    private bool _admitted;
+
 #pragma warning disable S4487 // Set by the connect phase now; read by the tasks that send deliveries and acknowledgements.
 
     /// <summary>
@@ -101,9 +108,9 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Gets the object the host returned from <see cref="IMqttWireHandler.OnConnectAsync"/>; the server never
-    /// looks at it.
+    /// looks at it. Set before <see cref="IMqttWireHandler.OnAdmit"/> is called.
     /// </summary>
-    public object? State { get; }
+    public object? State { get; private set; }
 
     /// <summary>
     /// Gets the context of the WebSocket request.

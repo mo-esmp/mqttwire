@@ -20,11 +20,11 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// The connect phase: reads the first packet, which must be a complete CONNECT, checks it, asks the host's
-    /// <see cref="IMqttWireHandler.OnConnectAsync"/> and, when the host accepts, writes the CONNACK and makes the
-    /// connection Active. A refusal anywhere is answered with a CONNACK carrying its code, then the close. The
-    /// read buffer goes back to the pool before the host is asked unless bytes lie behind the CONNECT (plan
-    /// decision 8); then it is kept for the loop, which handles them after the CONNACK. Every other way out
-    /// returns it.
+    /// <see cref="IMqttWireHandler.OnConnectAsync"/> and, when the host accepts, runs the admission step, which makes
+    /// the connection Active, and writes the CONNACK. A refusal anywhere is answered with a CONNACK carrying its
+    /// code, then the close. The read buffer goes back to the pool before the host is asked unless bytes lie behind
+    /// the CONNECT (plan decision 8); then it is kept for the loop, which handles them after the CONNACK. Every other
+    /// way out returns it.
     /// </summary>
     /// <returns>
     /// <see langword="true"/> when the connection is Active and the loop is to run; <see langword="false"/> when
@@ -64,9 +64,8 @@ public sealed partial class MqttWireConnection
                 return false;
             }
 
-            // The admission step of a later task goes here, between the host's acceptance and the CONNACK.
-            if (Interlocked.CompareExchange(ref _state, ConnectionState.Active, ConnectionState.Authenticating)
-                != ConnectionState.Authenticating)
+            State = result.State;
+            if (!Admit())
             {
                 return false;
             }
@@ -298,6 +297,61 @@ public sealed partial class MqttWireConnection
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// The admission step, between the host's acceptance and the CONNACK (design 6.6, "Admission and takeover"):
+    /// asks the server to admit the connection, which calls the host's <see cref="IMqttWireHandler.OnAdmit"/> under
+    /// the registry's lock; then, with the lock released and before the CONNACK is handed to the link, closes the
+    /// connection this one replaced with <c>0x8E</c>. A replaced connection that is already closing keeps its own
+    /// reason. A refusal begins the close with a CONNACK carrying its code; an <see cref="IMqttWireHandler.OnAdmit"/>
+    /// that throws is logged and begins it with <c>0x83</c>. Neither changes the client-id table, and neither
+    /// connection gets <see cref="IMqttWireHandler.OnClosed"/>.
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> when the connection was admitted and is Active, so the CONNACK is to be sent;
+    /// <see langword="false"/> when it was refused, or was admitted but has begun to close meanwhile (it then gets
+    /// <see cref="IMqttWireHandler.OnClosed"/> at its end).
+    /// </returns>
+    private bool Admit()
+    {
+        MqttAdmitResult admission;
+        MqttWireConnection? replaced;
+        try
+        {
+            admission = _server.Admit(this, out replaced);
+        }
+        catch (Exception exception)
+        {
+            ServerLog.HandlerThrew(_server.Logger, ClientId, nameof(IMqttWireHandler.OnAdmit), exception);
+            BeginClose(MqttCloseReason.HandlerThrew, MqttReasonCode.ImplementationSpecificError, reasonString: null);
+            return false;
+        }
+
+        if (!admission.IsAccepted)
+        {
+            MqttCloseReason reason = _server.IsStopping ? MqttCloseReason.ServerStopping : MqttCloseReason.ClosedByHost;
+            BeginClose(reason, admission.ReasonCode, admission.ReasonString);
+            return false;
+        }
+
+        replaced?.BeginClose(MqttCloseReason.TakenOver, MqttReasonCode.SessionTakenOver, reasonString: null);
+        return _state == ConnectionState.Active;
+    }
+
+    /// <summary>
+    /// Records that the host's <see cref="IMqttWireHandler.OnAdmit"/> accepted the connection, so that its end calls
+    /// <see cref="IMqttWireHandler.OnClosed"/>, and moves it from Authenticating to Active. Called by the admission
+    /// step, under the registry's lock.
+    /// </summary>
+    /// <remarks>
+    /// When the connection has moved to Closing meanwhile, it stays there: it is admitted all the same, and its
+    /// <see cref="IMqttWireHandler.OnClosed"/> reports the reason it is closing with.
+    /// </remarks>
+    internal void MarkAdmitted()
+    {
+        _admitted = true;
+        Interlocked.CompareExchange(ref _state, ConnectionState.Active, ConnectionState.Authenticating);
     }
 
     /// <summary>

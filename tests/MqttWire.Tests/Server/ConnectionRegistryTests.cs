@@ -10,10 +10,10 @@ namespace MqttWire.Tests.Server;
 public sealed class ConnectionRegistryTests
 {
     /// <summary>
-    /// Proves that a slot freed by a removal is the one the next connection takes.
+    /// Proves that a slot freed by a release is the one the next connection takes.
     /// </summary>
     [Fact]
-    public void Add_AfterRemove_ReusesTheFreedSlot()
+    public void Add_AfterRelease_ReusesTheFreedSlot()
     {
         // Arrange
         MqttWireServer server = ServerHarness.Create().Server;
@@ -24,7 +24,7 @@ public sealed class ConnectionRegistryTests
         registry.Add(first);
         registry.Add(second);
         int freed = Array.IndexOf(registry.Slots, first);
-        registry.Remove(first);
+        registry.Release(first);
 
         // Act
         registry.Add(third);
@@ -68,7 +68,7 @@ public sealed class ConnectionRegistryTests
     /// Proves that removing a connection whose client id was taken over leaves the one that replaced it in the table.
     /// </summary>
     [Fact]
-    public void Remove_ConnectionThatWasReplaced_LeavesItsReplacementInTheTable()
+    public void RemoveFromTable_ConnectionThatWasReplaced_LeavesItsReplacementInTheTable()
     {
         // Arrange
         MqttWireServer server = ServerHarness.Create().Server;
@@ -84,7 +84,7 @@ public sealed class ConnectionRegistryTests
         }
 
         // Act
-        registry.Remove(old);
+        registry.RemoveFromTable(old);
 
         // Assert
         registry.TryGet("c1", out MqttWireConnection? found).ShouldBeTrue();
@@ -94,10 +94,10 @@ public sealed class ConnectionRegistryTests
 
     /// <summary>
     /// Proves that the task of <see cref="ConnectionRegistry.WhenEmptyAsync"/> completes once the last connection
-    /// is removed, and not before.
+    /// is released, and not before.
     /// </summary>
     [Fact]
-    public void WhenEmptyAsync_LastConnectionRemoved_Completes()
+    public void WhenEmptyAsync_LastConnectionReleased_Completes()
     {
         // Arrange
         MqttWireServer server = ServerHarness.Create().Server;
@@ -107,14 +107,44 @@ public sealed class ConnectionRegistryTests
         registry.Add(first);
         registry.Add(second);
         Task empty = registry.WhenEmptyAsync();
-        registry.Remove(first);
+        registry.Release(first);
         bool completedEarly = empty.IsCompleted;
 
         // Act
-        registry.Remove(second);
+        registry.Release(second);
 
         // Assert
         completedEarly.ShouldBeFalse();
+        empty.IsCompletedSuccessfully.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// Proves that removing the last connection from the client-id table leaves its slot taken, so
+    /// <see cref="ConnectionRegistry.WhenEmptyAsync"/> waits until the slot is released.
+    /// </summary>
+    [Fact]
+    public void RemoveFromTable_LastConnection_KeepsItsSlotUntilReleased()
+    {
+        // Arrange
+        MqttWireServer server = ServerHarness.Create().Server;
+        ConnectionRegistry registry = new();
+        MqttWireConnection connection = NewConnection(server, "c1");
+        registry.Add(connection);
+        lock (registry.Gate)
+        {
+            registry.SetCurrent(connection);
+        }
+
+        Task empty = registry.WhenEmptyAsync();
+
+        // Act
+        registry.RemoveFromTable(connection);
+
+        // Assert
+        registry.ActiveCount.ShouldBe(0);
+        registry.Slots.ShouldContain(connection);
+        empty.IsCompleted.ShouldBeFalse();
+        registry.Release(connection);
         empty.IsCompletedSuccessfully.ShouldBeTrue();
     }
 

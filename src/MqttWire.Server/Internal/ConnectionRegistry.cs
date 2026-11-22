@@ -15,7 +15,8 @@ internal sealed class ConnectionRegistry
     private const int InitialSlots = 16;
 
     /// <summary>
-    /// The connection that has each client id, from its admission until it is Closed.
+    /// The connection that has each client id, from its admission until just before its
+    /// <see cref="IMqttWireHandler.OnClosed"/>.
     /// </summary>
     private readonly Dictionary<string, MqttWireConnection> _table = new(StringComparer.Ordinal);
 
@@ -92,14 +93,32 @@ internal sealed class ConnectionRegistry
     }
 
     /// <summary>
-    /// Frees a connection's slot, and removes its table entry only when the entry is this connection, so the end
-    /// of a replaced connection never removes the one that replaced it. Completes <see cref="WhenEmptyAsync"/>
-    /// when this was the last slot taken.
+    /// Removes a connection's table entry, only when the entry is this connection, so the end of a replaced
+    /// connection never removes the one that replaced it. The slot stays taken until <see cref="Release"/>.
+    /// </summary>
+    /// <param name="connection">
+    /// The connection; one that is not in the table changes nothing.
+    /// </param>
+    public void RemoveFromTable(MqttWireConnection connection)
+    {
+        lock (Gate)
+        {
+            if (_table.TryGetValue(connection.ClientId, out MqttWireConnection? current)
+                && ReferenceEquals(current, connection))
+            {
+                _table.Remove(connection.ClientId);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Frees a connection's slot, the last step of its end. Completes <see cref="WhenEmptyAsync"/> when this was
+    /// the last slot taken. The table entry is not touched: <see cref="RemoveFromTable"/> removed it before.
     /// </summary>
     /// <param name="connection">
     /// The connection, which <see cref="Add"/> gave a slot.
     /// </param>
-    public void Remove(MqttWireConnection connection)
+    public void Release(MqttWireConnection connection)
     {
         TaskCompletionSource? empty = null;
         lock (Gate)
@@ -109,12 +128,6 @@ internal sealed class ConnectionRegistry
             Volatile.Write(ref _slots[slot], value: null);
             _free[_freeCount++] = slot;
             _taken--;
-            if (_table.TryGetValue(connection.ClientId, out MqttWireConnection? current)
-                && ReferenceEquals(current, connection))
-            {
-                _table.Remove(connection.ClientId);
-            }
-
             if (_taken == 0)
             {
                 empty = _empty;

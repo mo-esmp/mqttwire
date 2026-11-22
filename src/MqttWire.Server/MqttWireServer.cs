@@ -85,6 +85,12 @@ public sealed class MqttWireServer
     internal ConnectionRegistry Registry { get; } = new();
 
     /// <summary>
+    /// Gets a value indicating whether the server is stopping, so the admission step lets no connection in. Read
+    /// under <see cref="ConnectionRegistry.Gate"/>; nothing sets it yet, the stop does.
+    /// </summary>
+    internal bool IsStopping { get; }
+
+    /// <summary>
     /// Gets <see cref="ServerLimits.ConnectDeadline"/> in units of <see cref="Time"/>'s timestamps.
     /// </summary>
     internal long ConnectDeadlineLength { get; }
@@ -157,6 +163,52 @@ public sealed class MqttWireServer
     {
         MqttWireConnection connection = new(this, httpContext);
         return connection.RunAsync(link);
+    }
+
+    /// <summary>
+    /// The admission step (design 6.6, "Admission and takeover"), one atomic step under
+    /// <see cref="ConnectionRegistry.Gate"/>: finds the connection that has the client id now, asks the host's
+    /// <see cref="IMqttWireHandler.OnAdmit"/>, and on acceptance makes the new connection the one in the table,
+    /// admitted and Active. Two connections for one client id go through it one after the other, and the second
+    /// sees the first as the one it replaces. The caller closes the replaced connection once the lock is released.
+    /// </summary>
+    /// <param name="connection">
+    /// The new connection, which the host's <see cref="IMqttWireHandler.OnConnectAsync"/> accepted.
+    /// </param>
+    /// <param name="replaced">
+    /// The connection the new one took the client id from when the result accepts and there was one; otherwise
+    /// <see langword="null"/>. It may be closing already.
+    /// </param>
+    /// <returns>
+    /// The host's answer. A refusal with <see cref="MqttReasonCode.ServerShuttingDown"/>, without asking the host,
+    /// when the server is stopping or the connection is no longer Authenticating (it has begun to close). A refusal
+    /// changes nothing.
+    /// </returns>
+    /// <exception cref="Exception">
+    /// <see cref="IMqttWireHandler.OnAdmit"/> threw (the host's bug); the lock is released and nothing changed.
+    /// </exception>
+    internal MqttAdmitResult Admit(MqttWireConnection connection, out MqttWireConnection? replaced)
+    {
+        replaced = null;
+        lock (Registry.Gate)
+        {
+            if (IsStopping || connection.StateNow != ConnectionState.Authenticating)
+            {
+                return MqttAdmitResult.Refuse(MqttReasonCode.ServerShuttingDown);
+            }
+
+            MqttWireConnection? existing = Registry.Find(connection.ClientId);
+            MqttAdmitResult result = Handler.OnAdmit(connection, existing);
+            if (!result.IsAccepted)
+            {
+                return result;
+            }
+
+            Registry.SetCurrent(connection);
+            connection.MarkAdmitted();
+            replaced = existing;
+            return result;
+        }
     }
 
     /// <summary>

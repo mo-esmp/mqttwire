@@ -7,7 +7,7 @@ using MqttWire.Server.Internal;
 namespace MqttWire.Server;
 
 /// <content>
-/// Ending a connection: the move to Closing, the sweep's checks of the deadlines.
+/// Ending a connection: the move to Closing, the sweep's checks of the deadlines, the report to the host.
 /// </content>
 public sealed partial class MqttWireConnection
 {
@@ -61,6 +61,23 @@ public sealed partial class MqttWireConnection
         finally
         {
             _ = CloseLinkAsync(link, WebSocketCloseStatus.NormalClosure);
+        }
+    }
+
+    /// <summary>
+    /// Tells the host that the admitted connection ended, with the reason of the first <see cref="BeginClose"/>.
+    /// Called once, by the end of the run. An <see cref="IMqttWireHandler.OnClosed"/> that throws is logged and
+    /// nothing else: the connection ends all the same.
+    /// </summary>
+    private void ReportClosed()
+    {
+        try
+        {
+            _server.Handler.OnClosed(this, CloseReason);
+        }
+        catch (Exception exception)
+        {
+            ServerLog.HandlerThrew(_server.Logger, ClientId, nameof(IMqttWireHandler.OnClosed), exception);
         }
     }
 

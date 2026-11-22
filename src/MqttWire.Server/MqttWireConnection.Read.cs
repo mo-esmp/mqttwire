@@ -277,8 +277,9 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Handles one complete packet received after the CONNACK. For now it accepts and ignores every packet: the
-    /// limits, the deadlines and what each packet does come with later tasks.
+    /// Handles one complete packet received after the CONNACK. For now a DISCONNECT ends the connection with
+    /// <see cref="MqttCloseReason.ClientDisconnected"/>, and every other packet is accepted and ignored: the limits,
+    /// the deadlines and what each packet does come with later tasks.
     /// </summary>
     /// <param name="header">
     /// The packet's fixed header.
@@ -290,7 +291,16 @@ public sealed partial class MqttWireConnection
     /// <see langword="true"/> to go on with the next packet; <see langword="false"/> when the connection is ending,
     /// and the close has begun.
     /// </returns>
-#pragma warning disable S1172, IDE0060, CA1822, S2325 // A stub until the packets are handled; then it uses both and the instance.
-    private bool HandlePacket(in PacketHeader header, ReadOnlySpan<byte> packet) => true;
-#pragma warning restore S1172, IDE0060, CA1822, S2325
+#pragma warning disable S1172, IDE0060 // The packet's bytes are read once the packets are handled in earnest.
+    private bool HandlePacket(in PacketHeader header, ReadOnlySpan<byte> packet)
+#pragma warning restore S1172, IDE0060
+    {
+        if (header.Type == PacketType.Disconnect)
+        {
+            BeginClose(MqttCloseReason.ClientDisconnected, MqttReasonCode.Success, reasonString: null);
+            return false;
+        }
+
+        return true;
+    }
 }

@@ -526,7 +526,7 @@ public sealed class ServerConnectTests
 
         // Assert
         connect.Length.ShouldBeGreaterThan(ServerLimits.FirstReadBufferBytes);
-        harness.Handler.Calls.ShouldBe(["OnConnectAsync c1"]);
+        harness.Handler.Calls.ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-"]);
         seen.ShouldBe(password);
         connection.TakeWritten().ShouldBe(ServerPackets.ConnAck);
         harness.Pool.Outstanding.ShouldBe(0);

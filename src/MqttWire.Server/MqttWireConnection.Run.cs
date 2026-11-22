@@ -84,16 +84,27 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Ends the run: frees the connection's slot and makes it Closed. Every buffer was returned by the code that
-    /// held it before this runs.
+    /// Ends the run, in this order: removes the connection from the client-id table, only if it is still the one
+    /// there; calls <see cref="IMqttWireHandler.OnClosed"/> once if the connection was admitted, after every other
+    /// handler call for it has returned; makes it Closed; and only then frees its slot, so that
+    /// <see cref="ConnectionRegistry.WhenEmptyAsync"/> completes after every <see cref="IMqttWireHandler.OnClosed"/>
+    /// has returned. No write is in progress here yet: every write so far ends at once or holds nothing of the run.
+    /// Every buffer was returned by the code that held it before this runs.
     /// </summary>
     /// <returns>
-    /// A task that completes when the connection is Closed.
+    /// A task that completes when the connection is Closed and its slot is free.
     /// </returns>
     private ValueTask FinishAsync()
     {
-        _server.Registry.Remove(this);
+        ConnectionRegistry registry = _server.Registry;
+        registry.RemoveFromTable(this);
+        if (_admitted)
+        {
+            ReportClosed();
+        }
+
         _state = ConnectionState.Closed;
+        registry.Release(this);
         return ValueTask.CompletedTask;
     }
 }
