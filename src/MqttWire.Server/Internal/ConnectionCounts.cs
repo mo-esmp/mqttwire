@@ -21,7 +21,7 @@ namespace MqttWire.Server.Internal;
 /// The bytes counted against <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>.
 /// </param>
 /// <param name="IsWriting">
-/// Whether a write is in progress.
+/// Whether the send path is taken: a write is in progress, or one is about to start.
 /// </param>
 /// <param name="HoldsReadBuffer">
 /// Whether the connection holds a rented read buffer.

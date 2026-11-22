@@ -19,44 +19,12 @@ public sealed partial class MqttWireConnection
     private const string WillNotSupported = "Will messages are not supported.";
 
     /// <summary>
-    /// How far the connection is with its first packet, the CONNACK. It decides, together with the state, which
-    /// packet a close may write, so that no MQTT packet precedes the CONNACK.
-    /// </summary>
-    private enum ConnAckProgress : byte
-    {
-        /// <summary>
-        /// Before the admission step: a close writes the CONNACK that refuses, when its code is a failure.
-        /// </summary>
-        NotHanded,
-
-        /// <summary>
-        /// From the admission step until the success CONNACK is claimed: a close writes no packet.
-        /// </summary>
-        Admitting,
-
-        /// <summary>
-        /// The success CONNACK is being handed to the link: a close writes no packet.
-        /// </summary>
-        Handing,
-
-        /// <summary>
-        /// The success CONNACK was handed to the link: a close may write DISCONNECT.
-        /// </summary>
-        Handed,
-
-        /// <summary>
-        /// A close claimed the first packet before the admission step; the connection is never admitted.
-        /// </summary>
-        Withheld,
-    }
-
-    /// <summary>
     /// The connect phase: reads the first packet, which must be a complete CONNECT, checks it, asks the host's
     /// <see cref="IMqttWireHandler.OnConnectAsync"/> and, when the host accepts, runs the admission step, which makes
-    /// the connection Active, and writes the CONNACK. A refusal anywhere is answered with a CONNACK carrying its
-    /// code, then the close. The read buffer goes back to the pool before the host is asked unless bytes lie behind
-    /// the CONNECT (plan decision 8); then it is kept for the loop, which handles them after the CONNACK. Every other
-    /// way out returns it.
+    /// the connection Active with the send path reserved for its CONNACK, and writes the CONNACK as the send path's
+    /// first write. A refusal anywhere is answered with a CONNACK carrying its code, then the close. The read buffer
+    /// goes back to the pool before the host is asked unless bytes lie behind the CONNECT (plan decision 8); then it
+    /// is kept for the loop, which handles them after the CONNACK. Every other way out returns it.
     /// </summary>
     /// <returns>
     /// <see langword="true"/> when the connection is Active and the loop is to run; <see langword="false"/> when
@@ -97,9 +65,9 @@ public sealed partial class MqttWireConnection
             }
 
             State = result.State;
-            if (!Admit() || !TryBeginHandingConnAck())
+            if (!Admit())
             {
-                // Refused, or closed after its admission: no CONNACK; an admitted one gets OnClosed at its end.
+                // Refused, or closed in or after its admission: no CONNACK; an admitted one gets OnClosed at its end.
                 return false;
             }
 
@@ -113,7 +81,6 @@ public sealed partial class MqttWireConnection
                 ServerKeepAlive = announceKeepAlive ? _keepAliveSeconds : null,
                 UserProperties = result.UserProperties,
             });
-            Interlocked.Exchange(ref _connAck, ConnAckProgress.Handed);
 
             // A CONNACK whose write failed at once has moved the connection on to Closing.
             active = _state == ConnectionState.Active;
@@ -340,18 +307,19 @@ public sealed partial class MqttWireConnection
     /// connection this one replaced with <c>0x8E</c>. A replaced connection that is already closing keeps its own
     /// reason. A refusal begins the close with a CONNACK carrying its code; an <see cref="IMqttWireHandler.OnAdmit"/>
     /// that throws is logged and begins it with <c>0x83</c>. Neither changes the client-id table, and neither
-    /// connection gets <see cref="IMqttWireHandler.OnClosed"/>.
+    /// connection gets <see cref="IMqttWireHandler.OnClosed"/>. A connection that was admitted but closed during or
+    /// after the step (by the host from inside <see cref="IMqttWireHandler.OnAdmit"/>, or by a takeover) gets no
+    /// CONNACK: that close found the send path reserved for the CONNACK and aborted the link, so no packet was
+    /// written, and the send path is given up here.
     /// </summary>
     /// <returns>
-    /// <see langword="true"/> when the host accepted and the connection was admitted; it may have begun to close
-    /// meanwhile, which <see cref="TryBeginHandingConnAck"/> tells. <see langword="false"/> when it was refused.
+    /// <see langword="true"/> when the connection was admitted and is Active: the send path is reserved for its
+    /// CONNACK, which the caller writes now. <see langword="false"/> when it was refused, or was admitted and has
+    /// begun to close: the close has begun, the send path is not reserved, and no CONNACK is to be written; an
+    /// admitted connection gets <see cref="IMqttWireHandler.OnClosed"/> at its end.
     /// </returns>
     private bool Admit()
     {
-        // The keep-alive runs from the moment the connection becomes Active, which this step makes it, with the
-        // CONNACK right behind: a slow OnConnectAsync does not use up the client's keep-alive. Stamped before the
-        // move to Active, so the first sweep that sees Active never reads an older stamp.
-        Volatile.Write(ref _lastPacketAt, _server.Time.GetTimestamp());
         MqttAdmitResult admission;
         MqttWireConnection? replaced;
         try
@@ -373,59 +341,67 @@ public sealed partial class MqttWireConnection
         }
 
         replaced?.BeginClose(MqttCloseReason.TakenOver, MqttReasonCode.SessionTakenOver, reasonString: null);
-        return true;
+        if (_state == ConnectionState.Active)
+        {
+            // A close from here on finds the send path taken until the CONNACK's write has ended, and aborts.
+            return true;
+        }
+
+        ContinueSending(returned: null, failed: false, InlineWrites);
+        return false;
     }
 
     /// <summary>
-    /// Claims the right to hand the success CONNACK to the link, after the admission, so that no MQTT packet ever
-    /// precedes it. The claim comes first and the state is read after it, while <see cref="BeginClose"/> moves the
-    /// state first and reads the claim after it; both are full fences, so at least one of the two sees the other.
-    /// When this sees Closing, no CONNACK is written and the close wrote no packet either (it saw
-    /// <see cref="ConnAckProgress.Admitting"/>). When this sees Active, a later close sees
-    /// <see cref="ConnAckProgress.Handing"/> or <see cref="ConnAckProgress.Handed"/>, and writes its DISCONNECT only
-    /// after the CONNACK has been handed over.
+    /// Enters the admission step: reserves the send path for the connection's CONNACK, in the hold of the send
+    /// path's lock that finds the connection still Authenticating. From here until the CONNACK's write has ended (or
+    /// <see cref="LeaveRefusedAdmission"/>), a close finds the send path taken and aborts the link instead of writing,
+    /// and a message a host sends once the connection is Active waits behind the CONNACK: no MQTT packet ever
+    /// precedes it. Called by the admission step, under the registry's lock, before the host's
+    /// <see cref="IMqttWireHandler.OnAdmit"/>.
     /// </summary>
     /// <returns>
-    /// <see langword="true"/> when the connection is Active and the CONNACK is to be handed over now;
-    /// <see langword="false"/> when it was closed after its admission, and no CONNACK is to be written.
+    /// <see langword="true"/> when the send path was reserved; <see langword="false"/> when the connection is no
+    /// longer Authenticating: it has begun to close and must not be admitted. Nothing changed then.
     /// </returns>
-    private bool TryBeginHandingConnAck() =>
-        Interlocked.CompareExchange(ref _connAck, ConnAckProgress.Handing, ConnAckProgress.Admitting)
-            == ConnAckProgress.Admitting
-        && _state == ConnectionState.Active;
+    internal bool TryEnterAdmission()
+    {
+        lock (_sendLock)
+        {
+            // Only a close takes the send path before the admission, and it leaves Authenticating in the same hold.
+            if (_state != ConnectionState.Authenticating)
+            {
+                return false;
+            }
+
+            _writing = true;
+            return true;
+        }
+    }
 
     /// <summary>
-    /// Marks the connection as being in the admission step, so that a close that begins from now until the success
-    /// CONNACK is handed over writes no MQTT packet. Called by the admission step, under the registry's lock, before
-    /// the host's <see cref="IMqttWireHandler.OnAdmit"/>.
+    /// Gives the send path reserved by <see cref="TryEnterAdmission"/> up when the host refused or threw, so that
+    /// the close that follows writes the CONNACK carrying the refusal. Called under the registry's lock. A connection
+    /// that was closed during the step stays as that close left it: its link aborted, and no packet written.
     /// </summary>
-    /// <returns>
-    /// <see langword="true"/> when the mark was made; <see langword="false"/> when a close has already claimed the
-    /// first packet, so the connection is closing and must not be admitted.
-    /// </returns>
-    internal bool TryEnterAdmission() =>
-        Interlocked.CompareExchange(ref _connAck, ConnAckProgress.Admitting, ConnAckProgress.NotHanded)
-            == ConnAckProgress.NotHanded;
-
-    /// <summary>
-    /// Takes back the mark of <see cref="TryEnterAdmission"/> when the host refused or threw, so that the close that
-    /// follows writes the CONNACK carrying the refusal. Called under the registry's lock.
-    /// </summary>
-    internal void LeaveRefusedAdmission() =>
-        Interlocked.CompareExchange(ref _connAck, ConnAckProgress.NotHanded, ConnAckProgress.Admitting);
+    internal void LeaveRefusedAdmission() => ContinueSending(returned: null, failed: false, InlineWrites);
 
     /// <summary>
     /// Records that the host's <see cref="IMqttWireHandler.OnAdmit"/> accepted the connection, so that its end calls
     /// <see cref="IMqttWireHandler.OnClosed"/>, and moves it from Authenticating to Active. Called by the admission
-    /// step, under the registry's lock.
+    /// step, under the registry's lock. The send path stays reserved for the CONNACK, which the connect phase writes
+    /// next.
     /// </summary>
     /// <remarks>
-    /// When the connection has moved to Closing meanwhile, it stays there: it is admitted all the same, and its
-    /// <see cref="IMqttWireHandler.OnClosed"/> reports the reason it is closing with.
+    /// The keep-alive runs from this moment: it is stamped immediately before the move to Active, so neither a slow
+    /// <see cref="IMqttWireHandler.OnConnectAsync"/> nor a slow <see cref="IMqttWireHandler.OnAdmit"/> uses it up,
+    /// and the first sweep that sees Active never reads an older stamp. When the connection has moved to Closing
+    /// meanwhile, it stays there: it is admitted all the same, and its <see cref="IMqttWireHandler.OnClosed"/>
+    /// reports the reason it is closing with.
     /// </remarks>
     internal void MarkAdmitted()
     {
         _admitted = true;
+        Volatile.Write(ref _lastPacketAt, _server.Time.GetTimestamp());
         Interlocked.CompareExchange(ref _state, ConnectionState.Active, ConnectionState.Authenticating);
     }
 

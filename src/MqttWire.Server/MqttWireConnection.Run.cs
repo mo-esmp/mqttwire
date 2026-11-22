@@ -84,22 +84,66 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Ends the run, in the order of design 6.6 ("Closing, bounded", step 5): removes the connection from the
-    /// client-id table, only if it is still the one there; makes it Closed; then calls
-    /// <see cref="IMqttWireHandler.OnClosed"/> once if the connection was admitted, after every other handler call
-    /// for it has returned; and only then frees its slot, so that <see cref="ConnectionRegistry.WhenEmptyAsync"/>
-    /// completes after every <see cref="IMqttWireHandler.OnClosed"/> has returned. During
-    /// <see cref="IMqttWireHandler.OnClosed"/> the connection is Closed: a close changes nothing and the sweep
-    /// ignores it. Every buffer the read path held was returned before this runs.
+    /// Ends the run once the send path is idle (design 6.6, "Closing, bounded", step 5: the connection is Closed
+    /// when the read loop has ended and no write is in progress). The read loop has ended and the close has begun,
+    /// so the send path, once idle, stays idle: nothing is added to a Closing connection, and only the call that
+    /// began the close could have taken the path. When nothing is in progress, which is the common case, this
+    /// completes at once and allocates nothing. Otherwise it waits for whoever holds the send path to give it up,
+    /// which that holder does when its write, or its close, has ended and its buffer is back. The wait is bounded by
+    /// the sweep: the close deadline aborts the link, and an aborted link's write ends.
     /// </summary>
     /// <returns>
     /// A task that completes when the connection is Closed and its slot is free.
     /// </returns>
     private ValueTask FinishAsync()
     {
-        // Task 8: a write started by SendConnAck or SendDisconnect (fire-and-forget) can still be pending over a real
-        // WebSocket when the read loop ends, holding its pool buffer. FinishAsync must wait for it before the state
-        // becomes Closed, so that the slot is freed and WhenEmptyAsync completes only when its buffer is back.
+        Task? idle = null;
+        lock (_sendLock)
+        {
+            if (_writing)
+            {
+                // Completed, never inline, by the hold that gives the send path up: what follows calls the host.
+                _sendIdle = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                idle = _sendIdle.Task;
+            }
+        }
+
+        if (idle is null)
+        {
+            EndRun();
+            return ValueTask.CompletedTask;
+        }
+
+        return new ValueTask(FinishWhenIdleAsync(idle));
+    }
+
+    /// <summary>
+    /// Waits for the send path to be idle, then ends the run as <see cref="EndRun"/> does.
+    /// </summary>
+    /// <param name="idle">
+    /// Completes when the send path has been given up.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the connection is Closed and its slot is free.
+    /// </returns>
+    private async Task FinishWhenIdleAsync(Task idle)
+    {
+        await idle.ConfigureAwait(false);
+        EndRun();
+    }
+
+    /// <summary>
+    /// Ends the run, in the order of design 6.6 ("Closing, bounded", step 5): removes the connection from the
+    /// client-id table, only if it is still the one there; makes it Closed; then calls
+    /// <see cref="IMqttWireHandler.OnClosed"/> once if the connection was admitted, after every other handler call
+    /// for it has returned; and only then frees its slot, so that <see cref="ConnectionRegistry.WhenEmptyAsync"/>
+    /// completes after every <see cref="IMqttWireHandler.OnClosed"/> has returned. During
+    /// <see cref="IMqttWireHandler.OnClosed"/> the connection is Closed: a close changes nothing and the sweep
+    /// ignores it. Every buffer the connection held is back in the pool before this runs: the read path returned
+    /// its own, and the send path is idle.
+    /// </summary>
+    private void EndRun()
+    {
         ConnectionRegistry registry = _server.Registry;
         registry.RemoveFromTable(this);
         _state = ConnectionState.Closed;
@@ -109,6 +153,5 @@ public sealed partial class MqttWireConnection
         }
 
         registry.Release(this);
-        return ValueTask.CompletedTask;
     }
 }

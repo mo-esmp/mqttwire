@@ -48,6 +48,7 @@ public sealed class MqttWireServer
         AuthenticationDeadlineLength = ToTimestampLength(ServerLimits.AuthenticationDeadline, time);
         CloseDeadlineLength = ToTimestampLength(ServerLimits.CloseDeadline, time);
         PartialPacketDeadlineLength = ToTimestampLength(ServerLimits.PartialPacketDeadline, time);
+        WriteDeadlineLength = ToTimestampLength(ServerLimits.WriteDeadline, time);
     }
 
     /// <summary>
@@ -86,6 +87,11 @@ public sealed class MqttWireServer
     internal ConnectionRegistry Registry { get; } = new();
 
     /// <summary>
+    /// Gets the pools of the objects a busy connection needs; an idle connection holds none of them.
+    /// </summary>
+    internal ServerPools Pools { get; } = new();
+
+    /// <summary>
     /// Gets a value indicating whether the server is stopping, so the admission step lets no connection in. Read
     /// under <see cref="ConnectionRegistry.Gate"/>; nothing sets it yet, the stop does.
     /// </summary>
@@ -110,6 +116,11 @@ public sealed class MqttWireServer
     /// Gets <see cref="ServerLimits.PartialPacketDeadline"/> in units of <see cref="Time"/>'s timestamps.
     /// </summary>
     internal long PartialPacketDeadlineLength { get; }
+
+    /// <summary>
+    /// Gets <see cref="ServerLimits.WriteDeadline"/> in units of <see cref="Time"/>'s timestamps.
+    /// </summary>
+    internal long WriteDeadlineLength { get; }
 
     /// <summary>
     /// Looks up an open connection by client identifier.
@@ -175,8 +186,9 @@ public sealed class MqttWireServer
     /// The admission step (design 6.6, "Admission and takeover"), one atomic step under
     /// <see cref="ConnectionRegistry.Gate"/>: finds the connection that has the client id now, asks the host's
     /// <see cref="IMqttWireHandler.OnAdmit"/>, and on acceptance makes the new connection the one in the table,
-    /// admitted and Active. Two connections for one client id go through it one after the other, and the second
-    /// sees the first as the one it replaces. The caller closes the replaced connection once the lock is released.
+    /// admitted and Active, with its send path reserved for its CONNACK. Two connections for one client id go through
+    /// it one after the other, and the second sees the first as the one it replaces. The caller closes the replaced
+    /// connection once the lock is released.
     /// </summary>
     /// <param name="connection">
     /// The new connection, which the host's <see cref="IMqttWireHandler.OnConnectAsync"/> accepted.
@@ -198,7 +210,8 @@ public sealed class MqttWireServer
         replaced = null;
         lock (Registry.Gate)
         {
-            if (IsStopping || connection.StateNow != ConnectionState.Authenticating || !connection.TryEnterAdmission())
+            // Entering the step reserves the connection's send path for its CONNACK; a refusal gives it up again.
+            if (IsStopping || !connection.TryEnterAdmission())
             {
                 return MqttAdmitResult.Refuse(MqttReasonCode.ServerShuttingDown);
             }

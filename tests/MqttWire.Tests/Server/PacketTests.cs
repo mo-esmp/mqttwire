@@ -295,6 +295,67 @@ public sealed class PacketTests
     }
 
     /// <summary>
+    /// Proves that a host that closes the connection while it answers the first filter of a SUBSCRIBE is not asked
+    /// about the filters that are left, and that the DISCONNECT of its close is the last packet: no SUBACK follows.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Subscribe_HostClosesTheConnectionAtTheFirstFilter_StopsCallingTheHostAndWritesNoSubAck()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        harness.Handler.Subscribe = static (subscriber, _, requested) =>
+        {
+            subscriber.Close(MqttReasonCode.AdministrativeAction);
+            return MqttSubscribeResult.Granted(requested);
+        };
+        TestConnection connection = harness.Connect();
+        byte[] subscribe = ServerPackets.BuildSubscribe(packetIdentifier: 1, properties: [],
+            [("a", (byte)0), ("b", (byte)0), ("c", (byte)0)]);
+
+        // Act
+        connection.Deliver(subscribe);
+        await connection.Run;
+
+        // Assert
+        SubscribeCalls(harness).ShouldBe(["OnSubscribe c1 a q0"]);
+        connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.AdministrativeAction));
+        harness.Handler.Calls.ShouldContain("OnClosed c1 ClosedByHost");
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a host that closes the connection while it handles the first filter of an UNSUBSCRIBE is not
+    /// called for the filters that are left, and that the DISCONNECT of its close is the last packet: no UNSUBACK
+    /// follows.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Unsubscribe_HostClosesTheConnectionAtTheFirstFilter_StopsCallingTheHostAndWritesNoUnsubAck()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        harness.Handler.Unsubscribe = static (subscriber, _) => subscriber.Close(MqttReasonCode.AdministrativeAction);
+        TestConnection connection = harness.Connect();
+        byte[] unsubscribe = ServerPackets.BuildUnsubscribe(packetIdentifier: 2, ["a", "b", "c"]);
+
+        // Act
+        connection.Deliver(unsubscribe);
+        await connection.Run;
+
+        // Assert
+        harness.Handler.Calls.Where(static call => call.StartsWith("OnUnsubscribe", StringComparison.Ordinal))
+            .ShouldBe(["OnUnsubscribe c1 a"]);
+        connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.AdministrativeAction));
+        harness.Handler.Calls.ShouldContain("OnClosed c1 ClosedByHost");
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves that a PINGREQ is answered with a PINGRESP.
     /// </summary>
     [Fact]

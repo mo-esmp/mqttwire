@@ -111,8 +111,9 @@ public sealed class AdmissionTests
     }
 
     /// <summary>
-    /// Proves that two CONNECTs for one client id whose <c>OnConnectAsync</c> complete together go through the
-    /// admission step one after the other: exactly one of the two <c>OnAdmit</c> calls sees the other connection.
+    /// Proves that two CONNECTs for one client id whose <c>OnConnectAsync</c> complete together, on two thread-pool
+    /// threads, go through the admission step one after the other: exactly one of the two <c>OnAdmit</c> calls sees
+    /// the other connection as <c>replaces</c>, and each accepted <c>OnAdmit</c> gets exactly one <c>OnClosed</c>.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -122,8 +123,32 @@ public sealed class AdmissionTests
     {
         // Arrange
         ServerHarness harness = ServerHarness.Create();
-        TaskCompletionSource<MqttConnectResult> release = new();
+
+        // Its continuations, one per connection, are queued to the thread pool, so the two connect phases go on
+        // from there on two threads, not one after the other on the thread that sets the result.
+        TaskCompletionSource<MqttConnectResult> release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         harness.Handler.Connect = (_, _) => new ValueTask<MqttConnectResult>(release.Task);
+        TaskCompletionSource bothAdmitted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        List<(MqttWireConnection Admitted, MqttWireConnection? Replaces)> admissions = [];
+        harness.Handler.Admit = (admitted, replaces) =>
+        {
+            // Called under the registry's lock, so one at a time.
+            admissions.Add((admitted, replaces));
+            if (admissions.Count == 2)
+            {
+                bothAdmitted.SetResult();
+            }
+
+            return MqttAdmitResult.Accepted;
+        };
+        List<MqttWireConnection> closed = [];
+        harness.Handler.Closed = (connection, _) =>
+        {
+            lock (closed)
+            {
+                closed.Add(connection);
+            }
+        };
         TestConnection first = harness.Accept();
         TestConnection second = harness.Accept();
         first.Deliver(ServerPackets.Connect);
@@ -131,15 +156,23 @@ public sealed class AdmissionTests
 
         // Act
         release.SetResult(MqttConnectResult.Accept());
-
-        // The one admitted second always writes its CONNACK after its OnAdmit; the other writes its CONNACK or the
-        // DISCONNECT of the takeover.
-        await first.Link.WhenWrittenAsync(count: 1);
-        await second.Link.WhenWrittenAsync(count: 1);
+        await bothAdmitted.Task;
+        first.Link.EndFromPeer();
+        second.Link.EndFromPeer();
+        await Task.WhenAll(first.Run, second.Run);
 
         // Assert
-        harness.Handler.Calls.Where(static call => call.StartsWith("OnAdmit", StringComparison.Ordinal)).ShouldBe(["OnAdmit c1 replaces=-", "OnAdmit c1 replaces=c1"]);
-        harness.Server.ConnectionCount.ShouldBe(1);
+        admissions.Count.ShouldBe(2);
+        admissions[0].Replaces.ShouldBeNull();
+        admissions[1].Replaces.ShouldBeSameAs(admissions[0].Admitted);
+        admissions[1].Admitted.ShouldNotBeSameAs(admissions[0].Admitted);
+        harness.Handler.Calls.Where(static call => call.StartsWith("OnAdmit", StringComparison.Ordinal))
+            .ShouldBe(["OnAdmit c1 replaces=-", "OnAdmit c1 replaces=c1"]);
+        closed.Count.ShouldBe(2);
+        closed.ShouldBe([admissions[0].Admitted, admissions[1].Admitted], ignoreOrder: true);
+        harness.Server.ConnectionCount.ShouldBe(0);
+        harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
+        harness.Pool.Outstanding.ShouldBe(0);
     }
 
     /// <summary>
@@ -256,8 +289,9 @@ public sealed class AdmissionTests
 
     /// <summary>
     /// Proves that a connection taken over after its admission but before its CONNACK is sent no MQTT packet at all:
-    /// its WebSocket is closed with 1000 and it ends once with <see cref="MqttCloseReason.TakenOver"/>, while the
-    /// connection that took over is connected normally. The window is reached deterministically: the second
+    /// the takeover finds the send path reserved for the CONNACK, so the link is aborted, and the connection ends
+    /// once with <see cref="MqttCloseReason.TakenOver"/>, while the connection that took over is connected normally.
+    /// The window is reached deterministically: the second
     /// connection replaces a first one, whose DISCONNECT 0x8E is written between the second's admission and its
     /// CONNACK; when that DISCONNECT's buffer goes back to the pool, the pool's return hook connects the third
     /// connection, inline, which takes the client id over from the second.
@@ -296,7 +330,8 @@ public sealed class AdmissionTests
 
         // Assert
         second.TakeWritten().ShouldBeEmpty();
-        second.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
+        second.Link.IsAborted.ShouldBeTrue();
+        second.Link.ClosedWith.ShouldBeNull();
         third.ShouldNotBeNull();
         harness.Server.TryGetConnection("c1", out MqttWireConnection? found).ShouldBeTrue();
         found.ShouldBeSameAs(third.Connection);
@@ -311,8 +346,9 @@ public sealed class AdmissionTests
 
     /// <summary>
     /// Proves that a host that closes the new connection from inside <c>OnAdmit</c> and then accepts gets the close
-    /// after the step: no CONNACK and no DISCONNECT are written, the WebSocket is closed, and <c>OnClosed</c> is
-    /// called once with <see cref="MqttCloseReason.ClosedByHost"/>.
+    /// after the step: the send path is reserved for the CONNACK from the start of the step, so no CONNACK and no
+    /// DISCONNECT are written and the link is aborted, and <c>OnClosed</c> is called once with
+    /// <see cref="MqttCloseReason.ClosedByHost"/>.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -335,10 +371,72 @@ public sealed class AdmissionTests
 
         // Assert
         connection.TakeWritten().ShouldBeEmpty();
-        connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
+        connection.Link.IsAborted.ShouldBeTrue();
+        connection.Link.ClosedWith.ShouldBeNull();
         harness.Handler.Calls.ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-", "OnClosed c1 ClosedByHost"]);
         harness.Server.ConnectionCount.ShouldBe(0);
         harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a host that closes the new connection from inside <c>OnAdmit</c> and then refuses it leaves
+    /// nothing behind: nothing is written, the link is aborted, no <c>OnClosed</c> is called, and the connection ends
+    /// with its slot free.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Close_FromInsideOnAdmitThenRefused_EndsWithoutOnClosed()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        harness.Handler.Admit = static (connection, _) =>
+        {
+            connection.Close(MqttReasonCode.AdministrativeAction);
+            return MqttAdmitResult.Refuse(MqttReasonCode.NotAuthorized);
+        };
+        TestConnection connection = harness.Accept();
+
+        // Act
+        connection.Deliver(ServerPackets.Connect);
+        await connection.Run;
+
+        // Assert
+        connection.TakeWritten().ShouldBeEmpty();
+        connection.Link.IsAborted.ShouldBeTrue();
+        harness.Handler.Calls.ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-"]);
+        harness.Server.ConnectionCount.ShouldBe(0);
+        harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that the keep-alive runs from the moment the connection becomes Active, not from the start of the
+    /// admission step: with keep-alive 30 and an <c>OnAdmit</c> that takes 44 seconds, the connection is open 44
+    /// seconds after its CONNACK and is closed with 0x8D once 45 have passed.
+    /// </summary>
+    [Fact]
+    public void Admit_SlowOnAdmit_DoesNotCountAgainstTheKeepAlive()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        harness.Handler.Admit = (_, _) =>
+        {
+            harness.Advance(TimeSpan.FromSeconds(44));
+            return MqttAdmitResult.Accepted;
+        };
+        TestConnection connection = harness.Connect();
+
+        // Act
+        harness.Advance(TimeSpan.FromSeconds(44));
+        byte[] writtenAt44 = connection.TakeWritten();
+        harness.Advance(TimeSpan.FromSeconds(2));
+        byte[] writtenAt46 = connection.TakeWritten();
+
+        // Assert
+        writtenAt44.ShouldBeEmpty();
+        writtenAt46.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.KeepAliveTimeout));
     }
 
     /// <summary>

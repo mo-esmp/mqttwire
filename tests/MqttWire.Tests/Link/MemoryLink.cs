@@ -86,6 +86,13 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     private CancellationTokenRegistration _registration;
 
     /// <summary>
+    /// Gets or sets a callback that sees each packet as it is handed to <see cref="WriteAsync"/>, on the writer's
+    /// thread and before the link takes it, so a test can check which memory the writer handed over, or act at
+    /// the moment a write begins; or <see langword="null"/>.
+    /// </summary>
+    public Action<ReadOnlyMemory<byte>>? Writing { get; set; }
+
+    /// <summary>
     /// Gets the number of writes that completed successfully since the link was created.
     /// </summary>
     public int WriteCount
@@ -494,6 +501,7 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     public ValueTask WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        Writing?.Invoke(packet);
         lock (_gate)
         {
             if (_holdWrites)

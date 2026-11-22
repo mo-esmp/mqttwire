@@ -1,23 +1,19 @@
-﻿using System.Net.WebSockets;
+﻿using System.Diagnostics;
+using System.Net.WebSockets;
 using Microsoft.Extensions.Logging;
-using MqttWire.Link;
+using MqttWire.Codec;
 using MqttWire.Server.Internal;
 
 namespace MqttWire.Server;
 
 /// <content>
-/// Ending a connection: the move to Closing, the sweep's checks of the deadlines, the report to the host.
+/// Ending a connection: the bounded close, the sweep's checks of the deadlines, the report to the host.
 /// </content>
 public sealed partial class MqttWireConnection
 {
     /// <summary>
-    /// Begins the close: moves the connection to Closing, once, records the reason, writes the packet that carries
-    /// the reason code, and starts the WebSocket close with status 1000 without waiting for the peer; the sweep
-    /// aborts the link at the close deadline. No MQTT packet precedes the CONNACK: a connection whose success CONNACK
-    /// was handed to the link is sent DISCONNECT with the code, except when the client disconnected or the link was
-    /// lost; one that was not admitted is sent CONNACK with the code when the code is a failure (plan decision 7);
-    /// one closed during or after its admission but before its CONNACK is sent nothing. Safe from any thread; a call
-    /// after the first changes nothing.
+    /// Begins the close (design 6.6, "Closing, bounded"), with WebSocket status 1000: see
+    /// <see cref="BeginCloseWithStatus"/>. Safe from any thread; a call after the first changes nothing.
     /// </summary>
     /// <param name="reason">
     /// Why the connection ends.
@@ -29,49 +25,137 @@ public sealed partial class MqttWireConnection
     /// The reason string, or <see langword="null"/>; validated where the host handed it over, so it can be encoded.
     /// It is cut, and left out where the client's Request Problem Information or Maximum Packet Size calls for it.
     /// </param>
-    internal void BeginClose(MqttCloseReason reason, MqttReasonCode code, string? reasonString)
+    internal void BeginClose(MqttCloseReason reason, MqttReasonCode code, string? reasonString) =>
+        BeginCloseWithStatus(reason, code, reasonString, WebSocketCloseStatus.NormalClosure);
+
+    /// <summary>
+    /// Begins the close (design 6.6, "Closing, bounded"). In one hold of the send path's lock it moves the connection
+    /// to Closing, once, records the reason, and looks at the send path; from that hold on nothing is added to what
+    /// waits. When a write is in progress, which includes the send path reserved for a CONNACK during and after the
+    /// admission step, the link is aborted now and nothing else is done: a socket that is not taking data is never
+    /// asked to carry its own notice, and no packet precedes a CONNACK. When no write is in progress, this call takes
+    /// the send path, hands the packet that carries the reason code to the link, and then the WebSocket close,
+    /// without waiting for the peer; the sweep aborts the link at the close deadline. The packet is DISCONNECT for a
+    /// connection that was Active, except when the client disconnected or the link was lost; CONNACK for one that was
+    /// not admitted, when the code is a failure (plan decision 7); otherwise none. Aborting returns nothing: the
+    /// write in progress ends by itself and returns its own buffer (design 6.8). Safe from any thread; a call after
+    /// the first changes nothing.
+    /// </summary>
+    /// <param name="reason">
+    /// Why the connection ends.
+    /// </param>
+    /// <param name="code">
+    /// The reason code the end carries; <see cref="MqttReasonCode.Success"/> when it carries none.
+    /// </param>
+    /// <param name="reasonString">
+    /// The reason string, or <see langword="null"/>; validated where the host handed it over, so it can be encoded.
+    /// It is cut, and left out where the client's Request Problem Information or Maximum Packet Size calls for it.
+    /// </param>
+    /// <param name="status">
+    /// The WebSocket status the peer sees when the close is handed to the link.
+    /// </param>
+    private void BeginCloseWithStatus(MqttCloseReason reason, MqttReasonCode code, string? reasonString,
+        WebSocketCloseStatus status)
     {
-        if (!TryEnterClosing(reason, out ConnectionState left))
+        ConnectionState left;
+        bool writing;
+        lock (_sendLock)
         {
+            if (!TryEnterClosing(reason, out left))
+            {
+                return;
+            }
+
+            writing = _writing;
+            if (!writing)
+            {
+                // This close takes the send path, in the hold that found it free, and keeps it until its WebSocket
+                // close has been handed to the link.
+                _writing = true;
+                _closeStatus = (ushort)status;
+            }
+        }
+
+        if (writing)
+        {
+            RunningLink.Abort();
             return;
         }
 
-        IMqttLink? link = _link;
-        if (link is null)
-        {
-            return;
-        }
-
+        byte[]? buffer = null;
+        int length = 0;
         try
         {
-            // Read after the move to Closing, the order TryBeginHandingConnAck relies on.
-            ConnAckProgress progress =
-                Interlocked.CompareExchange(ref _connAck, ConnAckProgress.Withheld, ConnAckProgress.NotHanded);
-            if (progress == ConnAckProgress.NotHanded)
-            {
-                // Not admitted: this close's CONNACK, if any, is the first packet.
-                if ((byte)code >= 0x80)
-                {
-                    SendConnAckRefusal(code, reasonString);
-                }
-            }
-            else if (progress == ConnAckProgress.Handed && left == ConnectionState.Active
-                     && reason is not (MqttCloseReason.ClientDisconnected or MqttCloseReason.ConnectionLost))
-            {
-                SendDisconnect(code, reasonString);
-            }
-
-            // Admitting: closed during or right after its admission, before its CONNACK; no packet at all.
-            // Task 8: Handing: the success CONNACK is being handed to the link on the connect phase's thread, so no
-            // DISCONNECT is written. Two windows remain: (a) the WebSocket close below may reach the link before that
-            // CONNACK's write; (b) a close that lands after SendConnAck has handed the CONNACK over but before the
-            // progress becomes Handed sees Handing and writes no DISCONNECT, so one that could have been written (a
-            // takeover's 0x8E) is dropped. Task 8 closes both by reserving the send path for the CONNACK at admission.
+            length = EncodeClosingPacket(left, reason, code, reasonString, out buffer);
         }
         finally
         {
-            _ = CloseLinkAsync(link, WebSocketCloseStatus.NormalClosure);
+            // The close goes on whatever became of its packet: the WebSocket close follows through the send path. A
+            // buffer whose packet could not be encoded goes back without being written.
+            if (buffer is not null && length > 0)
+            {
+                StartSending(buffer.AsMemory(start: 0, length), buffer, InlineWrites);
+            }
+            else
+            {
+                ContinueSending(returned: buffer, failed: false, InlineWrites);
+            }
         }
+    }
+
+    /// <summary>
+    /// Encodes the packet that carries a close's reason code to the client, into a buffer rented from the server's
+    /// pool: DISCONNECT for a connection that was Active, except when the client disconnected or the link was lost;
+    /// CONNACK with the code for one that was not admitted, when the code is a failure (plan decision 7); otherwise
+    /// none. The reason string follows the rule of <see cref="ShapeReasonString"/>.
+    /// </summary>
+    /// <param name="left">
+    /// The state the connection left for Closing.
+    /// </param>
+    /// <param name="reason">
+    /// Why the connection ends.
+    /// </param>
+    /// <param name="code">
+    /// The reason code.
+    /// </param>
+    /// <param name="reasonString">
+    /// The reason string, or <see langword="null"/>; validated where the host handed it over.
+    /// </param>
+    /// <param name="buffer">
+    /// The rented buffer that holds the packet, which the completion of its write returns; <see langword="null"/>
+    /// when the close carries no packet.
+    /// </param>
+    /// <returns>
+    /// The packet's length; 0 when the close carries no packet.
+    /// </returns>
+    private int EncodeClosingPacket(ConnectionState left, MqttCloseReason reason, MqttReasonCode code,
+        string? reasonString, out byte[]? buffer)
+    {
+        buffer = null;
+        if (left == ConnectionState.Active)
+        {
+            if (reason is MqttCloseReason.ClientDisconnected or MqttCloseReason.ConnectionLost)
+            {
+                return 0;
+            }
+
+            string? carried = ShapeReasonString(PacketType.Disconnect, code, count: 0, reasonString);
+            buffer = _server.Pool.Rent(DisconnectCodec.GetSize(code, carried));
+            return DisconnectCodec.Write(buffer, code, carried);
+        }
+
+        if ((byte)code < 0x80)
+        {
+            return 0;
+        }
+
+        // Not admitted: this close's CONNACK is the first and only packet.
+        ConnAckFields fields = new()
+        {
+            ReasonCode = code, ReasonString = ShapeReasonString(PacketType.ConnAck, code, count: 0, reasonString),
+        };
+        buffer = _server.Pool.Rent(ConnAckCodec.GetSize(fields));
+        return ConnAckCodec.Write(buffer, fields);
     }
 
     /// <summary>
@@ -93,34 +177,31 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Refuses a first packet that is not a CONNECT, or whose fixed header is malformed: no MQTT packet can answer
-    /// it, so the connection moves to Closing and the WebSocket is closed with status 1002 (plan decision 7). Does
-    /// nothing when the connection is Closing already.
+    /// it, so the connection begins to close with no packet and the WebSocket is closed with status 1002 (plan
+    /// decision 7), through the send path like every close. Does nothing when the connection is Closing already.
     /// </summary>
     /// <param name="reason">
     /// Why the connection ends.
     /// </param>
-    private void RefuseFirstPacket(MqttCloseReason reason)
-    {
-        if (TryEnterClosing(reason, out _) && _link is { } link)
-        {
-            _ = CloseLinkAsync(link, WebSocketCloseStatus.ProtocolError);
-        }
-    }
+    private void RefuseFirstPacket(MqttCloseReason reason) =>
+        BeginCloseWithStatus(reason, MqttReasonCode.Success, reasonString: null, WebSocketCloseStatus.ProtocolError);
 
     /// <summary>
     /// Acts on the deadlines that have passed; called by the sweep, from the timer's thread. An Accepted
     /// connection is aborted at the connect deadline; an Authenticating one has its cancellation source taken at the
     /// authentication deadline and handed to the thread pool, which cancels it (see
-    /// <see cref="CancelAuthentication"/>); an Active one begins its close at the partial-packet deadline (0x82) and
-    /// at the keep-alive deadline (0x8D); a Closing one is aborted at the close deadline. Each check acts only on
-    /// the state it read: the move out of Accepted is a compare-exchange that expects Accepted, the cancellation
-    /// source exists only while the connection is Authenticating and is taken from its field by one exchange, the
-    /// close of an Active one is <see cref="BeginClose"/>, which moves to Closing once by compare-exchange, and the
-    /// close deadline is measured from the stamp that only the winner of the move to Closing writes. On the sweep's
-    /// thread it runs no host code; beyond an abort, the only part of the connection's end it runs is the start of a
-    /// close: the DISCONNECT handed to the link and the WebSocket close, neither awaited. It never throws; it
-    /// allocates only when it hands a source to the thread pool or a write or close does not complete at once. An
-    /// abort ends the link's pending reads, whose continuations may run on the thread that aborts, as with any abort.
+    /// <see cref="CancelAuthentication"/>); an Active one is aborted at the write deadline
+    /// (<see cref="AbortStalledWrite"/>), and begins its close at the partial-packet deadline (0x82) and at the
+    /// keep-alive deadline (0x8D); a Closing one is aborted at the close deadline. Each check acts only on the state
+    /// it read: the move out of Accepted is a compare-exchange that expects Accepted, the cancellation source exists
+    /// only while the connection is Authenticating and is taken from its field by one exchange, the write deadline
+    /// acts only on the write whose stamp it read, the close of an Active one is <see cref="BeginClose"/>, which
+    /// moves to Closing once, and the close deadline is measured from the stamp that only the winner of the move to
+    /// Closing writes. On the sweep's thread it runs no host code; beyond an abort, the only part of the connection's
+    /// end it runs is the start of a close through the send path: the DISCONNECT handed to the link and the WebSocket
+    /// close, neither awaited. It never throws; it allocates only when it hands a source to the thread pool or a
+    /// write or close does not complete at once. An abort ends the link's pending reads, whose continuations may run
+    /// on the thread that aborts, as with any abort.
     /// </summary>
     /// <param name="now">
     /// The sweep's timestamp, from the server's clock.
@@ -130,11 +211,9 @@ public sealed partial class MqttWireConnection
         if (_state == ConnectionState.Accepted)
         {
             long accepted = Volatile.Read(ref _stateEnteredAt);
-            if (accepted != 0 && now - accepted >= _server.ConnectDeadlineLength
-                              && TryEnterClosingFrom(ConnectionState.Accepted, MqttCloseReason.ConnectionLost))
+            if (accepted != 0 && now - accepted >= _server.ConnectDeadlineLength)
             {
-                // The connection was never admitted, so no OnClosed reports the reason; the link failing is the end.
-                _link?.Abort();
+                AbortAtConnectDeadline();
             }
         }
         else if (_state == ConnectionState.Authenticating)
@@ -148,6 +227,14 @@ public sealed partial class MqttWireConnection
         }
         else if (_state == ConnectionState.Active)
         {
+            // 0 while no write is with the link: one that completed at once was never stamped.
+            long writing = Volatile.Read(ref _writeStartedAt);
+            if (writing != 0 && now - writing >= _server.WriteDeadlineLength)
+            {
+                AbortStalledWrite(writing);
+                return;
+            }
+
             CheckReadDeadlines(now);
         }
         else if (_state == ConnectionState.Closing)
@@ -159,6 +246,51 @@ public sealed partial class MqttWireConnection
                 _link?.Abort();
             }
         }
+    }
+
+    /// <summary>
+    /// Ends a connection that has sent no complete CONNECT by the connect deadline: moves it to Closing, only from
+    /// Accepted, and aborts the link. Nothing is handed to the link, and the send path is not touched: nothing was
+    /// ever written.
+    /// </summary>
+    private void AbortAtConnectDeadline()
+    {
+        lock (_sendLock)
+        {
+            if (!TryEnterClosingFrom(ConnectionState.Accepted, MqttCloseReason.ConnectionLost))
+            {
+                return;
+            }
+        }
+
+        // The connection was never admitted, so no OnClosed reports the reason; the link failing is the end.
+        _link?.Abort();
+    }
+
+    /// <summary>
+    /// Ends a connection whose write has been with the link for <see cref="ServerLimits.WriteDeadline"/>: moves it
+    /// to Closing with <see cref="MqttCloseReason.WriteTimedOut"/> and aborts the link. No DISCONNECT is attempted:
+    /// a write is in progress, and it is the one that does not move. It acts only on the write whose stamp the sweep
+    /// read: when that write has ended meanwhile, or the connection is closing already, nothing is done. Aborting
+    /// releases nothing: the write ends with an error and returns its own buffer, and what waited behind it is
+    /// dropped then.
+    /// </summary>
+    /// <param name="started">
+    /// The stamp of the write the sweep found past its deadline.
+    /// </param>
+    private void AbortStalledWrite(long started)
+    {
+        lock (_sendLock)
+        {
+            // The stamp is set only while a piece is with the link, so the send path is taken: by that write.
+            if (Volatile.Read(ref _writeStartedAt) != started
+                || !TryEnterClosingFrom(ConnectionState.Active, MqttCloseReason.WriteTimedOut))
+            {
+                return;
+            }
+        }
+
+        _link?.Abort();
     }
 
     /// <summary>
@@ -186,32 +318,6 @@ public sealed partial class MqttWireConnection
         if (now - Volatile.Read(ref _lastPacketAt) >= keepAlive)
         {
             BeginClose(MqttCloseReason.KeepAliveTimedOut, MqttReasonCode.KeepAliveTimeout, reasonString: null);
-        }
-    }
-
-    /// <summary>
-    /// Closes the link and observes the outcome, so that nobody waits on it. A close that completes at once
-    /// allocates nothing.
-    /// </summary>
-    /// <param name="link">
-    /// The link.
-    /// </param>
-    /// <param name="status">
-    /// The WebSocket status the peer sees.
-    /// </param>
-    /// <returns>
-    /// A task that completes when the close was sent, or failed and the link was aborted; it never fails.
-    /// </returns>
-    private static async Task CloseLinkAsync(IMqttLink link, WebSocketCloseStatus status)
-    {
-        try
-        {
-            await link.CloseAsync(status, CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (Exception)
-        {
-            // The close failed: end the link now rather than at the close deadline. The run then sees it end.
-            link.Abort();
         }
     }
 
@@ -265,7 +371,8 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Moves the connection to Closing unless it is there or beyond, records the reason and stamps the time.
+    /// Moves the connection to Closing unless it is there or beyond, records the reason and stamps the time. The
+    /// caller holds the send path's lock, as for <see cref="TryEnterClosingFrom"/>.
     /// </summary>
     /// <param name="reason">
     /// Why the connection ends.
@@ -295,7 +402,9 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Moves the connection to Closing only from one state; the winner records the reason and writes
-    /// <see cref="_closingAt"/>, which nothing else writes.
+    /// <see cref="_closingAt"/>, which nothing else writes. The caller holds the send path's lock: every move to
+    /// Closing is made under it, so that the state read under that lock tells the send path exactly whether anything
+    /// may still be added or written.
     /// </summary>
     /// <param name="expected">
     /// The state the move must start from; it is below Closing.
@@ -309,6 +418,7 @@ public sealed partial class MqttWireConnection
     /// </returns>
     private bool TryEnterClosingFrom(ConnectionState expected, MqttCloseReason reason)
     {
+        Debug.Assert(_sendLock.IsHeldByCurrentThread, "Every move to Closing is made under the send path's lock.");
         if (Interlocked.CompareExchange(ref _state, ConnectionState.Closing, expected) != expected)
         {
             return false;

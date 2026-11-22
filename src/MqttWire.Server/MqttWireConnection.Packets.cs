@@ -209,8 +209,9 @@ public sealed partial class MqttWireConnection
     /// The reason string of the host's first refusal, or <see langword="null"/>.
     /// </param>
     /// <returns>
-    /// <see langword="true"/> when every filter was decided; <see langword="false"/> when the host threw, and the
-    /// close has begun.
+    /// <see langword="true"/> when every filter was decided; <see langword="false"/> when the host threw, or the
+    /// connection stopped being Active before every filter was decided, and the close has begun: the host is not
+    /// called for the filters that are left.
     /// </returns>
     private bool DecideSubscriptions(in SubscribePacket subscribe, Span<MqttReasonCode> codes, out string? reasonString)
     {
@@ -220,6 +221,13 @@ public sealed partial class MqttWireConnection
         int index = 0;
         foreach (Subscription subscription in subscribe.GetSubscriptions())
         {
+            if (_state != ConnectionState.Active)
+            {
+                // Closed meanwhile, by the host from inside an earlier call or from elsewhere: the host is not asked
+                // about the filters that are left, and no SUBACK follows.
+                return false;
+            }
+
             if (!Topics.IsValidFilter(subscription.TopicFilter))
             {
                 codes[index++] = MqttReasonCode.TopicFilterInvalid;
@@ -258,7 +266,8 @@ public sealed partial class MqttWireConnection
     /// <summary>
     /// Handles an UNSUBSCRIBE: an UNSUBACK that could not fit the client's Maximum Packet Size ends the connection
     /// with 0x95 before the host is called; otherwise each filter in order goes to the host's
-    /// <see cref="IMqttWireHandler.OnUnsubscribe"/> as a string, and one UNSUBACK answers with success for each.
+    /// <see cref="IMqttWireHandler.OnUnsubscribe"/> as a string, and one UNSUBACK answers with success for each. The
+    /// host is no longer called once the connection has stopped being Active.
     /// </summary>
     /// <param name="packet">
     /// The whole packet, a view of the read buffer, valid only during the call.
@@ -282,6 +291,12 @@ public sealed partial class MqttWireConnection
 
         foreach (ReadOnlySpan<byte> filter in unsubscribe.GetTopicFilters())
         {
+            if (_state != ConnectionState.Active)
+            {
+                // Closed meanwhile: the host is not called for the filters that are left, and no UNSUBACK follows.
+                return false;
+            }
+
             try
             {
                 _server.Handler.OnUnsubscribe(this, Encoding.UTF8.GetString(filter));

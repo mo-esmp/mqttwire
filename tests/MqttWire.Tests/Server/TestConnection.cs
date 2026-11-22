@@ -69,6 +69,31 @@ internal sealed class TestConnection(
     }
 
     /// <summary>
+    /// Completes every write the link holds, oldest first, and stops holding later ones, with the server carrying on
+    /// from each completion on this thread, before this returns, as it does on the thread on which a socket completes
+    /// a write. The test runner's synchronization context is taken off the thread meanwhile: with it, .NET would
+    /// queue what follows a completed write to the thread pool, and a test could not tell when it has run.
+    /// </summary>
+    /// <param name="exception">
+    /// The exception the held writes fail with, or <see langword="null"/> to complete them successfully.
+    /// </param>
+    public void CompleteHeldWrites(Exception? exception = null)
+    {
+        SynchronizationContext? context = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(syncContext: null);
+        try
+        {
+            Link.CompleteHeldWrites(exception);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(context);
+        }
+
+        harness.AssertBounds();
+    }
+
+    /// <summary>
     /// Takes everything the server wrote since the last call.
     /// </summary>
     /// <returns>

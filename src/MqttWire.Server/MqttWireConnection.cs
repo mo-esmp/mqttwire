@@ -15,6 +15,16 @@ public sealed partial class MqttWireConnection
     private readonly MqttWireServer _server;
 
     /// <summary>
+    /// The lock of the send path: it guards <see cref="_writing"/>, <see cref="_waiting"/>, <see cref="_control"/>,
+    /// <see cref="_outgoingBytes"/>, <see cref="_writingBytes"/>, <see cref="_closeStatus"/> and
+    /// <see cref="_sendIdle"/>, and every move to Closing is made under it. It is held for a few field updates and a
+    /// copy of at most one control packet, never across a write, a close, an abort or a call of the host's handler,
+    /// so a host may call <see cref="TrySend"/> and <see cref="Close"/> from inside its callbacks. It is taken inside
+    /// the registry's lock (the admission step), never the other way round.
+    /// </summary>
+    private readonly Lock _sendLock = new();
+
+    /// <summary>
     /// The link, or <see langword="null"/> until <see cref="RunAsync"/> has it; set before the connection takes its
     /// slot, so the sweep never sees it unset.
     /// </summary>
@@ -80,10 +90,65 @@ public sealed partial class MqttWireConnection
     private bool _admitted;
 
     /// <summary>
-    /// How far the connection is with its CONNACK; it moves by <see cref="Interlocked.CompareExchange{T}(ref T, T, T)"/>
-    /// between the connect phase, the admission step and <see cref="BeginClose"/>.
+    /// The deliveries that wait behind the write in progress, in the order of the <see cref="TrySend"/> calls;
+    /// taken from the server's pool with the first one and given back with the last, so <see langword="null"/>
+    /// while none waits. Guarded by <see cref="_sendLock"/>.
     /// </summary>
-    private ConnAckProgress _connAck;
+    private WaitingDeliveries? _waiting;
+
+    /// <summary>
+    /// The control packets that wait behind the write in progress, already encoded; it holds a rented array only
+    /// while one waits. A mutable struct changed in place, so the explicit empty start tells the analyzer it is
+    /// meant to be assigned through its members. Guarded by <see cref="_sendLock"/>.
+    /// </summary>
+    private ControlBuffer _control = default;
+
+    /// <summary>
+    /// What is left to write of the payload of the large delivery being written, a view of the host's memory; empty
+    /// when no such delivery is in progress. Only whoever holds the send path reads and writes it.
+    /// </summary>
+    private ReadOnlyMemory<byte> _remainingPayload;
+
+    /// <summary>
+    /// Completes when the send path is given up; it exists only while the end of the run waits for a write in
+    /// progress. Guarded by <see cref="_sendLock"/>: set by the end of the run, taken by the hold that clears
+    /// <see cref="_writing"/>.
+    /// </summary>
+    private TaskCompletionSource? _sendIdle;
+
+    /// <summary>
+    /// When the piece that is with the link was handed to it, a timestamp of the server's clock; 0 when no write is
+    /// with the link, and for a write that completed at once. Written by whoever holds the send path, read by the
+    /// sweep for the write deadline.
+    /// </summary>
+    private long _writeStartedAt;
+
+    /// <summary>
+    /// The bytes counted against <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>: the payloads of the waiting
+    /// deliveries and of the delivery being written, and the bytes of the waiting control packets. Guarded by
+    /// <see cref="_sendLock"/>.
+    /// </summary>
+    private int _outgoingBytes;
+
+    /// <summary>
+    /// The payload bytes of the delivery being written, which leave <see cref="_outgoingBytes"/> when its last
+    /// piece has been written; 0 when no delivery is being written. Guarded by <see cref="_sendLock"/>.
+    /// </summary>
+    private int _writingBytes;
+
+    /// <summary>
+    /// The WebSocket status of the close that the call that began the close still has to hand to the link, after
+    /// its packet; 0 when there is none. Guarded by <see cref="_sendLock"/>.
+    /// </summary>
+    private ushort _closeStatus;
+
+    /// <summary>
+    /// Whether the send path is taken: a write or a close is with the link, or a caller is about to start one, or
+    /// the path is reserved for the CONNACK of a connection in or after its admission step. Whoever sets it writes;
+    /// everyone else adds to what waits. It is set only in a hold of <see cref="_sendLock"/> that found it clear,
+    /// and cleared only by its holder, in the hold in which that holder found nothing more to do.
+    /// </summary>
+    private bool _writing;
 
 #pragma warning disable S4487 // Set by the connect phase now; read by the tasks that send deliveries and acknowledgements.
 
@@ -175,15 +240,35 @@ public sealed partial class MqttWireConnection
     /// <returns>
     /// <see cref="MqttSendResult.Taken"/> when the server took the message; otherwise why it did not: the
     /// connection is not open, the message is too large, or the connection was just evicted. A message that was
-    /// not taken is not queued and nothing changes.
+    /// not taken is not queued. "Not open" changes nothing; "too large" and "evicted" also end the connection,
+    /// with <see cref="MqttCloseReason.MessageTooLargeToSend"/> and <see cref="MqttCloseReason.OutgoingLimitPassed"/>.
     /// </returns>
-#pragma warning disable S2325 // The shell sends nothing yet; the task that adds sending makes this an instance member in earnest.
-    public MqttSendResult TrySend(MqttTopic topic, ReadOnlyMemory<byte> payload, MqttQoS qos) => MqttSendResult.NotOpen;
-#pragma warning restore S2325
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topic"/> is the default value, which holds no topic, or <paramref name="qos"/> is not 0, 1 or
+    /// 2 (the caller's bug); nothing changes.
+    /// </exception>
+    public MqttSendResult TrySend(MqttTopic topic, ReadOnlyMemory<byte> payload, MqttQoS qos)
+    {
+        if (topic.IsDefault)
+        {
+            throw new ArgumentException("The topic is the default value, which holds no topic.", nameof(topic));
+        }
+
+        if (qos > MqttQoS.ExactlyOnce)
+        {
+            throw new ArgumentException("The QoS is not 0, 1 or 2.", nameof(qos));
+        }
+
+        MqttQoS maxQoS = _server.Options.MaxQoS;
+        return TakeDelivery(topic, payload, qos > maxQoS ? maxQoS : qos);
+    }
 
     /// <summary>
     /// Ends the connection. Safe from any thread and any number of times; a call after the first changes
-    /// nothing.
+    /// nothing. It never waits for the network: when nothing is being written to the client, DISCONNECT with the
+    /// reason code is handed to the socket, followed by the WebSocket close; when a write is in progress, the socket
+    /// is aborted instead, so a client that is not reading is never waited for.
+    /// <see cref="IMqttWireHandler.OnClosed"/> then reports <see cref="MqttCloseReason.ClosedByHost"/>.
     /// </summary>
     /// <param name="reason">
     /// The reason code to send to the client in DISCONNECT.
@@ -194,18 +279,26 @@ public sealed partial class MqttWireConnection
     /// <exception cref="ArgumentException">
     /// The reason string holds U+0000 or an unpaired surrogate, which no packet can carry; nothing changes.
     /// </exception>
-#pragma warning disable S2325 // A shell beyond the check; the task that lets the host close a connection makes it an instance member in earnest.
-    public void Close(MqttReasonCode reason, string? reasonString = null) =>
+    public void Close(MqttReasonCode reason, string? reasonString = null)
+    {
         ReasonStrings.ThrowIfNotEncodable(reasonString: reasonString, paramName: nameof(reasonString));
-#pragma warning restore S2325
+        BeginClose(MqttCloseReason.ClosedByHost, reason, ReasonStrings.Cut(reasonString));
+    }
 
     /// <summary>
     /// Tells what the connection holds now, for the tests of its bounds. Counts that do not exist yet are 0.
     /// </summary>
     /// <returns>
-    /// The counts; read without a lock, so each is a moment's value.
+    /// The counts. Those of the send path are read in one hold of its lock, so they belong to one moment; whether a
+    /// read buffer is held is read without a lock.
     /// </returns>
-    internal ConnectionCounts GetCounts() =>
-        new(IncomingRecords: 0, DeliveryRecords: 0, WaitingDeliveries: 0, WaitingControlPackets: 0,
-            OutgoingBytes: 0, IsWriting: false, HoldsReadBuffer: _readBuffer.IsHeld);
+    internal ConnectionCounts GetCounts()
+    {
+        lock (_sendLock)
+        {
+            return new ConnectionCounts(IncomingRecords: 0, DeliveryRecords: 0, WaitingDeliveries: _waiting?.Count ?? 0,
+                WaitingControlPackets: _control.PacketCount, OutgoingBytes: _outgoingBytes, IsWriting: _writing,
+                HoldsReadBuffer: _readBuffer.IsHeld);
+        }
+    }
 }

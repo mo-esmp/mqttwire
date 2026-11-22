@@ -21,6 +21,13 @@ internal sealed class ServerHarness
     private static readonly TimeSpan s_sweepStep = ServerLimits.SweepInterval;
 
     /// <summary>
+    /// The most buffers one connection has out of the pool at a moment: its read buffer, the buffer of the write in
+    /// progress, the control buffer of the packets that wait, and the buffer an answer is encoded into before it is
+    /// written or copied behind them (or, while a SUBSCRIBE of more than 256 filters is handled, its reason codes).
+    /// </summary>
+    private const int MaxBuffersPerConnection = 4;
+
+    /// <summary>
     /// Creates the harness around a started server.
     /// </summary>
     /// <param name="server">
@@ -183,8 +190,10 @@ internal sealed class ServerHarness
     /// <summary>
     /// Asserts what must hold at any moment (design 6.13 item 5): no buffer was returned twice or returned that
     /// was not rented, no rent was larger than the largest buffer the server needs (64 KiB, or a whole PUBLISH of the
-    /// first band: the payload limit, its 5 KiB of room and a fixed header of at most 5 bytes), and every connection's
-    /// counts are within the limits of <see cref="ServerLimits"/> and the options.
+    /// first band: the payload limit, its 5 KiB of room and a fixed header of at most 5 bytes), every connection's
+    /// counts are within the limits of <see cref="ServerLimits"/> and the options (the waiting deliveries, the
+    /// waiting control packets and the bytes on the way out), and the buffers out of the pool are no more than
+    /// <see cref="MaxBuffersPerConnection"/> for each connection that has a slot: one that has ended holds none.
     /// </summary>
     public void AssertBounds()
     {
@@ -192,6 +201,7 @@ internal sealed class ServerHarness
         MqttWireServerOptions options = Server.Options;
         Pool.LargestRent.ShouldBeLessThanOrEqualTo(Math.Max(ServerLimits.MaxEncodingBufferBytes,
             options.MaxPublishPayloadBytes + ServerLimits.PublishOverheadBytes + 5));
+        int connections = 0;
         foreach (MqttWireConnection? connection in Server.Registry.Slots)
         {
             if (connection is null)
@@ -199,11 +209,15 @@ internal sealed class ServerHarness
                 continue;
             }
 
+            connections++;
             ConnectionCounts counts = connection.GetCounts();
             counts.IncomingRecords.ShouldBeLessThanOrEqualTo(ServerLimits.ReceiveMaximum);
             counts.WaitingControlPackets.ShouldBeLessThanOrEqualTo(ServerLimits.MaxWaitingControlPackets);
             counts.WaitingDeliveries.ShouldBeLessThanOrEqualTo(options.MaxOutgoingMessages);
             counts.OutgoingBytes.ShouldBeLessThanOrEqualTo(options.MaxOutgoingBytes);
+            counts.OutgoingBytes.ShouldBeGreaterThanOrEqualTo(0);
         }
+
+        Pool.Outstanding.ShouldBeLessThanOrEqualTo(MaxBuffersPerConnection * connections);
     }
 }

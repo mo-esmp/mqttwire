@@ -281,6 +281,19 @@ internal static class ServerPackets
     }
 
     /// <summary>
+    /// Builds the PUBLISH the server writes for a message a host sends to topic "a/b" at QoS 0: no properties, neither
+    /// DUP nor retain. For the payload "hi" it is <c>ClientPackets.PublishQoS0</c>.
+    /// </summary>
+    /// <param name="payload">
+    /// The payload.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes, fixed header included.
+    /// </returns>
+    public static byte[] Delivery(ReadOnlySpan<byte> payload) =>
+        BuildPublish(MqttQoS.AtMostOnce, "a/b"u8, packetIdentifier: 0, properties: [], payload);
+
+    /// <summary>
     /// Builds an MQTT 5 SUBSCRIBE from its parts. The bytes are put together as given, so they may be ones the codec
     /// refuses.
     /// </summary>
