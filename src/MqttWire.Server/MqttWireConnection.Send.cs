@@ -165,10 +165,12 @@ public sealed partial class MqttWireConnection
     /// <summary>
     /// Takes a message for the client or refuses it, and returns at once (design 6.6): a connection that is not
     /// Active refuses it; a message too large for the client or for <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>
-    /// is refused and closes the connection with 0x95; with nothing in progress and nothing waiting the message is
-    /// written now, by this caller; otherwise it waits behind the write in progress, unless one more would pass
-    /// <see cref="MqttWireServerOptions.MaxOutgoingMessages"/> or <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>,
-    /// which evicts the connection with 0x97. Allocates nothing unless a write does not complete at once.
+    /// is refused and closes the connection with 0x95; with nothing in progress, nothing waiting and, at QoS 1 or 2,
+    /// room in the client's window, the message is written now, by this caller, a QoS 1 or 2 one with its packet
+    /// identifier and exchange record taken in the same hold; otherwise it waits behind the write in progress or for
+    /// the window, unless one more would pass <see cref="MqttWireServerOptions.MaxOutgoingMessages"/> or
+    /// <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>, which evicts the connection with 0x97. Allocates nothing
+    /// unless a write does not complete at once.
     /// </summary>
     /// <param name="topic">
     /// The topic, not the default value.
@@ -189,6 +191,8 @@ public sealed partial class MqttWireConnection
         int payloadLength = payload.Length;
         bool tooLarge = payloadLength > options.MaxOutgoingBytes || payloadLength > MaxDeliveryPayloadBytes
             || GetDeliverySize(topic, payloadLength, qos) > _clientMaxPacketSize;
+        long now = qos == MqttQoS.AtMostOnce ? 0 : _server.Time.GetTimestamp();
+        ushort packetIdentifier = 0;
         MqttSendResult result;
         lock (_sendLock)
         {
@@ -201,12 +205,13 @@ public sealed partial class MqttWireConnection
             {
                 result = MqttSendResult.TooLarge;
             }
-            else if (!_writing && _waiting is null)
+            else if (!_writing && _waiting is null && HasWindowRoom(qos))
             {
-                // Nothing in progress and nothing waiting: this caller takes the send path and writes the message.
+                // This caller writes the message; its record is in place before its packet is handed to the link.
                 _writing = true;
                 _writingBytes = payloadLength;
                 _outgoingBytes += payloadLength;
+                packetIdentifier = TakeDeliveryRecord(qos, now);
                 result = MqttSendResult.Taken;
             }
             else if ((_waiting?.Count ?? 0) >= options.MaxOutgoingMessages
@@ -234,7 +239,8 @@ public sealed partial class MqttWireConnection
         }
         else
         {
-            ReadOnlyMemory<byte> piece = EncodeDelivery(new PendingDelivery(topic, payload, qos), out byte[] buffer);
+            ReadOnlyMemory<byte> piece = EncodeDelivery(new PendingDelivery(topic, payload, qos), packetIdentifier,
+                out byte[] buffer);
             StartSending(piece, buffer, InlineWrites);
         }
 
@@ -276,18 +282,23 @@ public sealed partial class MqttWireConnection
     /// <param name="delivery">
     /// The delivery, which <see cref="TakeDelivery"/> found small enough to send.
     /// </param>
+    /// <param name="packetIdentifier">
+    /// The packet identifier its exchange record took, at QoS 1 and 2; 0 at QoS 0. DUP is never set: nothing is sent
+    /// a second time inside a connection.
+    /// </param>
     /// <param name="buffer">
     /// The rented buffer that holds the piece; the completion of its write returns it.
     /// </param>
     /// <returns>
     /// The first piece to write: the whole packet, or its header.
     /// </returns>
-    private ReadOnlyMemory<byte> EncodeDelivery(in PendingDelivery delivery, out byte[] buffer)
+    private ReadOnlyMemory<byte> EncodeDelivery(in PendingDelivery delivery, ushort packetIdentifier,
+        out byte[] buffer)
     {
-        // Task 10: a delivery whose QoS is 1 or 2 branches here. It takes its packet identifier, with its exchange
-        // record in place before the packet is handed to the link, and is encoded at its own QoS. Until then every
-        // delivery is written at QoS 0, whatever its QoS says.
-        PublishFields fields = new() { Topic = delivery.Topic.Utf8, QoS = MqttQoS.AtMostOnce };
+        PublishFields fields = new()
+        {
+            Topic = delivery.Topic.Utf8, QoS = delivery.QoS, PacketIdentifier = packetIdentifier,
+        };
         int payloadLength = delivery.Payload.Length;
         int size = PublishCodec.GetSize(fields, payloadLength);
         if (size <= ServerLimits.CopyThresholdBytes)
@@ -642,8 +653,8 @@ public sealed partial class MqttWireConnection
 
         while (true)
         {
-            SendStep step = TakeNextStep(failed, out PendingDelivery delivery, out piece, out buffer,
-                out WebSocketCloseStatus closeStatus);
+            SendStep step = TakeNextStep(failed, out PendingDelivery delivery, out ushort packetIdentifier, out piece,
+                out buffer, out WebSocketCloseStatus closeStatus);
             switch (step)
             {
                 case SendStep.Idle:
@@ -653,7 +664,7 @@ public sealed partial class MqttWireConnection
                     return true;
 
                 case SendStep.Deliver:
-                    piece = EncodeDelivery(delivery, out byte[] encoded);
+                    piece = EncodeDelivery(delivery, packetIdentifier, out byte[] encoded);
                     buffer = encoded;
                     return true;
 
@@ -708,7 +719,8 @@ public sealed partial class MqttWireConnection
     /// set. A connection that is Closing drops what waits, is handed its WebSocket close when it has one to send and
     /// the last write did not fail, and otherwise goes idle (<see cref="TakeClosingStep"/>). One that is not takes,
     /// in this order: the next piece of the payload being written, the waiting control packets as one piece, the
-    /// first waiting delivery; with none of them, it goes idle (<see cref="TakeOpenStep"/>). What was dropped goes
+    /// first waiting delivery when it has room in the client's window; with none of them, it goes idle
+    /// (<see cref="TakeOpenStep"/>), with deliveries still waiting when the first has no room. What was dropped goes
     /// back once the lock is released: the queue of deliveries to the server's pool, the control buffer to the buffer
     /// pool, the exchange records to theirs; and whoever waits for the send path to be idle is told then. This is the
     /// one place where the end of a connection drops what it holds on the way out, the exchange records included:
@@ -719,6 +731,10 @@ public sealed partial class MqttWireConnection
     /// </param>
     /// <param name="delivery">
     /// The delivery taken when the result is <see cref="SendStep.Deliver"/>.
+    /// </param>
+    /// <param name="packetIdentifier">
+    /// The packet identifier the delivery's exchange record took when the result is <see cref="SendStep.Deliver"/>
+    /// and its QoS is 1 or 2; otherwise 0.
     /// </param>
     /// <param name="piece">
     /// The piece to write when the result is <see cref="SendStep.Write"/>.
@@ -733,10 +749,11 @@ public sealed partial class MqttWireConnection
     /// <returns>
     /// What the caller does next; <see cref="SendStep.Idle"/> when it no longer holds the send path.
     /// </returns>
-    private SendStep TakeNextStep(bool failed, out PendingDelivery delivery, out ReadOnlyMemory<byte> piece,
-        out byte[]? buffer, out WebSocketCloseStatus closeStatus)
+    private SendStep TakeNextStep(bool failed, out PendingDelivery delivery, out ushort packetIdentifier,
+        out ReadOnlyMemory<byte> piece, out byte[]? buffer, out WebSocketCloseStatus closeStatus)
     {
         delivery = default;
+        packetIdentifier = 0;
         piece = default;
         buffer = null;
         closeStatus = default;
@@ -745,6 +762,9 @@ public sealed partial class MqttWireConnection
         ExchangeRecords? records = null;
         TaskCompletionSource? idle = null;
         SendStep step;
+
+        // Read before the hold, for the record of a delivery taken in it: the clock is not called under the lock.
+        long now = _server.Time.GetTimestamp();
         lock (_sendLock)
         {
             if (_state >= ConnectionState.Closing)
@@ -760,7 +780,7 @@ public sealed partial class MqttWireConnection
             }
             else
             {
-                step = TakeOpenStep(out delivery, out piece, out buffer, out emptied);
+                step = TakeOpenStep(now, out delivery, out packetIdentifier, out piece, out buffer, out emptied);
             }
         }
 
@@ -825,11 +845,21 @@ public sealed partial class MqttWireConnection
     /// order: the next piece of the large payload being written, of at most
     /// <see cref="ServerLimits.MaxEncodingBufferBytes"/>, because the pieces of one PUBLISH follow each other; then,
     /// the delivery in progress being written whole and no longer counted, the waiting control packets, all of them
-    /// as one piece, which so never wait behind a delivery; then the first waiting delivery, whose queue goes back to
-    /// the pool when it was the last; and with none of them the send path is given up.
+    /// as one piece, which so never wait behind a delivery; then the first waiting delivery when it has room in the
+    /// client's window, taking its packet identifier and record in this hold, its queue going back to the pool when it
+    /// was the last; and with none of them the send path is given up. When the first waiting delivery has no room,
+    /// the path is given up with the deliveries still waiting, every one of them behind it whatever its QoS: this is
+    /// the one case in which deliveries wait while nothing is being written, and the removal of a delivery record by
+    /// the read path, which frees a place, takes the send path again (<see cref="EndDeliveryAt"/>).
     /// </summary>
+    /// <param name="now">
+    /// The time, a timestamp of the server's clock, for the record of a delivery taken.
+    /// </param>
     /// <param name="delivery">
     /// The delivery taken when the result is <see cref="SendStep.Deliver"/>.
+    /// </param>
+    /// <param name="packetIdentifier">
+    /// The packet identifier of the delivery taken, at QoS 1 and 2; otherwise 0.
     /// </param>
     /// <param name="piece">
     /// The piece to write when the result is <see cref="SendStep.Write"/>.
@@ -844,11 +874,12 @@ public sealed partial class MqttWireConnection
     /// <returns>
     /// <see cref="SendStep.Write"/>, <see cref="SendStep.Deliver"/> or <see cref="SendStep.Idle"/>.
     /// </returns>
-    private SendStep TakeOpenStep(out PendingDelivery delivery, out ReadOnlyMemory<byte> piece, out byte[]? buffer,
-        out WaitingDeliveries? emptied)
+    private SendStep TakeOpenStep(long now, out PendingDelivery delivery, out ushort packetIdentifier,
+        out ReadOnlyMemory<byte> piece, out byte[]? buffer, out WaitingDeliveries? emptied)
     {
         Debug.Assert(_sendLock.IsHeldByCurrentThread, "The caller holds the send path's lock.");
         delivery = default;
+        packetIdentifier = 0;
         piece = default;
         buffer = null;
         emptied = null;
@@ -871,16 +902,15 @@ public sealed partial class MqttWireConnection
             return SendStep.Write;
         }
 
-        if (_waiting is not { } waiting)
+        if (_waiting is not { } waiting || !HasWindowRoom(waiting.Peek().QoS))
         {
             _writing = false;
             return SendStep.Idle;
         }
 
-        // Task 10: the first waiting delivery is taken only when its QoS has room in the client's window. When it
-        // has none, the send path is given up with the deliveries still waiting.
         delivery = waiting.Peek();
         waiting.Dequeue();
+        packetIdentifier = TakeDeliveryRecord(delivery.QoS, now);
         _writingBytes = delivery.Payload.Length;
         if (waiting.Count == 0)
         {

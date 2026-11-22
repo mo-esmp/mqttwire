@@ -519,9 +519,10 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Refuses a publish too large with 0x97 and "The message is too large." in the form its QoS calls for: a
-    /// PUBACK at QoS 1, a failing PUBREC at QoS 2, of which nothing is remembered, and nothing at QoS 0. At QoS 1
-    /// and 2 the publish counts against the receive maximum like any other: one that would pass it ends the connection
-    /// with 0x93 instead.
+    /// PUBACK at QoS 1, a failing PUBREC at QoS 2, of which nothing is remembered, and nothing at QoS 0. A QoS 2
+    /// publish whose identifier is remembered is a repeat, answered like any other with PUBREC success and nothing
+    /// else. At QoS 1 and 2 the publish counts against the receive maximum like any other: one that would pass it
+    /// ends the connection with 0x93 instead.
     /// </summary>
     /// <param name="qos">
     /// The QoS of the publish.
@@ -534,12 +535,18 @@ public sealed partial class MqttWireConnection
     /// </returns>
     private bool RefuseTooLarge(MqttQoS qos, ushort packetIdentifier)
     {
-        if (qos != MqttQoS.AtMostOnce && !TryTakeReceivePlace(qos, packetIdentifier, out _))
+        bool remembered = false;
+        if (qos != MqttQoS.AtMostOnce && !TryTakeReceivePlace(qos, packetIdentifier, out remembered))
         {
             return false;
         }
 
-        if (qos == MqttQoS.AtLeastOnce)
+        if (remembered)
+        {
+            // A repeat of a remembered identifier, like any other (design 6.6, QoS 2 item 2): the host has had it.
+            SendAck(PacketType.PubRec, packetIdentifier, MqttReasonCode.Success, reasonString: null);
+        }
+        else if (qos == MqttQoS.AtLeastOnce)
         {
             SendAck(PacketType.PubAck, packetIdentifier, MqttReasonCode.QuotaExceeded, MessageTooLarge);
         }

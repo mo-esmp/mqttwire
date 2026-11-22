@@ -102,6 +102,37 @@ public sealed class PublishBandTests
     }
 
     /// <summary>
+    /// Proves that a QoS 2 publish over the limit whose identifier is remembered is answered like any other repeat of
+    /// a remembered identifier (design 6.6, "Publishes from the client at QoS 2", item 2): PUBREC success, without
+    /// the host and without the refusal, and the identifier stays remembered.
+    /// </summary>
+    /// <param name="remainingLength">
+    /// The Remaining Length of the repeat: in the band read whole, or in the band skipped.
+    /// </param>
+    [Theory]
+    [InlineData(Limit + 100)]
+    [InlineData(SkipBandEnd)]
+    public void Publish_PayloadOverTheLimitAtQoS2WithARememberedIdentifier_AnswersPubRecSuccess(int remainingLength)
+    {
+        // Arrange
+        ServerHarness harness = CreateHarness();
+        TestConnection connection = harness.Connect();
+        connection.Deliver(ClientPackets.PublishQoS2);
+        connection.TakeWritten().ShouldBe(ClientPackets.PubRec1);
+
+        // Act
+        connection.Deliver(ServerPackets.BuildPublishOfLength(MqttQoS.ExactlyOnce, remainingLength));
+        byte[] answer = connection.TakeWritten();
+        connection.Deliver(ClientPackets.PubRel1);
+
+        // Assert
+        answer.ShouldBe(ClientPackets.PubRec1);
+        PublishCalls(harness).ShouldBe(["OnPublish c1 a/b hi q2 retain=0"]);
+        connection.TakeWritten().ShouldBe(ClientPackets.PubComp1);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves that a topic of 5,000 bytes with a small payload is read whole in the first band and reaches the host.
     /// </summary>
     /// <param name="qos">

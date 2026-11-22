@@ -1,11 +1,11 @@
 ﻿namespace MqttWire.Server.Internal;
 
 /// <summary>
-/// The deliveries of one connection that wait behind a write in progress, oldest first: a ring of
-/// <see cref="PendingDelivery"/>. A connection takes one from the server's pool with its first waiting delivery and
-/// gives it back with the last (plan decision 12), so an idle connection holds none. It is not thread-safe: the
-/// connection's lock guards it. The ring grows by doubling and keeps its storage while it is pooled; how many
-/// deliveries may wait is the connection's limit, not this type's.
+/// The deliveries of one connection that wait behind a write in progress or for room in the client's window, oldest
+/// first: a ring of <see cref="PendingDelivery"/>. A connection takes one from the server's pool with its first
+/// waiting delivery and gives it back with the last (plan decision 12), so an idle connection holds none. It is not
+/// thread-safe: the connection's lock guards it. The ring grows by doubling and keeps its storage while it is
+/// pooled; how many deliveries may wait is the connection's limit, not this type's.
 /// </summary>
 internal sealed class WaitingDeliveries
 {

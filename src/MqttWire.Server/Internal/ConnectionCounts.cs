@@ -19,7 +19,7 @@ namespace MqttWire.Server.Internal;
 /// Whether the connection holds an exchange records object from the server's pool.
 /// </param>
 /// <param name="WaitingDeliveries">
-/// The deliveries that wait behind the write in progress.
+/// The deliveries that wait behind the write in progress or for room in the client's window.
 /// </param>
 /// <param name="WaitingControlPackets">
 /// The control packets that wait behind the write in progress.

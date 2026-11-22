@@ -65,6 +65,12 @@ internal static class ServerPackets
         Hex.Parse("10 12 00 04 4D 51 54 54 05 02 00 1E 03 21 00 01 00 02 63 31");
 
     /// <summary>
+    /// CONNECT with client id "c1", keep-alive 30 and Receive Maximum 2.
+    /// </summary>
+    public static readonly byte[] ConnectReceiveMaximum2 =
+        Hex.Parse("10 12 00 04 4D 51 54 54 05 02 00 1E 03 21 00 02 00 02 63 31");
+
+    /// <summary>
     /// CONNECT with client id "c1", keep-alive 30 and Maximum Packet Size 4,096.
     /// </summary>
     public static readonly byte[] ConnectMaxPacketSize4096 =
@@ -294,6 +300,70 @@ internal static class ServerPackets
         BuildPublish(MqttQoS.AtMostOnce, "a/b"u8, packetIdentifier: 0, properties: [], payload);
 
     /// <summary>
+    /// Builds the PUBLISH the server writes for a message a host sends to topic "a/b" at a QoS, with the packet
+    /// identifier the server gave it: no properties, neither DUP nor retain. At QoS 1, identifier 1 and the payload
+    /// "hi" it is <c>ClientPackets.PublishQoS1</c>.
+    /// </summary>
+    /// <param name="qos">
+    /// The QoS.
+    /// </param>
+    /// <param name="packetIdentifier">
+    /// The packet identifier, written at QoS 1 and 2 only.
+    /// </param>
+    /// <param name="payload">
+    /// The payload.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes, fixed header included.
+    /// </returns>
+    public static byte[] Delivery(MqttQoS qos, ushort packetIdentifier, ReadOnlySpan<byte> payload) =>
+        BuildPublish(qos, "a/b"u8, packetIdentifier, properties: [], payload);
+
+    /// <summary>
+    /// Builds a PUBACK with success in the short form; for identifier 1 it is <c>ClientPackets.PubAck1</c>.
+    /// </summary>
+    /// <param name="packetIdentifier">
+    /// The packet identifier.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes.
+    /// </returns>
+    public static byte[] PubAck(ushort packetIdentifier) => ShortAck(0x40, packetIdentifier);
+
+    /// <summary>
+    /// Builds a PUBREC with success in the short form; for identifier 1 it is <c>ClientPackets.PubRec1</c>.
+    /// </summary>
+    /// <param name="packetIdentifier">
+    /// The packet identifier.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes.
+    /// </returns>
+    public static byte[] PubRec(ushort packetIdentifier) => ShortAck(0x50, packetIdentifier);
+
+    /// <summary>
+    /// Builds a PUBREL with success in the short form; for identifier 1 it is <c>ClientPackets.PubRel1</c>.
+    /// </summary>
+    /// <param name="packetIdentifier">
+    /// The packet identifier.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes.
+    /// </returns>
+    public static byte[] PubRel(ushort packetIdentifier) => ShortAck(0x62, packetIdentifier);
+
+    /// <summary>
+    /// Builds a PUBCOMP with success in the short form; for identifier 1 it is <c>ClientPackets.PubComp1</c>.
+    /// </summary>
+    /// <param name="packetIdentifier">
+    /// The packet identifier.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes.
+    /// </returns>
+    public static byte[] PubComp(ushort packetIdentifier) => ShortAck(0x70, packetIdentifier);
+
+    /// <summary>
     /// Builds an MQTT 5 SUBSCRIBE from its parts. The bytes are put together as given, so they may be ones the codec
     /// refuses.
     /// </summary>
@@ -409,6 +479,21 @@ internal static class ServerPackets
         firstByte, 0x20, (byte)(packetIdentifier >> 8), (byte)packetIdentifier, 0x97, 0x1C, 0x1F, 0x00, 0x19,
         .. "The message is too large."u8,
     ];
+
+    /// <summary>
+    /// Builds a PUBACK, PUBREC, PUBREL or PUBCOMP with success in the short form: the packet identifier alone.
+    /// </summary>
+    /// <param name="firstByte">
+    /// The packet's first byte: its type and flags.
+    /// </param>
+    /// <param name="packetIdentifier">
+    /// The packet identifier.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes.
+    /// </returns>
+    private static byte[] ShortAck(byte firstByte, ushort packetIdentifier) =>
+        [firstByte, 0x02, (byte)(packetIdentifier >> 8), (byte)packetIdentifier];
 
     /// <summary>
     /// Builds a packet whose variable header is a packet identifier and properties, followed by a payload.

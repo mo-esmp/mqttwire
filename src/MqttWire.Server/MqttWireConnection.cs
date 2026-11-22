@@ -90,9 +90,10 @@ public sealed partial class MqttWireConnection
     private bool _admitted;
 
     /// <summary>
-    /// The deliveries that wait behind the write in progress, in the order of the <see cref="TrySend"/> calls;
-    /// taken from the server's pool with the first one and given back with the last, so <see langword="null"/>
-    /// while none waits. Guarded by <see cref="_sendLock"/>.
+    /// The deliveries that wait behind the write in progress, or, the first of them at QoS 1 or 2, for room in the
+    /// client's window, in the order of the <see cref="TrySend"/> calls; taken from the server's pool with the first
+    /// one and given back with the last, so <see langword="null"/> while none waits. With no write in progress, they
+    /// wait only while the first has no room in the window. Guarded by <see cref="_sendLock"/>.
     /// </summary>
     private WaitingDeliveries? _waiting;
 
@@ -158,14 +159,11 @@ public sealed partial class MqttWireConnection
     /// </summary>
     private bool _writing;
 
-#pragma warning disable S4487 // Set by the connect phase now; read by the tasks that send deliveries and acknowledgements.
-
     /// <summary>
     /// How many QoS 1 and 2 deliveries may be unacknowledged at once: the client's Receive Maximum, at most 256;
     /// 256 when it sent none. Set by the connect phase.
     /// </summary>
     private int _clientWindow;
-#pragma warning restore S4487
 
     /// <summary>
     /// The client's Maximum Packet Size, in bytes; <see cref="int.MaxValue"/> when it sent none or a larger one, and
@@ -232,6 +230,12 @@ public sealed partial class MqttWireConnection
     internal int Slot { get; set; }
 
     /// <summary>
+    /// Gets how many QoS 1 and 2 deliveries may be unacknowledged at once, for the tests of the connection's bounds:
+    /// the client's Receive Maximum, at most 256; 0 until the connect phase has read the CONNECT.
+    /// </summary>
+    internal int ClientWindow => _clientWindow;
+
+    /// <summary>
     /// Hands a message for this connection to the server and returns at once; it never waits for the network.
     /// Safe to call from any thread. The topic and the payload are not copied: the caller must not change them
     /// afterwards, and one payload may be handed to any number of connections.
@@ -291,6 +295,25 @@ public sealed partial class MqttWireConnection
     {
         ReasonStrings.ThrowIfNotEncodable(reasonString: reasonString, paramName: nameof(reasonString));
         BeginClose(MqttCloseReason.ClosedByHost, reason, ReasonStrings.Cut(reasonString));
+    }
+
+    /// <summary>
+    /// Sets the packet identifier counter of the deliveries as if this identifier had been the last one handed out,
+    /// for the tests of the identifiers' wrap. Changes nothing while the connection holds no exchange record: the
+    /// counter starts at 1 with the first record.
+    /// </summary>
+    /// <param name="packetIdentifier">
+    /// The identifier taken as the last one handed out, from 1 to 65,535.
+    /// </param>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="packetIdentifier"/> is 0 (the test's bug); nothing changes.
+    /// </exception>
+    internal void SetLastDeliveryIdentifier(ushort packetIdentifier)
+    {
+        lock (_sendLock)
+        {
+            _records?.SetLastDeliveryIdentifier(packetIdentifier);
+        }
     }
 
     /// <summary>

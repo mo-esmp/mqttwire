@@ -717,7 +717,8 @@ when it entered this phase
    counts towards the outgoing limits, so a client that asks for QoS 1 or 2 and does not
    acknowledge is evicted by them, or by the acknowledgement deadline.
 4. A PUBACK, PUBREC or PUBCOMP for an identifier that has no record is ignored, except that an
-   unknown PUBREC is answered with a PUBREL carrying `0x92`.
+   unknown PUBREC is answered with a PUBREL carrying `0x92`, unless it carries a failure code
+   itself: a failed PUBREC ends its exchange, so no PUBREL may follow it (as in the client, 6.9).
 5. A delivery that MqttWire has taken is delivered even if the client unsubscribes meanwhile;
    MQTT allows that, and MqttWire does not know which subscription a delivery belongs to.
 

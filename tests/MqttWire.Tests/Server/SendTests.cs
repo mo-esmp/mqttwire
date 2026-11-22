@@ -446,7 +446,7 @@ public sealed class SendTests
     /// Proves that a message sent at QoS 2 to a server whose <see cref="MqttWireServerOptions.MaxQoS"/> is 1 goes
     /// out at QoS 1 (Review Focus 5).
     /// </summary>
-    [Fact(Skip = "Task 10")]
+    [Fact]
     public void TrySend_QoS2WithMaxQoS1_GoesOutAtQoS1()
     {
         // Arrange

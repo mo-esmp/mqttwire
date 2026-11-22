@@ -220,6 +220,22 @@ internal sealed class ExchangeRecords
     }
 
     /// <summary>
+    /// Sets the identifier counter as if this identifier had been the last one handed out, so that a test can reach
+    /// the wrap without handing out 65,000 identifiers. The records are not changed.
+    /// </summary>
+    /// <param name="packetIdentifier">
+    /// The identifier taken as the last one handed out, from 1 to 65,535.
+    /// </param>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="packetIdentifier"/> is 0 (a caller bug); nothing changes.
+    /// </exception>
+    public void SetLastDeliveryIdentifier(ushort packetIdentifier)
+    {
+        ArgumentOutOfRangeException.ThrowIfZero(packetIdentifier);
+        _nextIdentifier = Next(packetIdentifier);
+    }
+
+    /// <summary>
     /// Forgets every record and starts the identifier counter at 1 again; the arrays are kept.
     /// </summary>
     public void Clear()
