@@ -19,6 +19,18 @@ public sealed class MqttWireServer
     private ITimer? _sweepTimer;
 
     /// <summary>
+    /// <see langword="true"/> from the first call of <see cref="StopAsync"/>; set under
+    /// <see cref="ConnectionRegistry.Gate"/>, read with or without it.
+    /// </summary>
+    private volatile bool _isStopping;
+
+    /// <summary>
+    /// Completes when the stop has ended, or <see langword="null"/> before the first call of
+    /// <see cref="StopAsync"/>; set once, under <see cref="ConnectionRegistry.Gate"/>.
+    /// </summary>
+    private TaskCompletionSource? _stopped;
+
+    /// <summary>
     /// Creates the server; it enforces no deadline until <see cref="Start"/>.
     /// </summary>
     /// <param name="handler">
@@ -98,10 +110,13 @@ public sealed class MqttWireServer
     internal ServerPools Pools { get; }
 
     /// <summary>
-    /// Gets a value indicating whether the server is stopping, so the admission step lets no connection in. Read
-    /// under <see cref="ConnectionRegistry.Gate"/>; nothing sets it yet, the stop does.
+    /// Gets a value indicating whether the server is stopping: from the first call of <see cref="StopAsync"/> on, the
+    /// admission step lets no connection in, the connect phase refuses a CONNECT with <c>0x8B</c> before asking the
+    /// host, and the endpoint answers a new request with HTTP 503. It is set under
+    /// <see cref="ConnectionRegistry.Gate"/>, so an admission, which runs under the same lock, either precedes it or
+    /// sees it; read without the lock, it may be a moment late.
     /// </summary>
-    internal bool IsStopping { get; }
+    internal bool IsStopping => _isStopping;
 
     /// <summary>
     /// Gets <see cref="ServerLimits.ConnectDeadline"/> in units of <see cref="Time"/>'s timestamps.
@@ -160,7 +175,7 @@ public sealed class MqttWireServer
     /// <see cref="Time"/>.
     /// </summary>
     /// <exception cref="InvalidOperationException">
-    /// The server was already started; nothing changes.
+    /// The server was already started, or has been stopped; nothing changes.
     /// </exception>
     internal void Start()
     {
@@ -169,9 +184,81 @@ public sealed class MqttWireServer
             throw new InvalidOperationException("The server was already started.");
         }
 
+        if (_isStopping)
+        {
+            throw new InvalidOperationException("The server was stopped.");
+        }
+
         // The state is always this server, passed just below.
         _sweepTimer = Time.CreateTimer(static state => ((MqttWireServer)state!).Sweep(), this,
             ServerLimits.SweepInterval, ServerLimits.SweepInterval);
+    }
+
+    /// <summary>
+    /// Stops the server (design 6.6, "When the host stops"). It sets <see cref="IsStopping"/> under
+    /// <see cref="ConnectionRegistry.Gate"/>, so that no admission can follow; then ends every connection that has a
+    /// slot, each as its state calls for (see <see cref="MqttWireConnection.BeginStop"/>): an Active one is closed
+    /// with <c>0x8B</c>, an Accepted one is aborted, an Authenticating one has its host's token cancelled and is
+    /// answered with CONNACK <c>0x8B</c>, and a Closing one is left to its own close. A connection that takes a slot
+    /// after the walk finds <see cref="IsStopping"/> set and is refused when its CONNECT arrives, or aborted at the
+    /// connect deadline. The stop then waits until no slot is taken, which is after every
+    /// <see cref="IMqttWireHandler.OnClosed"/> has returned and every buffer is back; the sweep keeps running
+    /// meanwhile and aborts every link still open at its close deadline, so the wait is bounded and never on a peer.
+    /// Last, it disposes the sweep's timer: a sweep already running finishes harmlessly, and none starts afterwards.
+    /// It never blocks a thread: the walk runs on the calling thread, and the rest is a continuation of the wait.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the server has stopped; it does not fail. Every call returns the same task. A call
+    /// before <see cref="Start"/> completes at once, with <see cref="IsStopping"/> set.
+    /// </returns>
+    internal Task StopAsync()
+    {
+        TaskCompletionSource stopped;
+        lock (Registry.Gate)
+        {
+            if (_stopped is not null)
+            {
+                return _stopped.Task;
+            }
+
+            _isStopping = true;
+            _stopped = stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        if (_sweepTimer is null)
+        {
+            stopped.SetResult();
+            return stopped.Task;
+        }
+
+        MqttWireConnection?[] slots = Registry.Slots;
+        for (int i = 0; i < slots.Length; i++)
+        {
+            Volatile.Read(ref slots[i])?.BeginStop();
+        }
+
+        _ = CompleteStopAsync(_sweepTimer, stopped);
+        return stopped.Task;
+    }
+
+    /// <summary>
+    /// The end of the stop: waits until no connection holds a slot, then disposes the sweep's timer and completes the
+    /// stop's task.
+    /// </summary>
+    /// <param name="sweepTimer">
+    /// The sweep's timer.
+    /// </param>
+    /// <param name="stopped">
+    /// The stop's completion.
+    /// </param>
+    /// <returns>
+    /// A task that completes with the stop; it does not fail.
+    /// </returns>
+    private async Task CompleteStopAsync(ITimer sweepTimer, TaskCompletionSource stopped)
+    {
+        await Registry.WhenEmptyAsync().ConfigureAwait(false);
+        sweepTimer.Dispose();
+        stopped.SetResult();
     }
 
     /// <summary>

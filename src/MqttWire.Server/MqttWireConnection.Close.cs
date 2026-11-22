@@ -220,7 +220,7 @@ public sealed partial class MqttWireConnection
             long accepted = Volatile.Read(ref _stateEnteredAt);
             if (accepted != 0 && now - accepted >= _server.ConnectDeadlineLength)
             {
-                AbortAtConnectDeadline();
+                AbortFromAccepted(MqttCloseReason.ConnectionLost);
             }
         }
         else if (_state == ConnectionState.Authenticating)
@@ -261,22 +261,31 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Ends a connection that has sent no complete CONNECT by the connect deadline: moves it to Closing, only from
-    /// Accepted, and aborts the link. Nothing is handed to the link, and the send path is not touched: nothing was
-    /// ever written.
+    /// Ends a connection that has sent no complete CONNECT, at the connect deadline or when the server stops: moves
+    /// it to Closing, only from Accepted, and aborts the link. Nothing is handed to the link, and the send path is not
+    /// touched: nothing was ever written.
     /// </summary>
-    private void AbortAtConnectDeadline()
+    /// <param name="reason">
+    /// Why the connection ends; no <see cref="IMqttWireHandler.OnClosed"/> reports it, since the connection was
+    /// never admitted.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the connection was Accepted and is now Closing, its link aborted;
+    /// <see langword="false"/> when it had left Accepted, and nothing changed.
+    /// </returns>
+    private bool AbortFromAccepted(MqttCloseReason reason)
     {
         lock (_sendLock)
         {
-            if (!TryEnterClosingFrom(ConnectionState.Accepted, MqttCloseReason.ConnectionLost))
+            if (!TryEnterClosingFrom(ConnectionState.Accepted, reason))
             {
-                return;
+                return false;
             }
         }
 
         // The connection was never admitted, so no OnClosed reports the reason; the link failing is the end.
         _link?.Abort();
+        return true;
     }
 
     /// <summary>

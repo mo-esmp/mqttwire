@@ -233,9 +233,11 @@ public sealed partial class MqttWireConnection
     /// <summary>
     /// Moves the connection to Authenticating and asks the host's <see cref="IMqttWireHandler.OnConnectAsync"/>,
     /// with a token that fires at the authentication deadline or when the request is aborted. The cancellation
-    /// source exists only for this call. A refusal, a handler that throws, the deadline and an abort each begin
-    /// the close here: CONNACK with the host's code, <c>0x83</c>, <c>0x88</c>, and nothing, respectively. A host
-    /// task abandoned to the token is observed later and its outcome logged and discarded.
+    /// source exists only for this call. A refusal, a handler that throws, the deadline, the server's stop and an
+    /// abort each begin the close here: CONNACK with the host's code, <c>0x83</c>, <c>0x88</c>, <c>0x8B</c>, and
+    /// nothing, respectively. When the server is stopping already, which is the case of a connection that took its
+    /// slot after the stop's walk, the host is not asked: CONNACK <c>0x8B</c>. A host task abandoned to the token is
+    /// observed later and its outcome logged and discarded.
     /// </summary>
     /// <param name="request">
     /// The request for the host.
@@ -246,6 +248,11 @@ public sealed partial class MqttWireConnection
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<MqttConnectResult?> AuthenticateAsync(MqttConnectRequest request)
     {
+        if (RefuseIfStopping())
+        {
+            return null;
+        }
+
         CancellationTokenSource source = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
         CancellationToken token = source.Token;
         Volatile.Write(ref _authentication, source);
@@ -433,12 +440,14 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Ends a connection whose host did not answer before its token fired: CONNACK 0x88 and the close when the
-    /// authentication deadline passed; the close alone when the request was aborted, since no CONNACK can reach the
-    /// client then. A host task still running is observed later. What tells the two apart is the request's own
-    /// token: only the sweep and an abort cancel the linked source, and an abort cancels the request's token before
-    /// the linked one, so when the request's token is not cancelled here, the deadline fired. When the request is
-    /// aborted after the deadline fired but before this runs, the socket is gone and no CONNACK is written either.
+    /// Ends a connection whose host did not answer before its token fired. Three causes cancel the token, told apart
+    /// in this order: the request was aborted, and the close begins alone, since no CONNACK can reach the client;
+    /// the server is stopping, and the close begins with CONNACK 0x8B; otherwise the authentication deadline passed,
+    /// and the close begins with CONNACK 0x88. A host task still running is observed later. What tells an abort from
+    /// the other two is the request's own token: only the sweep, the stop and an abort cancel the linked source, and
+    /// an abort cancels the request's token before the linked one. When the request is aborted after the deadline
+    /// or the stop fired but before this runs, the socket is gone and no CONNACK is written either; when the stop
+    /// begins after the deadline fired but before this runs, the CONNACK carries 0x8B.
     /// </summary>
     /// <param name="pending">
     /// The host's task, or <see langword="null"/> when the host answered at once (with a cancellation).
@@ -456,8 +465,33 @@ public sealed partial class MqttWireConnection
             return;
         }
 
+        if (RefuseIfStopping())
+        {
+            return;
+        }
+
         ServerLog.AuthenticationTimedOut(_server.Logger, ClientId);
         BeginClose(MqttCloseReason.ConnectionLost, MqttReasonCode.ServerUnavailable, reasonString: null);
+    }
+
+    /// <summary>
+    /// Begins the close with CONNACK 0x8B when the server is stopping. Read after the connection took its slot, so a
+    /// stop whose walk missed the connection has set the flag by then; a stop that begins after this read finds the
+    /// connection Accepted or Authenticating, and ends it from there.
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> when the server is stopping and the close has begun; <see langword="false"/> when it
+    /// is not, and nothing changed.
+    /// </returns>
+    private bool RefuseIfStopping()
+    {
+        if (!_server.IsStopping)
+        {
+            return false;
+        }
+
+        BeginClose(MqttCloseReason.ServerStopping, MqttReasonCode.ServerShuttingDown, reasonString: null);
+        return true;
     }
 
     /// <summary>

@@ -1,0 +1,90 @@
+﻿using System.Buffers;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using MqttWire.Server.Internal;
+
+namespace MqttWire.Server;
+
+/// <summary>
+/// Registers the MQTT server with dependency injection.
+/// </summary>
+public static class MqttWireServiceCollectionExtensions
+{
+    /// <summary>
+    /// Registers the MQTT server: <typeparamref name="THandler"/> as the one <see cref="IMqttWireHandler"/>, the
+    /// options, checked when the host starts, one <see cref="MqttWireServer"/>, and the service that starts it with
+    /// the host and stops it, closing every connection, when the host stops. Map its endpoint with
+    /// <see cref="MqttWireEndpointRouteBuilderExtensions.MapMqttWire"/>.
+    /// </summary>
+    /// <typeparam name="THandler">
+    /// The host's handler, created once by dependency injection and called for every connection.
+    /// </typeparam>
+    /// <param name="services">
+    /// The service collection.
+    /// </param>
+    /// <param name="configure">
+    /// Changes the default options, or <see langword="null"/> to keep them. An invalid value makes the host's start
+    /// fail with <see cref="OptionsValidationException"/>.
+    /// </param>
+    /// <returns>
+    /// <paramref name="services"/>, for chaining.
+    /// </returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="services"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// The server was already registered on <paramref name="services"/>; nothing changes.
+    /// </exception>
+    public static IServiceCollection AddMqttWireServer<THandler>(
+        this IServiceCollection services, Action<MqttWireServerOptions>? configure = null)
+        where THandler : class, IMqttWireHandler
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        foreach (ServiceDescriptor descriptor in services)
+        {
+            if (descriptor.ServiceType == typeof(RegistrationMarker))
+            {
+                Type? registered = (descriptor.ImplementationInstance as RegistrationMarker)?.HandlerType;
+                throw new InvalidOperationException(
+                    $"AddMqttWireServer was already called on this service collection, with the handler {registered}.");
+            }
+        }
+
+        services.AddSingleton(new RegistrationMarker(typeof(THandler)));
+        services.AddSingleton<IMqttWireHandler, THandler>();
+        OptionsBuilder<MqttWireServerOptions> options = services.AddOptions<MqttWireServerOptions>();
+        if (configure is not null)
+        {
+            options.Configure(configure);
+        }
+
+        options.ValidateOnStart();
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IValidateOptions<MqttWireServerOptions>, MqttWireServerOptionsValidator>());
+        services.AddSingleton(static provider => new MqttWireServer(
+            provider.GetRequiredService<IMqttWireHandler>(),
+            provider.GetRequiredService<IOptions<MqttWireServerOptions>>().Value,
+            provider.GetRequiredService<ILogger<MqttWireServer>>(),
+            TimeProvider.System,
+            ArrayPool<byte>.Shared));
+        services.AddHostedService<MqttWireServerLifetime>();
+        return services;
+    }
+
+    /// <summary>
+    /// Marks a service collection on which <see cref="AddMqttWireServer{THandler}"/> was called, so that a second
+    /// call is detected whatever handler it names. Registered as an instance; never resolved.
+    /// </summary>
+    /// <param name="handlerType">
+    /// The handler the first call registered.
+    /// </param>
+    private sealed class RegistrationMarker(Type handlerType)
+    {
+        /// <summary>
+        /// Gets the handler the first call registered, named in the error of a second call.
+        /// </summary>
+        public Type HandlerType { get; } = handlerType;
+    }
+}

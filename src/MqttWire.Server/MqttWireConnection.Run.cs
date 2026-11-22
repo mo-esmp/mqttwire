@@ -14,7 +14,7 @@ public sealed partial class MqttWireConnection
     /// <summary>
     /// The WebSocket sub-protocol of MQTT.
     /// </summary>
-    private const string SubProtocol = "mqtt";
+    internal const string SubProtocol = "mqtt";
 
     /// <summary>
     /// Gets the link, for the code that runs after <see cref="RunAsync"/> has set it.
@@ -64,6 +64,48 @@ public sealed partial class MqttWireConnection
         finally
         {
             await FinishAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Ends the connection because the server is stopping (design 6.6, "When the host stops"), as its state calls
+    /// for: an Accepted one, which has sent nothing that could be answered, is aborted; an Authenticating one has its
+    /// host's token cancelled through the thread pool, as at the authentication deadline, so no host code runs on the
+    /// stopping thread, and its connect phase then answers CONNACK <c>0x8B</c> (see <see cref="RefuseUnanswered"/>);
+    /// an Active one begins its close with DISCONNECT <c>0x8B</c>; a Closing or Closed one is left as it is. A
+    /// connection that moves on while this looks at it is looked at again in its new state. An Authenticating
+    /// connection whose host has answered already is refused by the admission step, which sees the server stopping.
+    /// Called by <see cref="MqttWireServer.StopAsync"/>, after <see cref="MqttWireServer.IsStopping"/> was set; safe
+    /// from any thread, and never throws.
+    /// </summary>
+    internal void BeginStop()
+    {
+        while (true)
+        {
+            ConnectionState state = _state;
+            if (state == ConnectionState.Accepted)
+            {
+                if (AbortFromAccepted(MqttCloseReason.ServerStopping))
+                {
+                    return;
+                }
+
+                // The CONNECT came meanwhile, or another close began: look again.
+                continue;
+            }
+
+            if (state == ConnectionState.Authenticating)
+            {
+                // The source is in its field before the move to Authenticating; when it is gone, the host has
+                // answered and the admission step refuses.
+                CancelAuthentication();
+            }
+            else if (state == ConnectionState.Active)
+            {
+                BeginClose(MqttCloseReason.ServerStopping, MqttReasonCode.ServerShuttingDown, reasonString: null);
+            }
+
+            return;
         }
     }
 
