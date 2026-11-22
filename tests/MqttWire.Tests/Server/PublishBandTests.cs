@@ -23,6 +23,70 @@ public sealed class PublishBandTests
     private const int SkipBandEnd = 16 * Limit;
 
     /// <summary>
+    /// Where the bulk of a PUBLISH of the cut tests is.
+    /// </summary>
+    public enum PublishShape
+    {
+        /// <summary>
+        /// A short topic, no properties and a large payload.
+        /// </summary>
+        Plain,
+
+        /// <summary>
+        /// A large topic and a small payload.
+        /// </summary>
+        LargeTopic,
+
+        /// <summary>
+        /// A large user property and a small payload.
+        /// </summary>
+        LargeProperties,
+    }
+
+    /// <summary>
+    /// Gets every shape at every QoS.
+    /// </summary>
+    public static TheoryData<PublishShape, MqttQoS> ShapesAndQoS
+    {
+        get
+        {
+            TheoryData<PublishShape, MqttQoS> data = [];
+            foreach (PublishShape shape in Enum.GetValues<PublishShape>())
+            {
+                foreach (MqttQoS qos in Enum.GetValues<MqttQoS>())
+                {
+                    data.Add(shape, qos);
+                }
+            }
+
+            return data;
+        }
+    }
+
+    /// <summary>
+    /// Gets the first band and the skip band, each with every shape at every QoS.
+    /// </summary>
+    public static TheoryData<bool, PublishShape, MqttQoS> BandsShapesAndQoS
+    {
+        get
+        {
+            TheoryData<bool, PublishShape, MqttQoS> data = [];
+            foreach (bool skipBand in new[] { false, true })
+            {
+                foreach (PublishShape shape in Enum.GetValues<PublishShape>())
+                {
+                    foreach (MqttQoS qos in Enum.GetValues<MqttQoS>())
+                    {
+                        data.Add(skipBand, shape, qos);
+                    }
+                }
+            }
+
+            return data;
+        }
+    }
+
+    /// <summary>
     /// Proves that a payload of exactly the limit reaches the host and is answered in the form of its QoS.
     /// </summary>
     /// <param name="qos">
@@ -389,32 +453,34 @@ public sealed class PublishBandTests
 
     /// <summary>
     /// Proves that a PUBLISH of the first band or of the skip band gives the same result wherever it is cut in two,
-    /// and that the packet behind it, a PINGREQ, is answered. An accepted QoS 2 publish is released by a PUBREL behind
-    /// the PINGREQ, so that its identifier is new again for the next cut.
+    /// whether its bulk is its payload, a large topic or large properties, and that the packet behind it, a PINGREQ,
+    /// is answered. An accepted QoS 2 publish is released by a PUBREL behind the PINGREQ, so that its identifier is
+    /// new again for the next cut.
     /// </summary>
     /// <param name="skipBand">
-    /// <see langword="true"/> for a packet at the top of the skip band; <see langword="false"/> for one of the first
-    /// band with a payload at the limit.
+    /// <see langword="true"/> for a packet of the skip band; <see langword="false"/> for one of the first band.
+    /// </param>
+    /// <param name="shape">
+    /// Where the packet's bulk is.
     /// </param>
     /// <param name="qos">
     /// The QoS of the publish.
     /// </param>
     [Theory]
-    [InlineData(false, MqttQoS.AtMostOnce)]
-    [InlineData(false, MqttQoS.AtLeastOnce)]
-    [InlineData(false, MqttQoS.ExactlyOnce)]
-    [InlineData(true, MqttQoS.AtMostOnce)]
-    [InlineData(true, MqttQoS.AtLeastOnce)]
-    [InlineData(true, MqttQoS.ExactlyOnce)]
-    public void Publish_CutAtEveryPosition_GivesTheSameResult(bool skipBand, MqttQoS qos)
+    [MemberData(nameof(BandsShapesAndQoS))]
+    public void Publish_CutAtEveryPosition_GivesTheSameResult(bool skipBand, PublishShape shape, MqttQoS qos)
     {
         // Arrange
         ServerHarness harness = CreateHarness();
+        int publishes = 0;
+        harness.Handler.RecordsCalls = false;
+        harness.Handler.Publish = (MqttWireConnection _, in MqttPublish _) =>
+        {
+            publishes++;
+            return MqttPublishResult.Accepted;
+        };
         TestConnection connection = harness.Connect();
-        byte[] packet = skipBand
-            ? ServerPackets.BuildPublishOfLength(qos, SkipBandEnd)
-            : ServerPackets.BuildPublish(qos, "a/b"u8, packetIdentifier: 1, properties: [],
-                payload: ServerPackets.Letters('x', Limit));
+        byte[] packet = BuildPublish(skipBand ? 2 : 1, shape, qos);
         bool release = !skipBand && qos == MqttQoS.ExactlyOnce;
         byte[] behind = release ? [.. ClientPackets.PingReq, .. ClientPackets.PubRel1] : ClientPackets.PingReq;
         byte[] expected =
@@ -422,7 +488,7 @@ public sealed class PublishBandTests
             .. (skipBand ? Refusal(qos, packetIdentifier: 1) : Acceptance(qos)), .. ClientPackets.PingResp,
             .. (release ? ClientPackets.PubComp1 : []),
         ];
-        int publishes = 0;
+        int expectedPublishes = 0;
 
         // One connection for every cut: the packets of the two bands leave nothing remembered behind them once a
         // QoS 2 publish that was accepted has been released.
@@ -433,13 +499,70 @@ public sealed class PublishBandTests
             connection.Deliver([.. packet.AsSpan(cut), .. behind]);
 
             // Assert
-            publishes += skipBand ? 0 : 1;
+            expectedPublishes += skipBand ? 0 : 1;
             connection.TakeWritten().ShouldBe(expected, $"cut at {cut}");
-            PublishCalls(harness).Count.ShouldBe(publishes, $"cut at {cut}");
+            publishes.ShouldBe(expectedPublishes, $"cut at {cut}");
             harness.Pool.Outstanding.ShouldBe(0, $"cut at {cut}");
         }
 
         harness.Pool.LargestRent.ShouldBeLessThanOrEqualTo(skipBand ? 4_096 : 6_149);
+    }
+
+    /// <summary>
+    /// Proves that a PUBLISH above the skip band closes the connection with DISCONNECT 0x95 wherever it is cut in
+    /// two, whether its bulk is its payload, a large topic or large properties: the answer comes from its fixed
+    /// header, nothing of the packet is buffered, the host is not called, and what follows is thrown away.
+    /// </summary>
+    /// <param name="shape">
+    /// Where the packet's bulk is.
+    /// </param>
+    /// <param name="qos">
+    /// The QoS of the publish.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Theory]
+    [MemberData(nameof(ShapesAndQoS))]
+    public async Task Publish_AboveTheSkipBandCutAtEveryPosition_ClosesWith0x95(PublishShape shape, MqttQoS qos)
+    {
+        // Arrange
+        ServerHarness harness = CreateHarness();
+        int publishes = 0;
+        harness.Handler.RecordsCalls = false;
+        harness.Handler.Publish = (MqttWireConnection _, in MqttPublish _) =>
+        {
+            publishes++;
+            return MqttPublishResult.Accepted;
+        };
+        byte[] packet = BuildPublish(band: 3, shape, qos);
+        byte[] expected = ServerPackets.Disconnect(MqttReasonCode.PacketTooLarge);
+
+        // A connection for every cut: each one ends.
+        for (int cut = 1; cut < packet.Length; cut++)
+        {
+            TestConnection connection = harness.Connect($"c{cut}");
+
+            // Act
+            connection.Deliver(packet.AsSpan(0, cut));
+            connection.Deliver([.. packet.AsSpan(cut), .. ClientPackets.PingReq]);
+            byte[] written = connection.TakeWritten();
+            connection.Link.EndFromPeer();
+            await connection.RunEnded();
+
+            // Assert
+            if (!written.AsSpan().SequenceEqual(expected) || connection.Link.ClosedWith != WebSocketCloseStatus.NormalClosure)
+            {
+                written.ShouldBe(expected, $"cut at {cut}");
+                connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure, $"cut at {cut}");
+            }
+
+            harness.Handler.Forget();
+        }
+
+        publishes.ShouldBe(0);
+        harness.Pool.LargestRent.ShouldBeLessThanOrEqualTo(4_096);
+        harness.Pool.Outstanding.ShouldBe(0);
     }
 
     /// <summary>
@@ -574,6 +697,44 @@ public sealed class PublishBandTests
         // Assert
         connection.TakeWritten().ShouldBe(Hex.Parse("40 03 00 01 97"));
         PublishCalls(harness).ShouldBeEmpty();
+    }
+
+    /// <summary>
+    /// Builds a PUBLISH of one of the three bands whose bulk is where the shape says, with packet identifier 1.
+    /// </summary>
+    /// <param name="band">
+    /// 1 for a packet read whole, 2 for one that is skipped, 3 for one above the skip band.
+    /// </param>
+    /// <param name="shape">
+    /// Where the packet's bulk is.
+    /// </param>
+    /// <param name="qos">
+    /// The QoS of the publish.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes: with a plain shape, a payload at the limit, at the end of the skip band, or one byte
+    /// past it; with a large topic or large properties, 5,000, 8,000 or 17,000 bytes of them and the payload "hi".
+    /// </returns>
+    private static byte[] BuildPublish(int band, PublishShape shape, MqttQoS qos)
+    {
+        int bulk = band switch { 1 => 5_000, 2 => 8_000, _ => 17_000 };
+        return shape switch
+        {
+            PublishShape.LargeTopic => ServerPackets.BuildPublish(qos, ServerPackets.Letters('a', bulk),
+                packetIdentifier: 1, properties: [], payload: "hi"u8),
+
+            // Identifier 0x26, the name "k" and a value that brings the property to the bulk's size.
+            PublishShape.LargeProperties => ServerPackets.BuildPublish(qos, "a/b"u8, packetIdentifier: 1,
+                properties: [0x26, .. ServerPackets.Field("k"u8), .. ServerPackets.Field(ServerPackets.Letters('v', bulk - 6))],
+                payload: "hi"u8),
+            _ => band switch
+            {
+                1 => ServerPackets.BuildPublish(qos, "a/b"u8, packetIdentifier: 1, properties: [],
+                    payload: ServerPackets.Letters('x', Limit)),
+                2 => ServerPackets.BuildPublishOfLength(qos, SkipBandEnd),
+                _ => ServerPackets.BuildPublishOfLength(qos, SkipBandEnd + 1),
+            },
+        };
     }
 
     /// <summary>
