@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Http;
+﻿using Microsoft.AspNetCore.Http;
 using MqttWire.Link;
 using MqttWire.Server.Internal;
 
@@ -17,7 +17,7 @@ public sealed partial class MqttWireConnection
     /// <summary>
     /// The lock of the send path: it guards <see cref="_writing"/>, <see cref="_waiting"/>, <see cref="_control"/>,
     /// <see cref="_outgoingBytes"/>, <see cref="_writingBytes"/>, <see cref="_closeStatus"/>,
-    /// <see cref="_sendIdle"/> and <see cref="_records"/>, and every move to Closing is made under it. It is held for a few field updates and a
+    /// <see cref="_sendIdle"/>, <see cref="_records"/> and <see cref="_lastDeliveryIdentifier"/>, and every move to Closing is made under it. It is held for a few field updates and a
     /// copy of at most one control packet, never across a write, a close, an abort or a call of the host's handler,
     /// so a host may call <see cref="TrySend"/> and <see cref="Close"/> from inside its callbacks. It is taken inside
     /// the registry's lock (the admission step), never the other way round.
@@ -150,6 +150,14 @@ public sealed partial class MqttWireConnection
     /// its packet; 0 when there is none. Guarded by <see cref="_sendLock"/>.
     /// </summary>
     private ushort _closeStatus;
+
+    /// <summary>
+    /// The last packet identifier a delivery at QoS 1 or 2 was given, or 0 before the first (design 6.6, "Deliveries
+    /// at QoS 1 or 2", item 2): the counter is the connection's, not the pooled records', so it goes on from where it
+    /// was when the records go back to the pool with the last exchange, and an identifier whose exchange has just
+    /// ended is not handed out again at once. Guarded by <see cref="_sendLock"/>.
+    /// </summary>
+    private ushort _lastDeliveryIdentifier;
 
     /// <summary>
     /// Whether the send path is taken: a write or a close is with the link, or a caller is about to start one, or
@@ -299,8 +307,7 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Sets the packet identifier counter of the deliveries as if this identifier had been the last one handed out,
-    /// for the tests of the identifiers' wrap. Changes nothing while the connection holds no exchange record: the
-    /// counter starts at 1 with the first record.
+    /// for the tests of the identifiers' wrap.
     /// </summary>
     /// <param name="packetIdentifier">
     /// The identifier taken as the last one handed out, from 1 to 65,535.
@@ -310,9 +317,10 @@ public sealed partial class MqttWireConnection
     /// </exception>
     internal void SetLastDeliveryIdentifier(ushort packetIdentifier)
     {
+        ArgumentOutOfRangeException.ThrowIfZero(packetIdentifier);
         lock (_sendLock)
         {
-            _records?.SetLastDeliveryIdentifier(packetIdentifier);
+            _lastDeliveryIdentifier = packetIdentifier;
         }
     }
 

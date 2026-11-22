@@ -7,7 +7,8 @@
 /// takes one from the server's pool with its first exchange and gives it back with the last (plan decision 12), so
 /// an idle connection holds none. It is not thread-safe: the connection's lock guards it. The arrays grow by
 /// doubling and keep their storage while the object is pooled; a record holds no reference, so a cleared object
-/// keeps nothing alive.
+/// keeps nothing alive. The packet identifier counter of the deliveries is not here but the owner's, passed to
+/// <see cref="AddDelivery"/>, so that it outlives the pooled object and is never carried to another owner.
 /// </summary>
 internal sealed class ExchangeRecords
 {
@@ -30,11 +31,6 @@ internal sealed class ExchangeRecords
     /// The records of the server's deliveries, in no order; the first <see cref="DeliveryCount"/> are in use.
     /// </summary>
     private ExchangeRecord[] _deliveries = [];
-
-    /// <summary>
-    /// The identifier <see cref="AddDelivery"/> tries first: from 1 to 65,535.
-    /// </summary>
-    private ushort _nextIdentifier = 1;
 
     /// <summary>
     /// Gets the number of the client's QoS 2 publishes that wait for their PUBREL.
@@ -169,8 +165,8 @@ internal sealed class ExchangeRecords
     }
 
     /// <summary>
-    /// Adds the record of a delivery with the next free packet identifier: the counter goes from 1 to 65,535 and
-    /// wraps to 1, and skips the identifiers that have a delivery record.
+    /// Adds the record of a delivery with the next free packet identifier after the owner's last one: the counter
+    /// goes from 1 to 65,535 and wraps to 1, and skips the identifiers that have a delivery record.
     /// </summary>
     /// <param name="phase">
     /// The delivery's phase: <see cref="ExchangePhase.DeliveryAwaitingPubAck"/> or
@@ -179,6 +175,10 @@ internal sealed class ExchangeRecords
     /// <param name="now">
     /// The time, a timestamp of the server's clock.
     /// </param>
+    /// <param name="lastIdentifier">
+    /// The owner's counter: the last identifier it handed out, or 0 before the first, so that the first is 1. Set
+    /// to the identifier handed out; unchanged when this throws.
+    /// </param>
     /// <returns>
     /// The delivery's packet identifier.
     /// </returns>
@@ -186,16 +186,16 @@ internal sealed class ExchangeRecords
     /// <see cref="ServerLimits.ReceiveMaximum"/> records are held already (a caller bug: the client's window is full
     /// before that); nothing changes.
     /// </exception>
-    public ushort AddDelivery(ExchangePhase phase, long now)
+    public ushort AddDelivery(ExchangePhase phase, long now, ref ushort lastIdentifier)
     {
         _deliveries = Add(_deliveries, DeliveryCount);
-        ushort identifier = _nextIdentifier;
+        ushort identifier = Next(lastIdentifier);
         while (IndexOf(_deliveries, DeliveryCount, identifier) >= 0)
         {
             identifier = Next(identifier);
         }
 
-        _nextIdentifier = Next(identifier);
+        lastIdentifier = identifier;
         _deliveries[DeliveryCount++] = new ExchangeRecord
         {
             PacketIdentifier = identifier, Phase = phase, EnteredAt = now,
@@ -220,29 +220,12 @@ internal sealed class ExchangeRecords
     }
 
     /// <summary>
-    /// Sets the identifier counter as if this identifier had been the last one handed out, so that a test can reach
-    /// the wrap without handing out 65,000 identifiers. The records are not changed.
-    /// </summary>
-    /// <param name="packetIdentifier">
-    /// The identifier taken as the last one handed out, from 1 to 65,535.
-    /// </param>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="packetIdentifier"/> is 0 (a caller bug); nothing changes.
-    /// </exception>
-    public void SetLastDeliveryIdentifier(ushort packetIdentifier)
-    {
-        ArgumentOutOfRangeException.ThrowIfZero(packetIdentifier);
-        _nextIdentifier = Next(packetIdentifier);
-    }
-
-    /// <summary>
-    /// Forgets every record and starts the identifier counter at 1 again; the arrays are kept.
+    /// Forgets every record; the arrays are kept.
     /// </summary>
     public void Clear()
     {
         IncomingCount = 0;
         DeliveryCount = 0;
-        _nextIdentifier = 1;
     }
 
     /// <summary>
@@ -307,7 +290,7 @@ internal sealed class ExchangeRecords
     }
 
     /// <summary>
-    /// Gets the identifier after one: 1 to 65,535, wrapping to 1.
+    /// Gets the identifier after one: 1 to 65,535, wrapping to 1; after 0, which stands for none yet, 1.
     /// </summary>
     /// <param name="identifier">
     /// The identifier.

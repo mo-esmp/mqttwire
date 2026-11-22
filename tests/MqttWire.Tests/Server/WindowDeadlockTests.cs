@@ -8,8 +8,8 @@ namespace MqttWire.Tests.Server;
 /// The window deadlock, step by step (design 6.13 item 2, and 6.6, "Scheduling: control packets never wait behind a
 /// delivery"): with the client's Receive Maximum 1, delivery A at QoS 2 fills the window and delivery B waits for it;
 /// the PUBREL without which the client never sends the PUBCOMP that frees the window, and every other control
-/// packet, must not wait behind B. B takes packet identifier 1 again: A's was free, and the identifier counter starts
-/// again with the records, which went back to the pool with A's last record. The bounds are asserted after every
+/// packet, must not wait behind B. B takes packet identifier 2: the counter is the connection's, so A's identifier is
+/// not handed out again at once although A's records went back to the pool. The bounds are asserted after every
 /// step.
 /// </summary>
 public sealed class WindowDeadlockTests
@@ -60,9 +60,9 @@ public sealed class WindowDeadlockTests
         byte[] step4 = connection.TakeWritten();
 
         // 5: B's exchange ends, and the connection is idle.
-        connection.Deliver(ServerPackets.PubRec(1));
+        connection.Deliver(ServerPackets.PubRec(2));
         byte[] step5PubRel = connection.TakeWritten();
-        connection.Deliver(ServerPackets.PubComp(1));
+        connection.Deliver(ServerPackets.PubComp(2));
         byte[] step5End = connection.TakeWritten();
 
         // Assert
@@ -75,8 +75,8 @@ public sealed class WindowDeadlockTests
         afterStep2.IsWriting.ShouldBeFalse();
         step3.ShouldBe(ServerPackets.PubRel(1));
         afterStep3.WaitingDeliveries.ShouldBe(1);
-        step4.ShouldBe(ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 1, "B"u8));
-        step5PubRel.ShouldBe(ServerPackets.PubRel(1));
+        step4.ShouldBe(ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 2, "B"u8));
+        step5PubRel.ShouldBe(ServerPackets.PubRel(2));
         step5End.ShouldBeEmpty();
         server.GetCounts().ShouldBe(s_idle);
         harness.Pool.Outstanding.ShouldBe(0);
@@ -105,7 +105,7 @@ public sealed class WindowDeadlockTests
         afterThePing.WaitingDeliveries.ShouldBe(1);
         rest.ShouldBe([
             .. ServerPackets.PubRel(1),
-            .. ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 1, "B"u8),
+            .. ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 2, "B"u8),
         ]);
     }
 
@@ -134,7 +134,7 @@ public sealed class WindowDeadlockTests
         afterThePublish.WaitingDeliveries.ShouldBe(1);
         rest.ShouldBe([
             .. ServerPackets.PubRel(1),
-            .. ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 1, "B"u8),
+            .. ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 2, "B"u8),
         ]);
     }
 
@@ -174,7 +174,7 @@ public sealed class WindowDeadlockTests
         ]);
         afterTheRelease.WaitingDeliveries.ShouldBe(1);
         afterTheRelease.IsWriting.ShouldBeFalse();
-        connection.TakeWritten().ShouldBe(ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 1, "B"u8));
+        connection.TakeWritten().ShouldBe(ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 2, "B"u8));
         harness.AssertBounds();
     }
 

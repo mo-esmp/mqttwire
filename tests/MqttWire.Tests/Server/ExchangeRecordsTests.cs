@@ -63,24 +63,26 @@ public sealed class ExchangeRecordsTests
     }
 
     /// <summary>
-    /// Proves that <see cref="ExchangeRecords.AddDelivery"/> hands out 1, 2, 3 in order, with the phase and the time
-    /// given, each found by its identifier.
+    /// Proves that <see cref="ExchangeRecords.AddDelivery"/> hands out 1, 2, 3 in order from a counter that starts at
+    /// 0, with the phase and the time given, each found by its identifier, and leaves the counter at the last one.
     /// </summary>
     [Fact]
     public void AddDelivery_FromEmpty_HandsOutOneTwoThree()
     {
         // Arrange
         ExchangeRecords records = new();
+        ushort last = 0;
 
         // Act
-        ushort first = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 10);
-        ushort second = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubRec, now: 20);
-        ushort third = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 30);
+        ushort first = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 10, ref last);
+        ushort second = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubRec, now: 20, ref last);
+        ushort third = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 30, ref last);
 
         // Assert
         first.ShouldBe((ushort)1);
         second.ShouldBe((ushort)2);
         third.ShouldBe((ushort)3);
+        last.ShouldBe((ushort)3);
         records.DeliveryCount.ShouldBe(3);
         records.TryFindDelivery(2, out int index).ShouldBeTrue();
         ExchangeRecord record = records.DeliveryAt(index);
@@ -98,25 +100,27 @@ public sealed class ExchangeRecordsTests
     {
         // Arrange
         ExchangeRecords records = new();
-        ushort kept1 = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 1);
-        ushort kept2 = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 1);
+        ushort last = 0;
+        ushort kept1 = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 1, ref last);
+        ushort kept2 = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 1, ref last);
 
         // Hand out and remove every identifier up to 65,535, keeping 1 and 2.
         for (int i = 3; i <= ushort.MaxValue; i++)
         {
-            ushort identifier = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 1);
+            ushort identifier = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 1, ref last);
             identifier.ShouldBe((ushort)i);
             records.TryFindDelivery(identifier, out int index).ShouldBeTrue();
             records.RemoveDeliveryAt(index);
         }
 
         // Act
-        ushort wrapped = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 1);
+        ushort wrapped = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 1, ref last);
 
         // Assert
         kept1.ShouldBe((ushort)1);
         kept2.ShouldBe((ushort)2);
         wrapped.ShouldBe((ushort)3);
+        last.ShouldBe((ushort)3);
         records.DeliveryCount.ShouldBe(3);
     }
 
@@ -129,8 +133,9 @@ public sealed class ExchangeRecordsTests
     {
         // Arrange
         ExchangeRecords records = new();
-        records.AddDelivery(ExchangePhase.DeliveryAwaitingPubRec, now: 10);
-        records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 20);
+        ushort last = 0;
+        records.AddDelivery(ExchangePhase.DeliveryAwaitingPubRec, now: 10, ref last);
+        records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 20, ref last);
         records.TryFindDelivery(1, out int index).ShouldBeTrue();
 
         // Act
@@ -158,8 +163,9 @@ public sealed class ExchangeRecordsTests
         // Arrange
         ExchangeRecords records = new();
         long whenEmpty = records.OldestEnteredAt;
+        ushort last = 0;
         records.AddIncoming(packetIdentifier: 1, now: 300);
-        records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 200);
+        records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 200, ref last);
         records.AddIncoming(packetIdentifier: 2, now: 400);
 
         // Act
@@ -179,25 +185,26 @@ public sealed class ExchangeRecordsTests
     }
 
     /// <summary>
-    /// Proves that <see cref="ExchangeRecords.Clear"/> leaves the records empty, with the identifier counter back at
-    /// 1, and that the arrays take records again afterwards.
+    /// Proves that <see cref="ExchangeRecords.Clear"/> leaves the records empty, and that the arrays take records
+    /// again afterwards.
     /// </summary>
     [Fact]
     public void Clear_WithRecords_LeavesThemEmptyAndReusable()
     {
         // Arrange
         ExchangeRecords records = new();
+        ushort last = 0;
         for (int identifier = 1; identifier <= 40; identifier++)
         {
             records.AddIncoming((ushort)identifier, now: identifier);
-            records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: identifier);
+            records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: identifier, ref last);
         }
 
         // Act
         records.Clear();
         bool emptyAfterClear = records.IsEmpty;
         records.AddIncoming(packetIdentifier: 5, now: 9);
-        ushort delivery = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubRec, now: 8);
+        ushort delivery = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubRec, now: 8, ref last);
 
         // Assert
         emptyAfterClear.ShouldBeTrue();
@@ -205,7 +212,34 @@ public sealed class ExchangeRecordsTests
         records.DeliveryCount.ShouldBe(1);
         records.ContainsIncoming(5).ShouldBeTrue();
         records.ContainsIncoming(6).ShouldBeFalse();
-        delivery.ShouldBe((ushort)1);
+        delivery.ShouldBe((ushort)41);
         records.OldestEnteredAt.ShouldBe(8);
+    }
+
+    /// <summary>
+    /// Proves that the identifier counter is the owner's, not the pooled object's: one object used by two owners in
+    /// turn, cleared between them as the pool does, hands each owner the identifiers that follow its own last one.
+    /// </summary>
+    [Fact]
+    public void AddDelivery_OneObjectForTwoOwners_DoesNotShareTheCounter()
+    {
+        // Arrange
+        ExchangeRecords records = new();
+        ushort firstOwner = 0;
+        ushort secondOwner = 0;
+        records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 1, ref firstOwner);
+        records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 1, ref firstOwner);
+        records.Clear();
+
+        // Act
+        ushort secondOwnersFirst = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 2, ref secondOwner);
+        records.Clear();
+        ushort firstOwnersThird = records.AddDelivery(ExchangePhase.DeliveryAwaitingPubAck, now: 3, ref firstOwner);
+
+        // Assert
+        secondOwnersFirst.ShouldBe((ushort)1);
+        secondOwner.ShouldBe((ushort)1);
+        firstOwnersThird.ShouldBe((ushort)3);
+        firstOwner.ShouldBe((ushort)3);
     }
 }

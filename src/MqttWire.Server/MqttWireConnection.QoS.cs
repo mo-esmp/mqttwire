@@ -444,7 +444,7 @@ public sealed partial class MqttWireConnection
         ExchangePhase phase = qos == MqttQoS.AtLeastOnce
             ? ExchangePhase.DeliveryAwaitingPubAck
             : ExchangePhase.DeliveryAwaitingPubRec;
-        return records.AddDelivery(phase, now);
+        return records.AddDelivery(phase, now, ref _lastDeliveryIdentifier);
     }
 
     /// <summary>

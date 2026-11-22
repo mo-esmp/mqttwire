@@ -106,7 +106,7 @@ public sealed class DeliveryQoSTests
         // Assert
         afterTheFailure.ShouldBeEmpty();
         counts.ShouldBe(s_idle);
-        connection.TakeWritten().ShouldBe(ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 1, "b"u8));
+        connection.TakeWritten().ShouldBe(ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 2, "b"u8));
         connection.Run.IsCompleted.ShouldBeFalse();
     }
 
@@ -179,7 +179,7 @@ public sealed class DeliveryQoSTests
         beforeTheAck.ShouldBe(ServerPackets.Delivery(MqttQoS.AtLeastOnce, packetIdentifier: 1, "a"u8));
         waiting.WaitingDeliveries.ShouldBe(2);
         connection.TakeWritten().ShouldBe([
-            .. ServerPackets.Delivery(MqttQoS.AtLeastOnce, packetIdentifier: 1, "b"u8),
+            .. ServerPackets.Delivery(MqttQoS.AtLeastOnce, packetIdentifier: 2, "b"u8),
             .. ServerPackets.Delivery(MqttQoS.AtMostOnce, packetIdentifier: 0, "c"u8),
         ]);
         server.GetCounts().DeliveryRecords.ShouldBe(1);
@@ -569,13 +569,13 @@ public sealed class DeliveryQoSTests
 
         // Act
         connection.Deliver(ServerPackets.PubAck(1));
-        connection.Deliver(ServerPackets.PubRec(1));
-        connection.Deliver(ServerPackets.PubComp(1));
+        connection.Deliver(ServerPackets.PubRec(2));
+        connection.Deliver(ServerPackets.PubComp(2));
 
         // Assert
         connection.TakeWritten().ShouldBe([
-            .. ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 1, "b"u8),
-            .. ServerPackets.PubRel(1),
+            .. ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 2, "b"u8),
+            .. ServerPackets.PubRel(2),
         ]);
         server.GetCounts().ShouldBe(s_idle);
         harness.Pool.Outstanding.ShouldBe(0);
@@ -606,7 +606,84 @@ public sealed class DeliveryQoSTests
 
         // Assert
         unsubAck.ShouldBe(ServerPackets.UnsubAck);
-        connection.TakeWritten().ShouldBe(ServerPackets.Delivery(MqttQoS.AtLeastOnce, packetIdentifier: 1, "b"u8));
+        connection.TakeWritten().ShouldBe(ServerPackets.Delivery(MqttQoS.AtLeastOnce, packetIdentifier: 2, "b"u8));
+        connection.Run.IsCompleted.ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// Proves that the PUBCOMP a client sends for a repeated PUBREL is ignored, because the identifier of an exchange
+    /// that has just ended is not handed out again at once: with a window of one, B goes out with identifier 2, the
+    /// second PUBCOMP for 1 meets no record, the connection stays open, and B's exchange completes normally.
+    /// </summary>
+    [Fact]
+    public void PubComp_SecondForARepeatedPubRel_IsIgnoredBecauseItsIdentifierIsNotReused()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect(connect: ServerPackets.ConnectReceiveMaximum1);
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        server.TrySend(s_topic, "A"u8.ToArray(), MqttQoS.ExactlyOnce);
+        server.TrySend(s_topic, "B"u8.ToArray(), MqttQoS.ExactlyOnce);
+        harness.AssertBounds();
+        connection.TakeWritten().ShouldBe(ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 1, "A"u8));
+
+        // Act
+        connection.Deliver(ServerPackets.PubRec(1));
+        byte[] firstPubRel = connection.TakeWritten();
+        connection.Deliver(ServerPackets.PubRec(1));
+        byte[] secondPubRel = connection.TakeWritten();
+        connection.Deliver(ServerPackets.PubComp(1));
+        byte[] b = connection.TakeWritten();
+        connection.Deliver(ServerPackets.PubComp(1));
+        byte[] afterTheSecondPubComp = connection.TakeWritten();
+        ConnectionCounts bInFlight = server.GetCounts();
+        connection.Deliver(ServerPackets.PubRec(2));
+        byte[] bPubRel = connection.TakeWritten();
+        connection.Deliver(ServerPackets.PubComp(2));
+
+        // Assert
+        firstPubRel.ShouldBe(ServerPackets.PubRel(1));
+        secondPubRel.ShouldBe(ServerPackets.PubRel(1));
+        b.ShouldBe(ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 2, "B"u8));
+        afterTheSecondPubComp.ShouldBeEmpty();
+        bInFlight.DeliveryRecords.ShouldBe(1);
+        bPubRel.ShouldBe(ServerPackets.PubRel(2));
+        connection.TakeWritten().ShouldBeEmpty();
+        server.GetCounts().ShouldBe(s_idle);
+        connection.Run.IsCompleted.ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// Proves that a duplicate PUBACK for an identifier whose exchange has ended does not touch the next QoS 1
+    /// delivery: with a window of one, the next delivery has identifier 2, the duplicate PUBACK for 1 is ignored, and
+    /// the place stays taken, so a third delivery waits until the PUBACK for 2.
+    /// </summary>
+    [Fact]
+    public void PubAck_DuplicateAfterTheExchangeEnded_DoesNotTouchTheNextDelivery()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect(connect: ServerPackets.ConnectReceiveMaximum1);
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        server.TrySend(s_topic, "a"u8.ToArray(), MqttQoS.AtLeastOnce);
+        server.TrySend(s_topic, "b"u8.ToArray(), MqttQoS.AtLeastOnce);
+        connection.TakeWritten();
+        connection.Deliver(ServerPackets.PubAck(1));
+        connection.TakeWritten().ShouldBe(ServerPackets.Delivery(MqttQoS.AtLeastOnce, packetIdentifier: 2, "b"u8));
+
+        // Act
+        connection.Deliver(ServerPackets.PubAck(1));
+        server.TrySend(s_topic, "c"u8.ToArray(), MqttQoS.AtLeastOnce);
+        harness.AssertBounds();
+        byte[] afterTheDuplicate = connection.TakeWritten();
+        ConnectionCounts counts = server.GetCounts();
+        connection.Deliver(ServerPackets.PubAck(2));
+
+        // Assert
+        afterTheDuplicate.ShouldBeEmpty();
+        counts.DeliveryRecords.ShouldBe(1);
+        counts.WaitingDeliveries.ShouldBe(1);
+        connection.TakeWritten().ShouldBe(ServerPackets.Delivery(MqttQoS.AtLeastOnce, packetIdentifier: 3, "c"u8));
         connection.Run.IsCompleted.ShouldBeFalse();
     }
 }
