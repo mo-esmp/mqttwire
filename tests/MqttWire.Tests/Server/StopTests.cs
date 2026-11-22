@@ -1,9 +1,11 @@
 ﻿using System.Buffers;
 using System.Net.WebSockets;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Time.Testing;
 using MqttWire.Server;
 using MqttWire.Server.Internal;
 using MqttWire.Tests.Client;
+using MqttWire.Tests.Link;
 
 namespace MqttWire.Tests.Server;
 
@@ -566,22 +568,35 @@ public sealed class StopTests
 
     /// <summary>
     /// Proves that a stop called before the server was started completes at once, and that the server then lets no
-    /// connection in.
+    /// connection in: one that arrives afterwards is aborted at once, without a write or a handler call, and holds no
+    /// slot.
     /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
     [Fact]
-    public void StopAsync_BeforeStart_CompletesAtOnce()
+    public async Task StopAsync_BeforeStart_CompletesAtOnceAndLetsNoConnectionIn()
     {
         // Arrange
         FakeTimeProvider time = new();
-        MqttWireServer server = new(new RecordingHandler(), new MqttWireServerOptions(), new RecordingLogger(), time,
+        RecordingHandler handler = new();
+        MqttWireServer server = new(handler, new MqttWireServerOptions(), new RecordingLogger(), time,
             ArrayPool<byte>.Shared);
 
         // Act
         Task stop = server.StopAsync();
+        MemoryLink link = new();
+        Task run = server.RunConnectionAsync(new DefaultHttpContext(), link);
+        link.Deliver(ServerPackets.Connect);
+        await run.Within("The connection's run");
 
         // Assert
         stop.IsCompletedSuccessfully.ShouldBeTrue();
         server.IsStopping.ShouldBeTrue();
+        link.IsAborted.ShouldBeTrue();
+        link.TakeWritten().ShouldBeEmpty();
+        handler.CallsNow().ShouldBeEmpty();
+        server.Registry.Slots.ShouldAllBe(static slot => slot == null);
     }
 
     /// <summary>

@@ -194,28 +194,34 @@ public sealed class AcceptTests
     }
 
     /// <summary>
-    /// Proves that a connection whose run has ended holds no slot, so the sweep no longer visits it.
+    /// Proves that a connection holds a slot, which the sweep visits, from its accept until its run has ended, and
+    /// none afterwards, whether it ended before its CONNECT or after its admission.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
     /// </returns>
     [Fact]
-    public async Task Sweep_ConnectionEnded_NoLongerHoldsItsSlot()
+    public async Task RunAsync_ConnectionEnded_NoLongerHoldsItsSlot()
     {
         // Arrange
         ServerHarness harness = ServerHarness.Create();
         TestConnection first = harness.Accept();
         TestConnection second = harness.Accept();
-        first.Link.EndFromPeer();
         second.Deliver(ServerPackets.Connect);
-        second.Link.EndFromPeer();
-        await first.RunEnded();
-        await second.RunEnded();
+        int slotsWhileBothRun = harness.Server.Registry.Slots.Count(static slot => slot is not null);
+        int admittedWhileBothRun = harness.Server.ConnectionCount;
 
         // Act
-        harness.Advance(ServerLimits.SweepInterval);
+        first.Link.EndFromPeer();
+        await first.RunEnded();
+        int slotsAfterTheFirstEnded = harness.Server.Registry.Slots.Count(static slot => slot is not null);
+        second.Link.EndFromPeer();
+        await second.RunEnded();
 
         // Assert
+        slotsWhileBothRun.ShouldBe(2);
+        admittedWhileBothRun.ShouldBe(1);
+        slotsAfterTheFirstEnded.ShouldBe(1);
         harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
         harness.Server.ConnectionCount.ShouldBe(0);
     }
