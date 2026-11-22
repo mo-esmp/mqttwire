@@ -21,7 +21,8 @@ internal static class ServerLimits
     public static readonly TimeSpan AuthenticationDeadline = TimeSpan.FromSeconds(10);
 
     /// <summary>
-    /// How long a packet may stay incomplete once its first byte has been read.
+    /// How long a read buffer may be held without a complete packet: from its rent, or, for a packet that follows
+    /// another in the same read, from that read.
     /// </summary>
     public static readonly TimeSpan PartialPacketDeadline = TimeSpan.FromSeconds(10);
 
@@ -78,7 +79,9 @@ internal static class ServerLimits
     public const int MaxEncodingBufferBytes = 65_536;
 
     /// <summary>
-    /// The size up to which a message is copied into the outgoing queue rather than referenced, in bytes.
+    /// The size of a whole PUBLISH, in bytes, up to which a message's payload is copied behind its header into one
+    /// encoding buffer and written at once; a larger one is written from the host's memory, in pieces, after its
+    /// header.
     /// </summary>
     public const int CopyThresholdBytes = 16_384;
 
@@ -100,7 +103,8 @@ internal static class ServerLimits
     public const int SkipFactor = 16;
 
     /// <summary>
-    /// The smallest Maximum Packet Size of a client the server honours, in bytes; a smaller one is raised to it.
+    /// The smallest Maximum Packet Size a client may announce, in bytes; a CONNECT that announces a smaller one is
+    /// refused with CONNACK 0x95, so that every control packet the server sends fits.
     /// </summary>
     public const int MinClientMaximumPacketSize = 4_096;
 
@@ -120,12 +124,15 @@ internal static class ServerLimits
     public const int MaxClientIdBytes = 256;
 
     /// <summary>
-    /// The longest topic name or filter the server accepts, in bytes.
+    /// The longest topic a host may send to (<see cref="MqttTopic"/>), in UTF-8 bytes: 9 fewer than MQTT allows, so
+    /// that the header of every PUBLISH fits one buffer of <see cref="MaxEncodingBufferBytes"/>. What a client sends
+    /// is bounded by the packet limits instead.
     /// </summary>
     public const int MaxTopicBytes = 65_526;
 
     /// <summary>
-    /// The most idle pooled objects (connection state, records) the server keeps for reuse.
+    /// The most idle objects of each kind (queues of waiting deliveries, exchange records) the server's pools keep
+    /// for reuse.
     /// </summary>
     public const int MaxPooledObjects = 1_024;
 
