@@ -1,4 +1,5 @@
-﻿using MqttWire.Server;
+﻿using System.Buffers;
+using MqttWire.Server;
 
 namespace MqttWire.TestHost;
 
@@ -130,8 +131,12 @@ public sealed class ExactTopicHandler : IMqttWireHandler
 
     /// <summary>
     /// Copies the payload once and sends it to every connection subscribed to the publish's topic, the sender
-    /// included, at the lower of the publish's QoS and the granted QoS. A recipient that cannot take the message
-    /// (not open, too large, evicted) is skipped: what that means for it is the server's.
+    /// included, at the lower of the publish's QoS and the granted QoS. The recipients are copied out of the table
+    /// under the lock and sent to after it is released: <c>TrySend</c> may begin a recipient's close inline, and on a
+    /// transport whose read ends inline on an abort that recipient's <see cref="OnClosed"/> could then run on this
+    /// thread, where it takes the lock again (it is re-entrant) and changes the table. A recipient that closed
+    /// meanwhile answers "not open"; one that cannot take the message (too large, evicted) is skipped: what that means
+    /// for it is the server's.
     /// </summary>
     /// <param name="connection">
     /// The publishing connection.
@@ -145,6 +150,8 @@ public sealed class ExactTopicHandler : IMqttWireHandler
     public MqttPublishResult OnPublish(MqttWireConnection connection, in MqttPublish publish)
     {
         string topicName = publish.GetTopic();
+        Recipient[] recipients;
+        int count = 0;
         lock (_gate)
         {
             if (!_subscribers.TryGetValue(topicName, out Dictionary<MqttWireConnection, MqttQoS>? members))
@@ -152,14 +159,28 @@ public sealed class ExactTopicHandler : IMqttWireHandler
                 return MqttPublishResult.Accepted;
             }
 
+            recipients = ArrayPool<Recipient>.Shared.Rent(members.Count);
+            foreach (KeyValuePair<MqttWireConnection, MqttQoS> member in members)
+            {
+                recipients[count++] = new Recipient(member.Key, member.Value);
+            }
+        }
+
+        try
+        {
             // One copy, shared by every recipient; the view is valid only during this call.
             byte[] payload = publish.Payload.ToArray();
             MqttTopic topic = MqttTopic.Create(publish.Topic);
-            foreach (KeyValuePair<MqttWireConnection, MqttQoS> member in members)
+            for (int i = 0; i < count; i++)
             {
-                MqttQoS qos = publish.QoS < member.Value ? publish.QoS : member.Value;
-                member.Key.TrySend(topic, payload, qos);
+                MqttQoS qos = publish.QoS < recipients[i].QoS ? publish.QoS : recipients[i].QoS;
+                recipients[i].Connection.TrySend(topic, payload, qos);
             }
+        }
+        finally
+        {
+            // Cleared, so the pool keeps no connection alive.
+            ArrayPool<Recipient>.Shared.Return(recipients, clearArray: true);
         }
 
         return MqttPublishResult.Accepted;
@@ -218,4 +239,15 @@ public sealed class ExactTopicHandler : IMqttWireHandler
             _subscribers.Remove(topicFilter);
         }
     }
+
+    /// <summary>
+    /// A connection a publish is sent to, copied out of the table.
+    /// </summary>
+    /// <param name="Connection">
+    /// The connection.
+    /// </param>
+    /// <param name="QoS">
+    /// The QoS granted to its subscription.
+    /// </param>
+    private readonly record struct Recipient(MqttWireConnection Connection, MqttQoS QoS);
 }

@@ -19,6 +19,12 @@ namespace MqttWire.Interop.Tests;
 internal sealed class ServerHost : IAsyncDisposable
 {
     /// <summary>
+    /// The fail-safe wait of the interop tests for something that is expected to happen; a passing test never waits
+    /// this long. It also bounds the MQTTnet calls, whose own default timeouts are longer.
+    /// </summary>
+    public static readonly TimeSpan FailSafe = TimeSpan.FromSeconds(10);
+
+    /// <summary>
     /// The web application that hosts the server.
     /// </summary>
     private readonly WebApplication _app;
@@ -157,11 +163,18 @@ internal sealed class ServerHost : IAsyncDisposable
     /// <param name="onMessage">
     /// Called for every message the client receives, or <see langword="null"/>.
     /// </param>
+    /// <param name="configure">
+    /// Changes the client's options before they are built, or <see langword="null"/>.
+    /// </param>
     /// <returns>
     /// The connected client.
     /// </returns>
+    /// <exception cref="TimeoutException">
+    /// The connect took longer than <see cref="FailSafe"/>.
+    /// </exception>
     public async Task<IMqttClient> ConnectMqttNetClientAsync(string clientId,
-        Func<MqttApplicationMessageReceivedEventArgs, Task>? onMessage = null)
+        Func<MqttApplicationMessageReceivedEventArgs, Task>? onMessage = null,
+        Action<MqttClientOptionsBuilder>? configure = null)
     {
         IMqttClient client = CreateMqttNetClient();
         if (onMessage is not null)
@@ -169,7 +182,14 @@ internal sealed class ServerHost : IAsyncDisposable
             client.ApplicationMessageReceivedAsync += onMessage;
         }
 
-        await client.ConnectAsync(CreateMqttNetOptions(clientId).Build()).ConfigureAwait(false);
+        MqttClientOptionsBuilder options = CreateMqttNetOptions(clientId);
+        configure?.Invoke(options);
+        MqttClientConnectResult result = await client.ConnectAsync(options.Build()).WaitAsync(FailSafe).ConfigureAwait(false);
+        if (result.ResultCode != MqttClientConnectResultCode.Success)
+        {
+            throw new InvalidOperationException($"The MQTTnet client {clientId} was refused: {result.ResultCode}.");
+        }
+
         return client;
     }
 

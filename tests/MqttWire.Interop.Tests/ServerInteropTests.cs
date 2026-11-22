@@ -13,7 +13,7 @@ public sealed class ServerInteropTests
     /// <summary>
     /// The fail-safe wait for something that is expected to happen; a passing test never waits this long.
     /// </summary>
-    private static readonly TimeSpan s_failSafe = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan s_failSafe = ServerHost.FailSafe;
 
     /// <summary>
     /// Proves a message an MQTTnet client publishes reaches another MQTTnet client subscribed to its topic once, at
@@ -32,13 +32,13 @@ public sealed class ServerInteropTests
         await using ServerHost host = await ServerHost.StartAsync();
         Inbox inbox = new();
         IMqttClient subscriber = await host.ConnectMqttNetClientAsync("net-sub", inbox.AddAsync);
-        await subscriber.SubscribeAsync(new MqttTopicFilterBuilder().WithTopic("t/1").WithQualityOfServiceLevel(qos).Build());
+        await subscriber.SubscribeAsync(new MqttTopicFilterBuilder().WithTopic("t/1").WithQualityOfServiceLevel(qos).Build()).WaitAsync(s_failSafe);
         IMqttClient publisher = await host.ConnectMqttNetClientAsync("net-pub");
 
         // Act
-        MqttClientPublishResult published = await publisher.PublishAsync(Message("t/1", "hi", qos));
+        MqttClientPublishResult published = await publisher.PublishAsync(Message("t/1", "hi", qos)).WaitAsync(s_failSafe);
         Received first = await inbox.NextAsync();
-        await publisher.PublishAsync(Message("t/1", "marker", qos));
+        await publisher.PublishAsync(Message("t/1", "marker", qos)).WaitAsync(s_failSafe);
         Received next = await inbox.NextAsync();
 
         // Assert
@@ -65,7 +65,7 @@ public sealed class ServerInteropTests
 
         // Act
         MqttClientSubscribeResult result = await client.SubscribeAsync(
-            new MqttTopicFilterBuilder().WithTopic("t/1").WithQualityOfServiceLevel(qos).Build());
+            new MqttTopicFilterBuilder().WithTopic("t/1").WithQualityOfServiceLevel(qos).Build()).WaitAsync(s_failSafe);
 
         // Assert
         result.Items.Count.ShouldBe(1);
@@ -85,7 +85,7 @@ public sealed class ServerInteropTests
         MqttClientOptions options = host.CreateMqttNetOptions("net-1").WithKeepAlivePeriod(TimeSpan.FromSeconds(15)).Build();
 
         // Act
-        MqttClientConnectResult result = await client.ConnectAsync(options);
+        MqttClientConnectResult result = await client.ConnectAsync(options).WaitAsync(s_failSafe);
 
         // Assert
         result.ResultCode.ShouldBe(MqttClientConnectResultCode.Success);
@@ -140,7 +140,7 @@ public sealed class ServerInteropTests
         // Assert
         args.Reason.ShouldBe(MqttClientDisconnectReason.SessionTakenOver);
         second.IsConnected.ShouldBeTrue();
-        (await second.TryPingAsync()).ShouldBeTrue();
+        (await second.TryPingAsync().WaitAsync(s_failSafe)).ShouldBeTrue();
     }
 
     /// <summary>
@@ -171,8 +171,11 @@ public sealed class ServerInteropTests
     }
 
     /// <summary>
-    /// Proves 200 QoS 2 publishes started back to back, within the receive maximum, each complete and each reach a
-    /// QoS 2 subscriber exactly once: the marker published after them is the next message after the 200.
+    /// Proves 200 QoS 2 publishes started back to back, within the server's receive maximum, each complete and each
+    /// reach a QoS 2 subscriber exactly once: the marker published after them is the next message after the 200. The
+    /// subscriber announces a receive maximum of 10, so the server may have only ten deliveries without PUBCOMP towards
+    /// it at a time: the 200 get through only if every exchange towards the subscriber (PUBLISH, PUBREC, PUBREL,
+    /// PUBCOMP) completes and frees its place in the window.
     /// </summary>
     [Fact]
     public async Task Publish_TwoHundredQoS2InARow_AllArriveOnce()
@@ -180,8 +183,9 @@ public sealed class ServerInteropTests
         // Arrange
         await using ServerHost host = await ServerHost.StartAsync();
         Inbox inbox = new();
-        IMqttClient subscriber = await host.ConnectMqttNetClientAsync("net-sub", inbox.AddAsync);
-        await subscriber.SubscribeAsync(new MqttTopicFilterBuilder().WithTopic("t/1").WithExactlyOnceQoS().Build());
+        IMqttClient subscriber = await host.ConnectMqttNetClientAsync("net-sub", inbox.AddAsync,
+            options => options.WithReceiveMaximum(10));
+        await subscriber.SubscribeAsync(new MqttTopicFilterBuilder().WithTopic("t/1").WithExactlyOnceQoS().Build()).WaitAsync(s_failSafe);
         IMqttClient publisher = await host.ConnectMqttNetClientAsync("net-pub");
 
         // Act

@@ -12,7 +12,7 @@ public sealed class ClientServerInteropTests
     /// <summary>
     /// The fail-safe wait for something that is expected to happen; a passing test never waits this long.
     /// </summary>
-    private static readonly TimeSpan s_failSafe = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan s_failSafe = ServerHost.FailSafe;
 
     /// <summary>
     /// Proves a message one client publishes reaches another client subscribed to its topic once, at the QoS of both.

@@ -2,6 +2,7 @@
 using System.Net;
 using System.Net.Http;
 using System.Net.Quic;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Reflection;
 using System.Security.Cryptography;
@@ -12,6 +13,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using MQTTnet;
 using MqttWire.Server;
+using Xunit.Abstractions;
 
 namespace MqttWire.Interop.Tests;
 
@@ -19,12 +21,15 @@ namespace MqttWire.Interop.Tests;
 /// Proves the endpoint and the WebSocket rules of design 6.5, the end of a connection and the host's stop, over
 /// Kestrel on loopback.
 /// </summary>
-public sealed class EndpointTests
+/// <param name="output">
+/// Where a test writes what it could not exercise on this machine.
+/// </param>
+public sealed class EndpointTests(ITestOutputHelper output)
 {
     /// <summary>
     /// The fail-safe wait for something that is expected to happen; a passing test never waits this long.
     /// </summary>
-    private static readonly TimeSpan s_failSafe = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan s_failSafe = ServerHost.FailSafe;
 
     /// <summary>
     /// A CONNECT with client id "c1" and keep-alive 30.
@@ -112,16 +117,22 @@ public sealed class EndpointTests
     /// <summary>
     /// Proves a plain HTTP/3 GET to the endpoint, in an application that calls <c>UseWebSockets()</c>, is answered
     /// with HTTP 400 and not with an error: Kestrel's HTTP/3 stream offers the upgrade feature, so the WebSocket
-    /// middleware gives it the WebSocket feature. HTTP/3 needs QUIC; on a machine without it (MsQuic missing) there is
-    /// no HTTP/3 request to make, and the test proves only that QUIC is missing.
+    /// middleware gives it the WebSocket feature. HTTP/3 needs QUIC, which Windows 11 and later always have: there the
+    /// test must run. Elsewhere (for example Linux without the MsQuic library) the request cannot be made; the test then
+    /// says in its output that HTTP/3 was not exercised.
     /// </summary>
     [Fact]
     public async Task Request_NotAWebSocketOverHttp3_IsAnsweredWith400()
     {
+        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
+        {
+            QuicListener.IsSupported.ShouldBeTrue("Windows 11 and later have QUIC, so HTTP/3 must be exercised here.");
+        }
+
         if (!QuicListener.IsSupported)
         {
             // Arrange, Act, Assert: no QUIC on this machine, so Kestrel cannot listen for HTTP/3.
-            QuicListener.IsSupported.ShouldBeFalse();
+            output.WriteLine("HTTP/3 not exercised: QUIC is not supported on this machine.");
             return;
         }
 
@@ -208,8 +219,9 @@ public sealed class EndpointTests
     /// corrupts the stream when a write of the server's is pending: .NET's WebSocket serialises every frame it sends,
     /// the close included, through one send lock, so the client, which read nothing until it sent the text message,
     /// receives only whole frames, each a whole piece of a delivery, and then the end. The end is the close with 1003,
-    /// or a reset when the server, finding its write in progress, aborts the link (design 6.6, "Closing, bounded",
-    /// step 2) before the client has read the close.
+    /// or the abort of the link when the server, finding its write in progress, aborts it (design 6.6, "Closing,
+    /// bounded", step 2) before the client has read the close (see <see cref="IsAbortSeenByTheClient"/>). Any other
+    /// end, a close with another status among them, fails the test.
     /// </summary>
     [Fact]
     public async Task TextMessage_WhileAServerWriteIsPending_NeverCorruptsTheStream()
@@ -220,9 +232,10 @@ public sealed class EndpointTests
         host.Server.TryGetConnection("c1", out MqttWireConnection? connection).ShouldBeTrue();
         byte[] payload = new byte[60_000];
         MqttTopic topic = MqttTopic.Create("a/b");
-        for (int i = 0; i < 100; i++)
+        for (int i = 0; i < 200; i++)
         {
-            // 6 MB, far more than the socket buffers of loopback hold, so the server's write is pending.
+            // 12 MB, far more than loopback's socket buffers hold (up to 4 MB of send buffer on Linux), so the
+            // server's write is pending.
             connection.TrySend(topic, payload, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         }
 
@@ -239,9 +252,9 @@ public sealed class EndpointTests
             }
             while (last.Opcode == RawWebSocket.Binary);
         }
-        catch (IOException)
+        catch (IOException exception) when (IsAbortSeenByTheClient(exception))
         {
-            // The reset of the abort; what came before it was read whole.
+            // The abort; what came before it was read whole.
             last = null;
         }
 
@@ -253,7 +266,7 @@ public sealed class EndpointTests
             frames.RemoveAt(frames.Count - 1);
         }
 
-        frames.Count.ShouldBeLessThan(200, "The end came while deliveries were still waiting.");
+        frames.Count.ShouldBeLessThan(400, "The end came while deliveries were still waiting.");
         for (int i = 0; i < frames.Count; i++)
         {
             // Each delivery is its header (PUBLISH, QoS 0, remaining length 60,006, topic "a/b", no properties), then
@@ -352,52 +365,56 @@ public sealed class EndpointTests
     public async Task StopAsync_HostWithOpenConnections_EndsWithinFiveSeconds()
     {
         // Arrange
-        ServerHost host = await ServerHost.StartAsync();
+        await using ServerHost host = await ServerHost.StartAsync();
         List<Task<MqttClientDisconnectedEventArgs>> netEnds = [];
         List<Task<MqttClientCloseInfo>> wireEnds = [];
         List<MqttWireClient> wireClients = [];
-        for (int i = 0; i < 5; i++)
+        try
         {
-            IMqttClient netClient = await host.ConnectMqttNetClientAsync($"net-{i}");
-            TaskCompletionSource<MqttClientDisconnectedEventArgs> netEnd = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            netClient.DisconnectedAsync += args =>
+            for (int i = 0; i < 5; i++)
             {
-                netEnd.TrySetResult(args);
-                return Task.CompletedTask;
-            };
-            netEnds.Add(netEnd.Task);
+                IMqttClient netClient = await host.ConnectMqttNetClientAsync($"net-{i}");
+                TaskCompletionSource<MqttClientDisconnectedEventArgs> netEnd = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                netClient.DisconnectedAsync += args =>
+                {
+                    netEnd.TrySetResult(args);
+                    return Task.CompletedTask;
+                };
+                netEnds.Add(netEnd.Task);
 
-            TaskCompletionSource<MqttClientCloseInfo> wireEnd = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            MqttWireClient wireClient = new(new MqttWireClientOptions
-            {
-                Uri = host.WebSocketUri, ClientId = $"wire-{i}", OnClosed = info => wireEnd.TrySetResult(info),
-            });
-            (await wireClient.ConnectAsync().WaitAsync(s_failSafe)).IsConnected.ShouldBeTrue();
-            wireClients.Add(wireClient);
-            wireEnds.Add(wireEnd.Task);
+                TaskCompletionSource<MqttClientCloseInfo> wireEnd = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                MqttWireClient wireClient = new(new MqttWireClientOptions
+                {
+                    Uri = host.WebSocketUri, ClientId = $"wire-{i}", OnClosed = info => wireEnd.TrySetResult(info),
+                });
+                wireClients.Add(wireClient);
+                wireEnds.Add(wireEnd.Task);
+                (await wireClient.ConnectAsync().WaitAsync(s_failSafe)).IsConnected.ShouldBeTrue();
+            }
+
+            host.Server.ConnectionCount.ShouldBe(10);
+            Stopwatch watch = Stopwatch.StartNew();
+
+            // Act
+            await host.StopAsync().WaitAsync(s_failSafe);
+            watch.Stop();
+            MqttClientDisconnectedEventArgs[] netResults = await Task.WhenAll(netEnds).WaitAsync(s_failSafe);
+            MqttClientCloseInfo[] wireResults = await Task.WhenAll(wireEnds).WaitAsync(s_failSafe);
+
+            // Assert
+            watch.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(5));
+            host.Server.ConnectionCount.ShouldBe(0);
+            netResults.ShouldAllBe(args => args.Reason == MqttClientDisconnectReason.ServerShuttingDown);
+            wireResults.ShouldAllBe(info => info.Reason == MqttClientCloseReason.ServerDisconnected
+                                            && info.ReasonCode == MqttReasonCode.ServerShuttingDown);
         }
-
-        host.Server.ConnectionCount.ShouldBe(10);
-        Stopwatch watch = Stopwatch.StartNew();
-
-        // Act
-        await host.StopAsync().WaitAsync(s_failSafe);
-        watch.Stop();
-        MqttClientDisconnectedEventArgs[] netResults = await Task.WhenAll(netEnds).WaitAsync(s_failSafe);
-        MqttClientCloseInfo[] wireResults = await Task.WhenAll(wireEnds).WaitAsync(s_failSafe);
-
-        // Assert
-        watch.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(5));
-        host.Server.ConnectionCount.ShouldBe(0);
-        netResults.ShouldAllBe(args => args.Reason == MqttClientDisconnectReason.ServerShuttingDown);
-        wireResults.ShouldAllBe(info => info.Reason == MqttClientCloseReason.ServerDisconnected
-                                        && info.ReasonCode == MqttReasonCode.ServerShuttingDown);
-        foreach (MqttWireClient wireClient in wireClients)
+        finally
         {
-            await wireClient.DisposeAsync();
+            foreach (MqttWireClient wireClient in wireClients)
+            {
+                await wireClient.DisposeAsync();
+            }
         }
-
-        await host.DisposeAsync();
     }
 
     /// <summary>
@@ -459,13 +476,17 @@ public sealed class EndpointTests
     public async Task OnClosed_LinkAbortedByTheStop_DoesNotRunOnTheStoppingThread()
     {
         // Arrange
-        await using ServerHost host = await ServerHost.StartAsync<StackRecordingHandler>(new ServerHost.Setup());
+        await using ServerHost host = await ServerHost.StartAsync<StackRecordingHandler>(new ServerHost.Setup
+        {
+            ConfigureServer = options => options.MaxOutgoingBytes = 64 << 20,
+        });
         StackRecordingHandler handler = (StackRecordingHandler)host.Services.GetRequiredService<IMqttWireHandler>();
         await using RawWebSocket client = await ConnectRawAsync(host, receiveBufferSize: 1024);
         host.Server.TryGetConnection("c1", out MqttWireConnection? connection).ShouldBeTrue();
-        for (int i = 0; i < 15; i++)
+        for (int i = 0; i < 200; i++)
         {
-            // 900 KB, within the outgoing limit and far more than the socket buffers hold: a write stays pending.
+            // 12 MB, within the raised outgoing limit and far more than loopback's socket buffers hold (up to 4 MB
+            // of send buffer on Linux): a write stays pending.
             connection.TrySend(MqttTopic.Create("a/b"), new byte[60_000], MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         }
 
@@ -479,6 +500,24 @@ public sealed class EndpointTests
         stack.ShouldNotContain(frame => frame.EndsWith(".Abort", StringComparison.Ordinal));
         stack.ShouldContain("ThreadPoolWorkQueue.Dispatch");
     }
+
+    /// <summary>
+    /// Tells whether a failed read of the raw client is how the abort of the link reaches it on this platform: a reset
+    /// (<see cref="SocketError.ConnectionReset"/>) on every platform, which is what Windows shows (it resets the
+    /// connection, and drops what the client had not read yet); and, on other platforms only, also the end of the
+    /// stream with no close frame, because Kestrel ends an aborted connection with a shutdown, after which Linux sends
+    /// what its send buffer holds and then a FIN, which can come in the middle of a frame. A close frame never takes
+    /// this path, so an end with a close of another status than 1003 still fails the test.
+    /// </summary>
+    /// <param name="exception">
+    /// What the read threw.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the read ended because the server aborted the link.
+    /// </returns>
+    private static bool IsAbortSeenByTheClient(IOException exception) =>
+        exception.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionReset }
+        || (!OperatingSystem.IsWindows() && exception is EndOfStreamException);
 
     /// <summary>
     /// Sends a GET to the endpoint at an exact HTTP version, accepting any server certificate.
