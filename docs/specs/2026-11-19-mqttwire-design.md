@@ -1252,8 +1252,8 @@ GrainWire, the owner decides whether own WebSocket framing is worth looking at (
 companion design).
 
 The benchmark comes with the end of step 3. Until it runs, the only measurement is a unit test
-over the in-memory link: there an idle connection costs MqttWire 684 bytes (in a Release build,
-measured on 2026-11-22; the smallest of 685, 684 and 703), held to 768, which leaves out the
+over the in-memory link: there an idle connection costs MqttWire 668 bytes (in a Release build,
+measured on 2026-11-23; the smallest of 669, 668 and 668), held to 768, which leaves out the
 WebSocket link object and its parked read.
 
 ### 6.15 Documentation, versions, maintenance
