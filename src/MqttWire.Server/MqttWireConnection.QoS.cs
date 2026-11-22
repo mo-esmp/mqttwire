@@ -80,7 +80,7 @@ public sealed partial class MqttWireConnection
             return true;
         }
 
-        BeginClose(MqttCloseReason.ReceiveMaximumPassed, MqttReasonCode.ReceiveMaximumExceeded, reasonString: null);
+        BeginClose(CloseCause.ReceiveMaximumPassed, MqttReasonCode.ReceiveMaximumExceeded, reasonString: null);
         return false;
     }
 
@@ -246,7 +246,7 @@ public sealed partial class MqttWireConnection
                 break;
 
             case DeliveryAckOutcome.WrongKind:
-                BeginClose(MqttCloseReason.ProtocolError, MqttReasonCode.ProtocolError, reasonString: null);
+                BeginClose(CloseCause.ProtocolError, MqttReasonCode.ProtocolError, reasonString: null);
                 return false;
 
             default:
@@ -477,7 +477,7 @@ public sealed partial class MqttWireConnection
             return false;
         }
 
-        BeginClose(MqttCloseReason.AcknowledgementTimedOut, MqttReasonCode.ProtocolError, reasonString: null);
+        BeginClose(CloseCause.AcknowledgementTimedOut, MqttReasonCode.ProtocolError, reasonString: null);
         return true;
     }
 }

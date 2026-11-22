@@ -1,5 +1,6 @@
 ﻿using System.Net.WebSockets;
 using MqttWire.Server;
+using MqttWire.Server.Internal;
 using MqttWire.Tests.Client;
 using MqttWire.Tests.Codec;
 
@@ -366,7 +367,7 @@ public sealed class ReadTests
         TestConnection connection = harness.Connect();
         MqttWireConnection? server = connection.Connection;
         server.ShouldNotBeNull();
-        server.BeginClose(MqttCloseReason.ClosedByHost, MqttReasonCode.AdministrativeAction, reasonString: null);
+        server.BeginClose(CloseCause.ClosedByHost, MqttReasonCode.AdministrativeAction, reasonString: null);
         byte[] written = connection.TakeWritten();
 
         // Act

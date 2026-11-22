@@ -65,7 +65,7 @@ public sealed partial class MqttWireConnection
         catch (Exception)
         {
             // The wait or a read failed: the link was aborted or lost. A reason recorded first is kept.
-            BeginClose(MqttCloseReason.ConnectionLost, MqttReasonCode.Success, reasonString: null);
+            BeginClose(CloseCause.ConnectionLost, MqttReasonCode.Success, reasonString: null);
         }
         finally
         {
@@ -91,7 +91,7 @@ public sealed partial class MqttWireConnection
             ConnectionState state = _state;
             if (state == ConnectionState.Accepted)
             {
-                if (AbortFromAccepted(MqttCloseReason.ServerStopping))
+                if (AbortFromAccepted(CloseCause.ServerStopping))
                 {
                     return;
                 }
@@ -108,7 +108,7 @@ public sealed partial class MqttWireConnection
             }
             else if (state == ConnectionState.Active)
             {
-                BeginClose(MqttCloseReason.ServerStopping, MqttReasonCode.ServerShuttingDown, reasonString: null);
+                BeginClose(CloseCause.ServerStopping, MqttReasonCode.ServerShuttingDown, reasonString: null);
             }
 
             return;
@@ -151,7 +151,7 @@ public sealed partial class MqttWireConnection
         Debug.Assert(_state >= ConnectionState.Closing, "Every way out of the run begins the close first.");
         if (_state < ConnectionState.Closing)
         {
-            BeginClose(MqttCloseReason.ConnectionLost, MqttReasonCode.Success, reasonString: null);
+            BeginClose(CloseCause.ConnectionLost, MqttReasonCode.Success, reasonString: null);
         }
 
         Task? idle = null;

@@ -115,11 +115,12 @@ public sealed partial class MqttWireConnection
         // Outside the lock: a close writes or aborts, and a write may take as long as the link does.
         if (result == MqttSendResult.TooLarge)
         {
-            BeginClose(MqttCloseReason.MessageTooLargeToSend, MqttReasonCode.PacketTooLarge, reasonString: null);
+            BeginCloseWithStatus(CloseCause.MessageTooLargeToSend, MqttReasonCode.PacketTooLarge, reasonString: null,
+                WebSocketCloseStatus.NormalClosure, payloadLength);
         }
         else if (result == MqttSendResult.Evicted)
         {
-            BeginClose(MqttCloseReason.OutgoingLimitPassed, MqttReasonCode.QuotaExceeded, reasonString: null);
+            BeginClose(CloseCause.OutgoingLimitPassed, MqttReasonCode.QuotaExceeded, reasonString: null);
         }
         else if (write)
         {
@@ -320,7 +321,7 @@ public sealed partial class MqttWireConnection
         pool.Return(buffer);
         if (evict)
         {
-            BeginClose(MqttCloseReason.OutgoingLimitPassed, MqttReasonCode.QuotaExceeded, reasonString: null);
+            BeginClose(CloseCause.OutgoingLimitPassed, MqttReasonCode.QuotaExceeded, reasonString: null);
         }
     }
 
@@ -523,7 +524,7 @@ public sealed partial class MqttWireConnection
         {
             // The close finds the send path taken, by this caller, and aborts; when the connection was closing
             // already, nothing has aborted the link yet, so that a failed link ends now and not at the close deadline.
-            BeginClose(MqttCloseReason.ConnectionLost, MqttReasonCode.Success, reasonString: null);
+            BeginClose(CloseCause.ConnectionLost, MqttReasonCode.Success, reasonString: null);
             link.Abort();
         }
 

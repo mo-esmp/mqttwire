@@ -263,7 +263,7 @@ public sealed class AdmissionTests
         MqttWireConnection closing = first.Connection.ShouldNotBeNull();
 
         // Held in Closing: the close is not answered, so the run waits until the peer ends the link.
-        closing.BeginClose(MqttCloseReason.ClosedByHost, MqttReasonCode.AdministrativeAction, reasonString: null);
+        closing.BeginClose(CloseCause.ClosedByHost, MqttReasonCode.AdministrativeAction, reasonString: null);
         first.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.AdministrativeAction));
         MqttWireConnection? replaces = null;
         harness.Handler.Admit = (_, existing) =>
@@ -360,7 +360,7 @@ public sealed class AdmissionTests
         ServerHarness harness = ServerHarness.Create();
         harness.Handler.Admit = static (connection, _) =>
         {
-            connection.BeginClose(MqttCloseReason.ClosedByHost, MqttReasonCode.AdministrativeAction, reasonString: null);
+            connection.BeginClose(CloseCause.ClosedByHost, MqttReasonCode.AdministrativeAction, reasonString: null);
             return MqttAdmitResult.Accepted;
         };
         TestConnection connection = harness.Accept();

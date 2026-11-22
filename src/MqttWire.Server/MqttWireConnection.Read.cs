@@ -132,7 +132,7 @@ public sealed partial class MqttWireConnection
                 .ConfigureAwait(false);
             if (read == 0)
             {
-                BeginClose(MqttCloseReason.ConnectionLost, MqttReasonCode.Success, reasonString: null);
+                BeginClose(CloseCause.ConnectionLost, MqttReasonCode.Success, reasonString: null);
                 return 0;
             }
 
@@ -168,20 +168,20 @@ public sealed partial class MqttWireConnection
 
         if (status != OperationStatus.Done)
         {
-            RefuseFirstPacket(MqttCloseReason.MalformedPacket);
+            RefuseFirstPacket(CloseCause.MalformedPacket, MqttReasonCode.MalformedPacket);
             return ConnectFrame.Refused;
         }
 
         if (header.Type != PacketType.Connect)
         {
-            RefuseFirstPacket(MqttCloseReason.ProtocolError);
+            RefuseFirstPacket(CloseCause.ProtocolError, MqttReasonCode.ProtocolError);
             return ConnectFrame.Refused;
         }
 
         if (header.TotalLength > ServerLimits.MaxControlPacketBytes)
         {
             // Answered from the fixed header alone, before the buffer grows: CONNACK 0x95.
-            BeginClose(MqttCloseReason.ProtocolError, MqttReasonCode.PacketTooLarge, reasonString: null);
+            BeginClose(CloseCause.ProtocolError, MqttReasonCode.PacketTooLarge, reasonString: null);
             return ConnectFrame.Refused;
         }
 
@@ -234,7 +234,7 @@ public sealed partial class MqttWireConnection
                         .ConfigureAwait(false);
                     if (read == 0)
                     {
-                        BeginClose(MqttCloseReason.ConnectionLost, MqttReasonCode.Success, reasonString: null);
+                        BeginClose(CloseCause.ConnectionLost, MqttReasonCode.Success, reasonString: null);
                         return false;
                     }
 
@@ -404,7 +404,7 @@ public sealed partial class MqttWireConnection
     {
         if (status == OperationStatus.Done)
         {
-            BeginClose(MqttCloseReason.ProtocolError, MqttReasonCode.QoSNotSupported, reasonString: null);
+            BeginClose(CloseCause.ProtocolError, MqttReasonCode.QoSNotSupported, reasonString: null);
             return;
         }
 
@@ -429,7 +429,7 @@ public sealed partial class MqttWireConnection
         PacketSize size = JudgeSize(header);
         if (size == PacketSize.TooLarge)
         {
-            BeginClose(MqttCloseReason.ProtocolError, MqttReasonCode.PacketTooLarge, reasonString: null);
+            BeginClose(CloseCause.ProtocolError, MqttReasonCode.PacketTooLarge, reasonString: null);
         }
         else if (size == PacketSize.Skip)
         {
@@ -567,9 +567,9 @@ public sealed partial class MqttWireConnection
     /// </param>
     private void CloseUndecodable(MqttReasonCode code)
     {
-        MqttCloseReason reason = code == MqttReasonCode.MalformedPacket
-            ? MqttCloseReason.MalformedPacket
-            : MqttCloseReason.ProtocolError;
-        BeginClose(reason, code, reasonString: null);
+        CloseCause cause = code == MqttReasonCode.MalformedPacket
+            ? CloseCause.MalformedPacket
+            : CloseCause.ProtocolError;
+        BeginClose(cause, code, reasonString: null);
     }
 }

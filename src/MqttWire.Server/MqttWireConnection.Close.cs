@@ -1,5 +1,6 @@
 ﻿using System.Diagnostics;
 using System.Net.WebSockets;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using MqttWire.Codec;
 using MqttWire.Server.Internal;
@@ -15,7 +16,7 @@ public sealed partial class MqttWireConnection
     /// Begins the close (design 6.6, "Closing, bounded"), with WebSocket status 1000: see
     /// <see cref="BeginCloseWithStatus"/>. Safe from any thread; a call after the first changes nothing.
     /// </summary>
-    /// <param name="reason">
+    /// <param name="cause">
     /// Why the connection ends.
     /// </param>
     /// <param name="code">
@@ -25,8 +26,8 @@ public sealed partial class MqttWireConnection
     /// The reason string, or <see langword="null"/>; validated where the host handed it over, so it can be encoded.
     /// It is cut, and left out where the client's Request Problem Information or Maximum Packet Size calls for it.
     /// </param>
-    internal void BeginClose(MqttCloseReason reason, MqttReasonCode code, string? reasonString) =>
-        BeginCloseWithStatus(reason, code, reasonString, WebSocketCloseStatus.NormalClosure);
+    internal void BeginClose(CloseCause cause, MqttReasonCode code, string? reasonString) =>
+        BeginCloseWithStatus(cause, code, reasonString, WebSocketCloseStatus.NormalClosure, payloadLength: 0);
 
     /// <summary>
     /// Begins the close (design 6.6, "Closing, bounded"). In one hold of the send path's lock it moves the connection
@@ -36,13 +37,15 @@ public sealed partial class MqttWireConnection
     /// asked to carry its own notice, and no packet precedes a CONNACK. When no write is in progress, this call takes
     /// the send path, hands the packet that carries the reason code to the link, and then the WebSocket close,
     /// without waiting for the peer; the sweep aborts the link at the close deadline. The packet is DISCONNECT for a
-    /// connection that was Active, except when the client disconnected or the link was lost; CONNACK for one that was
-    /// not admitted, when the code is a failure (plan decision 7); otherwise none. Aborting returns nothing: the
-    /// write in progress ends by itself and returns its own buffer (design 6.8). A fault inside MqttWire while the
-    /// packet is encoded (the pool throws) aborts the link instead, logged with event 20; nothing is thrown. Safe from
-    /// any thread; a call after the first changes nothing.
+    /// connection that was Active, except when the client disconnected, the link was lost or the send path faulted;
+    /// CONNACK for one that was not admitted, when the code is a failure and the first packet was a CONNECT (plan
+    /// decision 7); otherwise none. Aborting returns nothing: the write in progress ends by itself and returns its own
+    /// buffer (design 6.8). A fault inside MqttWire while the packet is encoded (the pool throws) aborts the link
+    /// instead, logged with event 20; nothing is thrown. The call that makes the move logs the end, once the lock is
+    /// released and before it acts (<see cref="LogEnd"/>); a call that finds the move made logs nothing. Safe from any
+    /// thread; a call after the first changes nothing.
     /// </summary>
-    /// <param name="reason">
+    /// <param name="cause">
     /// Why the connection ends.
     /// </param>
     /// <param name="code">
@@ -53,16 +56,22 @@ public sealed partial class MqttWireConnection
     /// It is cut, and left out where the client's Request Problem Information or Maximum Packet Size calls for it.
     /// </param>
     /// <param name="status">
-    /// The WebSocket status the peer sees when the close is handed to the link.
+    /// The WebSocket status the peer sees when the close is handed to the link; with
+    /// <see cref="WebSocketCloseStatus.ProtocolError"/>, a first packet that was not a CONNECT, no MQTT packet is
+    /// written whatever the code.
     /// </param>
-    private void BeginCloseWithStatus(MqttCloseReason reason, MqttReasonCode code, string? reasonString,
-        WebSocketCloseStatus status)
+    /// <param name="payloadLength">
+    /// The length of the payload of the message that was too large to send, for the log of
+    /// <see cref="CloseCause.MessageTooLargeToSend"/>; 0 for any other end.
+    /// </param>
+    private void BeginCloseWithStatus(CloseCause cause, MqttReasonCode code, string? reasonString,
+        WebSocketCloseStatus status, int payloadLength)
     {
         ConnectionState left;
         bool writing;
         lock (_sendLock)
         {
-            if (!TryEnterClosing(reason, out left))
+            if (!TryEnterClosing(cause, out left))
             {
                 return;
             }
@@ -77,6 +86,7 @@ public sealed partial class MqttWireConnection
             }
         }
 
+        LogEnd(cause, code, payloadLength, method: null, exception: null);
         if (writing)
         {
             RunningLink.Abort();
@@ -87,7 +97,9 @@ public sealed partial class MqttWireConnection
         int length;
         try
         {
-            length = EncodeClosingPacket(left, reason, code, reasonString, out buffer);
+            length = status == WebSocketCloseStatus.ProtocolError
+                ? 0
+                : EncodeClosingPacket(left, cause, code, reasonString, out buffer);
         }
         catch (Exception exception)
         {
@@ -111,14 +123,14 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Encodes the packet that carries a close's reason code to the client, into a buffer rented from the server's
-    /// pool: DISCONNECT for a connection that was Active, except when the client disconnected or the link was lost;
-    /// CONNACK with the code for one that was not admitted, when the code is a failure (plan decision 7); otherwise
-    /// none. The reason string follows the rule of <see cref="ShapeReasonString"/>.
+    /// pool: DISCONNECT for a connection that was Active, except when the client disconnected, the link was lost or
+    /// the send path faulted; CONNACK with the code for one that was not admitted, when the code is a failure (plan
+    /// decision 7); otherwise none. The reason string follows the rule of <see cref="ShapeReasonString"/>.
     /// </summary>
     /// <param name="left">
     /// The state the connection left for Closing.
     /// </param>
-    /// <param name="reason">
+    /// <param name="cause">
     /// Why the connection ends.
     /// </param>
     /// <param name="code">
@@ -134,13 +146,13 @@ public sealed partial class MqttWireConnection
     /// <returns>
     /// The packet's length; 0 when the close carries no packet.
     /// </returns>
-    private int EncodeClosingPacket(ConnectionState left, MqttCloseReason reason, MqttReasonCode code,
+    private int EncodeClosingPacket(ConnectionState left, CloseCause cause, MqttReasonCode code,
         string? reasonString, out byte[]? buffer)
     {
         buffer = null;
         if (left == ConnectionState.Active)
         {
-            if (reason is MqttCloseReason.ClientDisconnected or MqttCloseReason.ConnectionLost)
+            if (cause is CloseCause.ClientDisconnected or CloseCause.ConnectionLost or CloseCause.SendPathFaulted)
             {
                 return 0;
             }
@@ -165,20 +177,40 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Tells the host that the admitted connection ended, with the reason of the first <see cref="BeginClose"/>.
-    /// Called once, by the end of the run. An <see cref="IMqttWireHandler.OnClosed"/> that throws is logged and
-    /// nothing else: the connection ends all the same.
+    /// Tells the host that the admitted connection ended, with the reason of the first <see cref="BeginClose"/>,
+    /// narrowed to <see cref="MqttCloseReason"/> (<see cref="ToCloseReason"/>). Called once, by the end of the run. An
+    /// <see cref="IMqttWireHandler.OnClosed"/> that throws is logged and nothing else: the connection ends all the
+    /// same, and so does a logging provider that throws then.
     /// </summary>
     private void ReportClosed()
     {
         try
         {
-            _server.Handler.OnClosed(this, CloseReason);
+            _server.Handler.OnClosed(this, ToCloseReason(CloseCause));
         }
         catch (Exception exception)
         {
-            ServerLog.HandlerThrew(_server.Logger, ClientId, nameof(IMqttWireHandler.OnClosed), exception);
+            LogEnd(CloseCause.HandlerThrew, MqttReasonCode.Success, payloadLength: 0,
+                nameof(IMqttWireHandler.OnClosed), exception);
         }
+    }
+
+    /// <summary>
+    /// Narrows why an admitted connection ended to what <see cref="IMqttWireHandler.OnClosed"/> reports: every cause
+    /// that <see cref="MqttCloseReason"/> names is itself, and a fault of the send path is
+    /// <see cref="MqttCloseReason.ConnectionLost"/>. The three ends before an admission never reach it.
+    /// </summary>
+    /// <param name="cause">
+    /// Why the connection ended.
+    /// </param>
+    /// <returns>
+    /// The reason the host is told.
+    /// </returns>
+    private static MqttCloseReason ToCloseReason(CloseCause cause)
+    {
+        Debug.Assert(cause is <= CloseCause.ServerStopping or CloseCause.SendPathFaulted,
+            "An end before the admission is never reported to OnClosed.");
+        return cause == CloseCause.SendPathFaulted ? MqttCloseReason.ConnectionLost : (MqttCloseReason)cause;
     }
 
     /// <summary>
@@ -186,11 +218,14 @@ public sealed partial class MqttWireConnection
     /// it, so the connection begins to close with no packet and the WebSocket is closed with status 1002 (plan
     /// decision 7), through the send path like every close. Does nothing when the connection is Closing already.
     /// </summary>
-    /// <param name="reason">
+    /// <param name="cause">
     /// Why the connection ends.
     /// </param>
-    private void RefuseFirstPacket(MqttCloseReason reason) =>
-        BeginCloseWithStatus(reason, MqttReasonCode.Success, reasonString: null, WebSocketCloseStatus.ProtocolError);
+    /// <param name="code">
+    /// The reason code of the refusal, for the log only: no packet carries it.
+    /// </param>
+    private void RefuseFirstPacket(CloseCause cause, MqttReasonCode code) =>
+        BeginCloseWithStatus(cause, code, reasonString: null, WebSocketCloseStatus.ProtocolError, payloadLength: 0);
 
     /// <summary>
     /// Acts on the deadlines that have passed; called by the sweep, from the timer's thread. An Accepted
@@ -220,7 +255,7 @@ public sealed partial class MqttWireConnection
             long accepted = Volatile.Read(ref _stateEnteredAt);
             if (accepted != 0 && now - accepted >= _server.ConnectDeadlineLength)
             {
-                AbortFromAccepted(MqttCloseReason.ConnectionLost);
+                AbortFromAccepted(CloseCause.ConnectTimedOut);
             }
         }
         else if (_state == ConnectionState.Authenticating)
@@ -262,10 +297,10 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Ends a connection that has sent no complete CONNECT, at the connect deadline or when the server stops: moves
-    /// it to Closing, only from Accepted, and aborts the link. Nothing is handed to the link, and the send path is not
-    /// touched: nothing was ever written.
+    /// it to Closing, only from Accepted, logs the end and aborts the link. Nothing is handed to the link, and the
+    /// send path is not touched: nothing was ever written.
     /// </summary>
-    /// <param name="reason">
+    /// <param name="cause">
     /// Why the connection ends; no <see cref="IMqttWireHandler.OnClosed"/> reports it, since the connection was
     /// never admitted.
     /// </param>
@@ -273,24 +308,25 @@ public sealed partial class MqttWireConnection
     /// <see langword="true"/> when the connection was Accepted and is now Closing, its link aborted;
     /// <see langword="false"/> when it had left Accepted, and nothing changed.
     /// </returns>
-    private bool AbortFromAccepted(MqttCloseReason reason)
+    private bool AbortFromAccepted(CloseCause cause)
     {
         lock (_sendLock)
         {
-            if (!TryEnterClosingFrom(ConnectionState.Accepted, reason))
+            if (!TryEnterClosingFrom(ConnectionState.Accepted, cause))
             {
                 return false;
             }
         }
 
         // The connection was never admitted, so no OnClosed reports the reason; the link failing is the end.
+        LogEnd(cause, MqttReasonCode.Success, payloadLength: 0, method: null, exception: null);
         _link?.Abort();
         return true;
     }
 
     /// <summary>
     /// Ends a connection whose write has been with the link for <see cref="ServerLimits.WriteDeadline"/>: moves it
-    /// to Closing with <see cref="MqttCloseReason.WriteTimedOut"/> and aborts the link. No DISCONNECT is attempted:
+    /// to Closing with <see cref="CloseCause.WriteTimedOut"/>, logs the end and aborts the link. No DISCONNECT is attempted:
     /// a write is in progress, and it is the one that does not move. It acts only on the write whose stamp the sweep
     /// read: when that write has ended meanwhile, or the connection is closing already, nothing is done. Aborting
     /// releases nothing: the write ends with an error and returns its own buffer, and what waited behind it is
@@ -305,20 +341,21 @@ public sealed partial class MqttWireConnection
         {
             // The stamp is set only while a piece is with the link, so the send path is taken: by that write.
             if (Volatile.Read(ref _writeStartedAt) != started
-                || !TryEnterClosingFrom(ConnectionState.Active, MqttCloseReason.WriteTimedOut))
+                || !TryEnterClosingFrom(ConnectionState.Active, CloseCause.WriteTimedOut))
             {
                 return;
             }
         }
 
+        LogEnd(CloseCause.WriteTimedOut, MqttReasonCode.Success, payloadLength: 0, method: null, exception: null);
         _link?.Abort();
     }
 
     /// <summary>
     /// Acts on the two deadlines of reading for an Active connection: begins the close with 0x82
-    /// (<see cref="MqttCloseReason.PartialPacketTimedOut"/>) when a packet has stayed incomplete for
+    /// (<see cref="CloseCause.PartialPacketTimedOut"/>) when a packet has stayed incomplete for
     /// <see cref="ServerLimits.PartialPacketDeadline"/> from its first byte, and with 0x8D
-    /// (<see cref="MqttCloseReason.KeepAliveTimedOut"/>) when no complete packet has come for 1.5 times the
+    /// (<see cref="CloseCause.KeepAliveTimedOut"/>) when no complete packet has come for 1.5 times the
     /// keep-alive. A stamp the code that reads changes meanwhile is at worst one sweep old, so a close that races a
     /// packet just completed ends a connection that was a moment from its deadline anyway.
     /// </summary>
@@ -330,7 +367,7 @@ public sealed partial class MqttWireConnection
         long partial = Volatile.Read(ref _partialPacketAt);
         if (partial != 0 && now - partial >= _server.PartialPacketDeadlineLength)
         {
-            BeginClose(MqttCloseReason.PartialPacketTimedOut, MqttReasonCode.ProtocolError, reasonString: null);
+            BeginClose(CloseCause.PartialPacketTimedOut, MqttReasonCode.ProtocolError, reasonString: null);
             return;
         }
 
@@ -338,7 +375,7 @@ public sealed partial class MqttWireConnection
                          / ServerLimits.KeepAliveFactorDenominator;
         if (now - Volatile.Read(ref _lastPacketAt) >= keepAlive)
         {
-            BeginClose(MqttCloseReason.KeepAliveTimedOut, MqttReasonCode.KeepAliveTimeout, reasonString: null);
+            BeginClose(CloseCause.KeepAliveTimedOut, MqttReasonCode.KeepAliveTimeout, reasonString: null);
         }
     }
 
@@ -357,25 +394,20 @@ public sealed partial class MqttWireConnection
             return;
         }
 
-        ThreadPool.UnsafeQueueUserWorkItem(static state => CancelOnThreadPool(state.Source, state.Logger, state.ClientId),
-            (Source: source, Logger: (ILogger)_server.Logger, ClientId), preferLocal: false);
+        ThreadPool.UnsafeQueueUserWorkItem(static state => state.Connection.CancelOnThreadPool(state.Source),
+            (Source: source, Connection: this), preferLocal: false);
     }
 
     /// <summary>
     /// Cancels and disposes a cancellation source of the Authenticating state, on a thread-pool thread. A token
     /// callback that throws is the host's bug: it is logged as an error of <see cref="IMqttWireHandler.OnConnectAsync"/>
-    /// and the token is cancelled all the same.
+    /// and the token is cancelled all the same; a logging provider that throws then is swallowed by
+    /// <see cref="LogEnd"/>, so the work item never fails.
     /// </summary>
     /// <param name="source">
     /// The source; nothing else cancels or disposes it.
     /// </param>
-    /// <param name="logger">
-    /// The server's logger.
-    /// </param>
-    /// <param name="clientId">
-    /// The client identifier of the connection.
-    /// </param>
-    private static void CancelOnThreadPool(CancellationTokenSource source, ILogger logger, string clientId)
+    private void CancelOnThreadPool(CancellationTokenSource source)
     {
         try
         {
@@ -383,7 +415,8 @@ public sealed partial class MqttWireConnection
         }
         catch (AggregateException exception)
         {
-            ServerLog.HandlerThrew(logger, clientId, nameof(IMqttWireHandler.OnConnectAsync), exception);
+            LogEnd(CloseCause.HandlerThrew, MqttReasonCode.Success, payloadLength: 0,
+                nameof(IMqttWireHandler.OnConnectAsync), exception);
         }
         finally
         {
@@ -395,7 +428,7 @@ public sealed partial class MqttWireConnection
     /// Moves the connection to Closing unless it is there or beyond, records the reason and stamps the time. The
     /// caller holds the send path's lock, as for <see cref="TryEnterClosingFrom"/>.
     /// </summary>
-    /// <param name="reason">
+    /// <param name="cause">
     /// Why the connection ends.
     /// </param>
     /// <param name="left">
@@ -405,12 +438,12 @@ public sealed partial class MqttWireConnection
     /// <see langword="true"/> when this call made the move; <see langword="false"/> when another had made it, and
     /// nothing changed.
     /// </returns>
-    private bool TryEnterClosing(MqttCloseReason reason, out ConnectionState left)
+    private bool TryEnterClosing(CloseCause cause, out ConnectionState left)
     {
         left = _state;
         while (left < ConnectionState.Closing)
         {
-            if (TryEnterClosingFrom(left, reason))
+            if (TryEnterClosingFrom(left, cause))
             {
                 return true;
             }
@@ -422,22 +455,22 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Moves the connection to Closing only from one state; the winner records the reason and writes
+    /// Moves the connection to Closing only from one state; the winner records the cause and writes
     /// <see cref="_closingAt"/>, which nothing else writes. The caller holds the send path's lock: every move to
     /// Closing is made under it, so that the state read under that lock tells the send path exactly whether anything
-    /// may still be added or written.
+    /// may still be added or written. The winner's caller logs the end once it has released the lock.
     /// </summary>
     /// <param name="expected">
     /// The state the move must start from; it is below Closing.
     /// </param>
-    /// <param name="reason">
+    /// <param name="cause">
     /// Why the connection ends.
     /// </param>
     /// <returns>
     /// <see langword="true"/> when this call made the move; <see langword="false"/> when the connection was in
     /// another state, and nothing changed.
     /// </returns>
-    private bool TryEnterClosingFrom(ConnectionState expected, MqttCloseReason reason)
+    private bool TryEnterClosingFrom(ConnectionState expected, CloseCause cause)
     {
         Debug.Assert(_sendLock.IsHeldByCurrentThread, "Every move to Closing is made under the send path's lock.");
         if (Interlocked.CompareExchange(ref _state, ConnectionState.Closing, expected) != expected)
@@ -445,8 +478,187 @@ public sealed partial class MqttWireConnection
             return false;
         }
 
-        CloseReason = reason;
+        CloseCause = cause;
         Volatile.Write(ref _closingAt, _server.Time.GetTimestamp());
         return true;
+    }
+
+    /// <summary>
+    /// Writes the one log line of an end of this connection (design 6.12), or of an exception a handler or the send
+    /// path threw: the one place that maps why a connection ended to its event. Called, outside the send path's lock,
+    /// by the call that won the move to Closing, with no exception; and by the code that caught an exception, with it,
+    /// whether or not its close won the move, so that the exception is never lost. The two ends whose line carries an
+    /// exception, <see cref="CloseCause.HandlerThrew"/> (event 15) and <see cref="CloseCause.SendPathFaulted"/>
+    /// (event 20), are written only from the second call; every other end only from the first. Each line carries the
+    /// client id and the fields of its event, never a password, a payload, a topic or the host's reason string. With
+    /// the event's level off, the generated method returns after its check: nothing is built or boxed. It never
+    /// throws: a logging provider that throws is swallowed here, and only here.
+    /// </summary>
+    /// <param name="cause">
+    /// Why the connection ended.
+    /// </param>
+    /// <param name="code">
+    /// The reason code that went on the wire, or would have; for <see cref="CloseCause.ClientDisconnected"/>, the
+    /// client's own.
+    /// </param>
+    /// <param name="payloadLength">
+    /// The length of the payload that was too large to send, for <see cref="CloseCause.MessageTooLargeToSend"/>;
+    /// otherwise 0.
+    /// </param>
+    /// <param name="method">
+    /// The name of the handler method that threw, with <see cref="CloseCause.HandlerThrew"/> and an exception;
+    /// otherwise <see langword="null"/>.
+    /// </param>
+    /// <param name="exception">
+    /// What was thrown, from the code that caught it; <see langword="null"/> from the winner of the move.
+    /// </param>
+    private void LogEnd(CloseCause cause, MqttReasonCode code, int payloadLength, string? method, Exception? exception)
+    {
+        ILogger logger = _server.Logger;
+
+        // Deliberately swallowed below, and the only catch around a log call that does nothing: the end has been
+        // decided and its state has moved, so a logging provider that throws has nowhere to report to, and throwing on
+        // would break the close, the sweep or the fault path that called this.
+#pragma warning disable RCS1075 // Avoid empty catch clause that catches System.Exception: see the comment above.
+        try
+        {
+            if (exception is null)
+            {
+                WriteEndLine(logger, cause, code, payloadLength);
+            }
+            else if (cause == CloseCause.HandlerThrew)
+            {
+                ServerLog.HandlerThrew(logger, ClientId, method ?? string.Empty, exception);
+            }
+            else
+            {
+                ServerLog.SendPathFaulted(logger, ClientId, exception);
+            }
+        }
+        catch (Exception)
+        {
+            // Nowhere left to report it.
+        }
+#pragma warning restore RCS1075
+    }
+
+    /// <summary>
+    /// Writes the line of an end decided by the winner of the move to Closing, for the ends whose line carries more
+    /// than the client id: a reason code, the remote end point or a payload's length; the others go on to
+    /// <see cref="WriteClientIdEndLine"/>. Called only by <see cref="LogEnd"/>, which swallows what a logging provider
+    /// throws.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="cause">
+    /// Why the connection ended.
+    /// </param>
+    /// <param name="code">
+    /// The reason code that went on the wire, or would have; for <see cref="CloseCause.ClientDisconnected"/>, the
+    /// client's own.
+    /// </param>
+    /// <param name="payloadLength">
+    /// The length of the payload that was too large to send, for <see cref="CloseCause.MessageTooLargeToSend"/>.
+    /// </param>
+    private void WriteEndLine(ILogger logger, CloseCause cause, MqttReasonCode code, int payloadLength)
+    {
+        switch (cause)
+        {
+            case CloseCause.MalformedPacket:
+                ServerLog.MalformedPacket(logger, ClientId, code);
+                break;
+
+            case CloseCause.ProtocolError:
+                ServerLog.ProtocolError(logger, ClientId, code);
+                break;
+
+            case CloseCause.RefusedByHost:
+                ServerLog.RefusedByHost(logger, ClientId, code);
+                break;
+
+            case CloseCause.AuthenticationTimedOut:
+                ServerLog.AuthenticationTimedOut(logger, ClientId);
+                break;
+
+            case CloseCause.ConnectTimedOut:
+                // No client id yet: the remote end point names the connection.
+                ConnectionInfo remote = HttpContext.Connection;
+                ServerLog.ConnectTimedOut(logger, (object?)remote.RemoteIpAddress ?? "unknown", remote.RemotePort);
+                break;
+
+            case CloseCause.MessageTooLargeToSend:
+                ServerLog.MessageTooLargeToSend(logger, ClientId, payloadLength);
+                break;
+
+            case CloseCause.ClosedByHost:
+                ServerLog.ClosedByHost(logger, ClientId, code);
+                break;
+
+            case CloseCause.ClientDisconnected:
+                ServerLog.ClientDisconnected(logger, ClientId, code);
+                break;
+
+            default:
+                WriteClientIdEndLine(logger, cause);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Writes the line of an end decided by the winner of the move to Closing whose line carries the client id alone.
+    /// Writes nothing for <see cref="CloseCause.HandlerThrew"/> and <see cref="CloseCause.SendPathFaulted"/>: the code
+    /// that caught the exception writes their line, with it (<see cref="LogEnd"/>).
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="cause">
+    /// Why the connection ended.
+    /// </param>
+    private void WriteClientIdEndLine(ILogger logger, CloseCause cause)
+    {
+        switch (cause)
+        {
+            case CloseCause.KeepAliveTimedOut:
+                ServerLog.KeepAliveTimedOut(logger, ClientId);
+                break;
+
+            case CloseCause.PartialPacketTimedOut:
+                ServerLog.PartialPacketTimedOut(logger, ClientId);
+                break;
+
+            case CloseCause.WriteTimedOut:
+                ServerLog.WriteTimedOut(logger, ClientId);
+                break;
+
+            case CloseCause.AcknowledgementTimedOut:
+                ServerLog.AcknowledgementTimedOut(logger, ClientId);
+                break;
+
+            case CloseCause.OutgoingLimitPassed:
+                ServerLog.OutgoingLimitPassed(logger, ClientId);
+                break;
+
+            case CloseCause.ReceiveMaximumPassed:
+                ServerLog.ReceiveMaximumPassed(logger, ClientId);
+                break;
+
+            case CloseCause.TakenOver:
+                ServerLog.TakenOver(logger, ClientId);
+                break;
+
+            case CloseCause.ServerStopping:
+                ServerLog.ServerStopping(logger, ClientId);
+                break;
+
+            case CloseCause.ConnectionLost:
+                ServerLog.ConnectionLost(logger, ClientId);
+                break;
+
+            default:
+                // HandlerThrew or SendPathFaulted: written with the exception by the code that caught it.
+                break;
+        }
     }
 }

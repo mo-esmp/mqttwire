@@ -64,7 +64,7 @@ public sealed partial class MqttWireConnection
     /// <summary>
     /// The last resort of a holder of the send path that something threw at (an encoding whose payload memory throws,
     /// the pool, anything inside MqttWire): the connection is beyond saving. In this order: the close begins with
-    /// <see cref="MqttCloseReason.ConnectionLost"/> and the link is aborted (<see cref="CloseAfterFault"/>); the one
+    /// <see cref="CloseCause.SendPathFaulted"/> and the link is aborted (<see cref="CloseAfterFault"/>); the one
     /// buffer the holder rented and has not handed to the link goes back; the path is given up through the Closing
     /// step, which drops what waits, the exchange records and the control buffer, clears the counts and tells whoever
     /// waits for the path to be idle (the last write is taken as failed, so no WebSocket close is attempted); and the
@@ -123,10 +123,12 @@ public sealed partial class MqttWireConnection
     private void EndFaulted(Exception exception) => LogFault(exception, CloseAfterFault());
 
     /// <summary>
-    /// Begins the close with <see cref="MqttCloseReason.ConnectionLost"/>, unless an earlier close recorded its own
-    /// reason, and aborts the link, which a close that had begun already has not necessarily done. It cannot throw,
-    /// and when it returns the connection is Closing or later: the close's own throw can come only after its move to
-    /// Closing (the clock read for its stamp).
+    /// Begins the close with <see cref="CloseCause.SendPathFaulted"/> (reported to the host as
+    /// <see cref="MqttCloseReason.ConnectionLost"/>), unless an earlier close recorded its own cause, and aborts the
+    /// link, which a close that had begun already has not necessarily done. The close writes no log line of its own:
+    /// the fault's line, which carries the exception, is written by <see cref="LogFault"/>. It cannot throw, and when
+    /// it returns the connection is Closing or later: the close's own throw can come only after its move to Closing
+    /// (the clock read for its stamp).
     /// </summary>
     /// <returns>
     /// The first exception the close or the abort threw, to be logged with the fault; <see langword="null"/> when
@@ -137,7 +139,7 @@ public sealed partial class MqttWireConnection
         Exception? secondary = null;
         try
         {
-            BeginClose(MqttCloseReason.ConnectionLost, MqttReasonCode.Success, reasonString: null);
+            BeginClose(CloseCause.SendPathFaulted, MqttReasonCode.Success, reasonString: null);
         }
         catch (Exception thrown)
         {
@@ -160,7 +162,9 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Logs a fault inside MqttWire's sending as an error: event 20, the client id and the exception, never a payload
-    /// or a password. It cannot throw.
+    /// or a password, through <see cref="LogEnd"/>, which swallows a logging provider that throws: the connection has
+    /// already been ended and its send path given up, and throwing on would undo exactly what the fault path
+    /// guarantees. It cannot throw.
     /// </summary>
     /// <param name="exception">
     /// What was thrown.
@@ -172,19 +176,6 @@ public sealed partial class MqttWireConnection
     private void LogFault(Exception exception, Exception? secondary)
     {
         Exception logged = secondary is null ? exception : new AggregateException(exception, secondary);
-
-        // Deliberately swallowed below, and the only catch here that does nothing: a logging provider that throws
-        // while a fault is being reported leaves nowhere to report it, and the connection has already been ended and
-        // its send path given up. Throwing on would undo exactly what the fault path guarantees.
-#pragma warning disable RCS1075 // Avoid empty catch clause that catches System.Exception: see the comment above.
-        try
-        {
-            ServerLog.SendPathFaulted(_server.Logger, ClientId, logged);
-        }
-        catch (Exception)
-        {
-            // Nowhere left to report it.
-        }
-#pragma warning restore RCS1075
+        LogEnd(CloseCause.SendPathFaulted, MqttReasonCode.Success, payloadLength: 0, method: null, logged);
     }
 }

@@ -123,17 +123,17 @@ public sealed partial class MqttWireConnection
         MqttReasonCode code = ConnectCodec.TryDecode(_readBuffer.GetData()[..length], out ConnectPacket connect);
         if (code != MqttReasonCode.Success)
         {
-            MqttCloseReason reason = code == MqttReasonCode.MalformedPacket
-                ? MqttCloseReason.MalformedPacket
-                : MqttCloseReason.ProtocolError;
-            BeginClose(reason, code, reasonString: null);
+            CloseCause cause = code == MqttReasonCode.MalformedPacket
+                ? CloseCause.MalformedPacket
+                : CloseCause.ProtocolError;
+            BeginClose(cause, code, reasonString: null);
             return null;
         }
 
         code = CheckConnect(connect, out string? reasonString);
         if (code != MqttReasonCode.Success)
         {
-            BeginClose(MqttCloseReason.ProtocolError, code, reasonString);
+            BeginClose(CloseCause.ProtocolError, code, reasonString);
             return null;
         }
 
@@ -294,15 +294,16 @@ public sealed partial class MqttWireConnection
         catch (Exception exception)
         {
             ReleaseAuthentication();
-            ServerLog.HandlerThrew(_server.Logger, ClientId, nameof(IMqttWireHandler.OnConnectAsync), exception);
-            BeginClose(MqttCloseReason.HandlerThrew, MqttReasonCode.ImplementationSpecificError, reasonString: null);
+            BeginClose(CloseCause.HandlerThrew, MqttReasonCode.ImplementationSpecificError, reasonString: null);
+            LogEnd(CloseCause.HandlerThrew, MqttReasonCode.ImplementationSpecificError, payloadLength: 0,
+                nameof(IMqttWireHandler.OnConnectAsync), exception);
             return null;
         }
 
         ReleaseAuthentication();
         if (!result.IsAccepted)
         {
-            BeginClose(MqttCloseReason.ClosedByHost, result.ReasonCode, result.ReasonString);
+            BeginClose(CloseCause.RefusedByHost, result.ReasonCode, result.ReasonString);
             return null;
         }
 
@@ -337,19 +338,20 @@ public sealed partial class MqttWireConnection
         }
         catch (Exception exception)
         {
-            ServerLog.HandlerThrew(_server.Logger, ClientId, nameof(IMqttWireHandler.OnAdmit), exception);
-            BeginClose(MqttCloseReason.HandlerThrew, MqttReasonCode.ImplementationSpecificError, reasonString: null);
+            BeginClose(CloseCause.HandlerThrew, MqttReasonCode.ImplementationSpecificError, reasonString: null);
+            LogEnd(CloseCause.HandlerThrew, MqttReasonCode.ImplementationSpecificError, payloadLength: 0,
+                nameof(IMqttWireHandler.OnAdmit), exception);
             return false;
         }
 
         if (!admission.IsAccepted)
         {
-            MqttCloseReason reason = _server.IsStopping ? MqttCloseReason.ServerStopping : MqttCloseReason.ClosedByHost;
-            BeginClose(reason, admission.ReasonCode, admission.ReasonString);
+            CloseCause cause = _server.IsStopping ? CloseCause.ServerStopping : CloseCause.RefusedByHost;
+            BeginClose(cause, admission.ReasonCode, admission.ReasonString);
             return false;
         }
 
-        replaced?.BeginClose(MqttCloseReason.TakenOver, MqttReasonCode.SessionTakenOver, reasonString: null);
+        replaced?.BeginClose(CloseCause.TakenOver, MqttReasonCode.SessionTakenOver, reasonString: null);
         if (_state == ConnectionState.Active)
         {
             // A close from here on finds the send path taken until the CONNACK's write has ended, and aborts.
@@ -462,7 +464,7 @@ public sealed partial class MqttWireConnection
 
         if (HttpContext.RequestAborted.IsCancellationRequested)
         {
-            BeginClose(MqttCloseReason.ConnectionLost, MqttReasonCode.Success, reasonString: null);
+            BeginClose(CloseCause.ConnectionLost, MqttReasonCode.Success, reasonString: null);
             return;
         }
 
@@ -471,8 +473,7 @@ public sealed partial class MqttWireConnection
             return;
         }
 
-        ServerLog.AuthenticationTimedOut(_server.Logger, ClientId);
-        BeginClose(MqttCloseReason.ConnectionLost, MqttReasonCode.ServerUnavailable, reasonString: null);
+        BeginClose(CloseCause.AuthenticationTimedOut, MqttReasonCode.ServerUnavailable, reasonString: null);
     }
 
     /// <summary>
@@ -491,7 +492,7 @@ public sealed partial class MqttWireConnection
             return false;
         }
 
-        BeginClose(MqttCloseReason.ServerStopping, MqttReasonCode.ServerShuttingDown, reasonString: null);
+        BeginClose(CloseCause.ServerStopping, MqttReasonCode.ServerShuttingDown, reasonString: null);
         return true;
     }
 

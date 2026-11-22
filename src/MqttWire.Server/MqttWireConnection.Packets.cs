@@ -62,7 +62,7 @@ public sealed partial class MqttWireConnection
 
             default:
                 // A second CONNECT, AUTH, or a packet only a server sends.
-                BeginClose(MqttCloseReason.ProtocolError, MqttReasonCode.ProtocolError, reasonString: null);
+                BeginClose(CloseCause.ProtocolError, MqttReasonCode.ProtocolError, reasonString: null);
                 return false;
         }
     }
@@ -94,7 +94,7 @@ public sealed partial class MqttWireConnection
         if (publish.HasTopicAlias)
         {
             // The server announces no Topic Alias Maximum, so any alias is invalid (design 6.7).
-            BeginClose(MqttCloseReason.ProtocolError, MqttReasonCode.TopicAliasInvalid, reasonString: null);
+            BeginClose(CloseCause.ProtocolError, MqttReasonCode.TopicAliasInvalid, reasonString: null);
             return false;
         }
 
@@ -169,7 +169,7 @@ public sealed partial class MqttWireConnection
         if (subscribe.Properties.Contains(PropertyId.SubscriptionIdentifier))
         {
             // CONNACK announced Subscription Identifiers Available 0 (design 6.7).
-            BeginClose(MqttCloseReason.ProtocolError, MqttReasonCode.SubscriptionIdentifiersNotSupported,
+            BeginClose(CloseCause.ProtocolError, MqttReasonCode.SubscriptionIdentifiersNotSupported,
                 reasonString: null);
             return false;
         }
@@ -356,8 +356,8 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Handles a DISCONNECT: a malformed one ends the connection with the decoder's code; otherwise it ends with
-    /// <see cref="MqttCloseReason.ClientDisconnected"/> and nothing is written back. Its reason code and properties
-    /// have no effect.
+    /// <see cref="MqttCloseReason.ClientDisconnected"/> and nothing is written back. Its reason code is logged; it and
+    /// the properties have no other effect.
     /// </summary>
     /// <param name="packet">
     /// The whole packet, a view of the read buffer, valid only during the call.
@@ -367,14 +367,15 @@ public sealed partial class MqttWireConnection
     /// </returns>
     private bool HandleDisconnect(ReadOnlySpan<byte> packet)
     {
-        MqttReasonCode code = DisconnectCodec.TryDecode(packet, out _);
+        MqttReasonCode code = DisconnectCodec.TryDecode(packet, out DisconnectPacket disconnect);
         if (code != MqttReasonCode.Success)
         {
             CloseUndecodable(code);
             return false;
         }
 
-        BeginClose(MqttCloseReason.ClientDisconnected, MqttReasonCode.Success, reasonString: null);
+        // The client's code is for the log only: nothing is written back.
+        BeginClose(CloseCause.ClientDisconnected, disconnect.ReasonCode, reasonString: null);
         return false;
     }
 
@@ -396,14 +397,14 @@ public sealed partial class MqttWireConnection
             return true;
         }
 
-        BeginClose(MqttCloseReason.ProtocolError, MqttReasonCode.PacketTooLarge, reasonString: null);
+        BeginClose(CloseCause.ProtocolError, MqttReasonCode.PacketTooLarge, reasonString: null);
         return false;
     }
 
     /// <summary>
-    /// Ends the connection for a handler that threw out of a call on the read path (plan decision 17): logs the
-    /// exception as an error that names the method, and begins the close with 0x83 and
-    /// <see cref="MqttCloseReason.HandlerThrew"/>. The packet being handled gets no answer.
+    /// Ends the connection for a handler that threw out of a call on the read path (plan decision 17): begins the
+    /// close with 0x83 and <see cref="MqttCloseReason.HandlerThrew"/>, then logs the exception as an error that names
+    /// the method, whether or not this close won. The packet being handled gets no answer.
     /// </summary>
     /// <param name="method">
     /// The name of the handler method that threw.
@@ -413,7 +414,8 @@ public sealed partial class MqttWireConnection
     /// </param>
     private void CloseHandlerThrew(string method, Exception exception)
     {
-        ServerLog.HandlerThrew(_server.Logger, ClientId, method, exception);
-        BeginClose(MqttCloseReason.HandlerThrew, MqttReasonCode.ImplementationSpecificError, reasonString: null);
+        BeginClose(CloseCause.HandlerThrew, MqttReasonCode.ImplementationSpecificError, reasonString: null);
+        LogEnd(CloseCause.HandlerThrew, MqttReasonCode.ImplementationSpecificError, payloadLength: 0, method,
+            exception);
     }
 }

@@ -3,11 +3,62 @@
 namespace MqttWire.Server.Internal;
 
 /// <summary>
-/// The server's log events, source-generated so that a level that is off costs a check and nothing else. No event
-/// carries a password or a payload.
+/// The server's log events (design 6.12), source-generated so that a level that is off costs a check and nothing
+/// else: no string is built and no value boxed unless the level is on. Every end of a connection the server decides
+/// on has its own event; a reason code is logged as its <see cref="MqttReasonCode"/> name. No event carries a
+/// password, a user name, a payload, a topic, user properties or a reason string from the host.
 /// </summary>
 internal static partial class ServerLog
 {
+    /// <summary>
+    /// Logs that the client sent a malformed packet, and the connection was ended.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection; empty when the CONNECT itself was malformed.
+    /// </param>
+    /// <param name="reasonCode">
+    /// The reason code the end carries to the client.
+    /// </param>
+    [LoggerMessage(EventId = 1, Level = LogLevel.Debug,
+        Message = "Client {ClientId} sent a malformed packet; the connection was ended with reason code {ReasonCode}.")]
+    public static partial void MalformedPacket(ILogger logger, string clientId, MqttReasonCode reasonCode);
+
+    /// <summary>
+    /// Logs that the client broke the protocol, or sent what MqttWire does not take, and the connection was ended.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection; empty when the CONNECT itself was refused before it was read.
+    /// </param>
+    /// <param name="reasonCode">
+    /// The reason code the end carries to the client.
+    /// </param>
+    [LoggerMessage(EventId = 2, Level = LogLevel.Debug,
+        Message = "Client {ClientId} broke the protocol; the connection was ended with reason code {ReasonCode}.")]
+    public static partial void ProtocolError(ILogger logger, string clientId, MqttReasonCode reasonCode);
+
+    /// <summary>
+    /// Logs that the host refused the CONNECT, in <see cref="IMqttWireHandler.OnConnectAsync"/> or in
+    /// <see cref="IMqttWireHandler.OnAdmit"/>. The host's reason string is not logged.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection.
+    /// </param>
+    /// <param name="reasonCode">
+    /// The host's reason code, which the CONNACK carries.
+    /// </param>
+    [LoggerMessage(EventId = 3, Level = LogLevel.Debug,
+        Message = "The host refused client {ClientId} with reason code {ReasonCode}.")]
+    public static partial void RefusedByHost(ILogger logger, string clientId, MqttReasonCode reasonCode);
+
     /// <summary>
     /// Logs that the host's <see cref="IMqttWireHandler.OnConnectAsync"/> did not answer within the authentication
     /// deadline, so the connection was refused with CONNACK 0x88.
@@ -21,6 +72,151 @@ internal static partial class ServerLog
     [LoggerMessage(EventId = 4, Level = LogLevel.Error,
         Message = "OnConnectAsync did not answer for client {ClientId} within the authentication deadline; the connection was refused with 0x88.")]
     public static partial void AuthenticationTimedOut(ILogger logger, string clientId);
+
+    /// <summary>
+    /// Logs that no complete CONNECT came within the connect deadline, so the connection was aborted. There is no
+    /// client id yet: the remote end point names the connection.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="remoteAddress">
+    /// The remote IP address of the request, or the text "unknown" when it has none.
+    /// </param>
+    /// <param name="remotePort">
+    /// The remote port of the request.
+    /// </param>
+    [LoggerMessage(EventId = 5, Level = LogLevel.Debug,
+        Message = "No complete CONNECT came from {RemoteAddress} port {RemotePort} within the connect deadline; the connection was aborted.")]
+    public static partial void ConnectTimedOut(ILogger logger, object remoteAddress, int remotePort);
+
+    /// <summary>
+    /// Logs that the client sent nothing within one and a half times its keep-alive, so the connection was ended.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection.
+    /// </param>
+    [LoggerMessage(EventId = 6, Level = LogLevel.Debug,
+        Message = "Client {ClientId} sent nothing within one and a half times its keep-alive; the connection was ended.")]
+    public static partial void KeepAliveTimedOut(ILogger logger, string clientId);
+
+    /// <summary>
+    /// Logs that a packet from the client stayed incomplete past the partial-packet deadline, so the connection was
+    /// ended.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection.
+    /// </param>
+    [LoggerMessage(EventId = 7, Level = LogLevel.Debug,
+        Message = "A packet from client {ClientId} stayed incomplete past the partial-packet deadline; the connection was ended.")]
+    public static partial void PartialPacketTimedOut(ILogger logger, string clientId);
+
+    /// <summary>
+    /// Logs that a write to the client did not complete within the write deadline, so the connection was aborted.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection.
+    /// </param>
+    [LoggerMessage(EventId = 8, Level = LogLevel.Debug,
+        Message = "A write to client {ClientId} did not complete within the write deadline; the connection was aborted.")]
+    public static partial void WriteTimedOut(ILogger logger, string clientId);
+
+    /// <summary>
+    /// Logs that the client did not acknowledge a packet within the acknowledgement deadline, so the connection was
+    /// ended.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection.
+    /// </param>
+    [LoggerMessage(EventId = 9, Level = LogLevel.Debug,
+        Message = "Client {ClientId} did not acknowledge a packet within the acknowledgement deadline; the connection was ended.")]
+    public static partial void AcknowledgementTimedOut(ILogger logger, string clientId);
+
+    /// <summary>
+    /// Logs that more messages or bytes waited for the client than the options allow, so the connection was evicted.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection.
+    /// </param>
+    [LoggerMessage(EventId = 10, Level = LogLevel.Debug,
+        Message = "More waited for client {ClientId} than the outgoing limits allow; the connection was evicted.")]
+    public static partial void OutgoingLimitPassed(ILogger logger, string clientId);
+
+    /// <summary>
+    /// Logs that the client sent more unacknowledged QoS 1 and 2 publishes than the receive maximum allows, so the
+    /// connection was ended.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection.
+    /// </param>
+    [LoggerMessage(EventId = 11, Level = LogLevel.Debug,
+        Message = "Client {ClientId} sent more unacknowledged QoS 1 and 2 publishes than the receive maximum allows; the connection was ended.")]
+    public static partial void ReceiveMaximumPassed(ILogger logger, string clientId);
+
+    /// <summary>
+    /// Logs that a message the host sent was too large for the client or for the options, so the connection was
+    /// ended. Only the payload's length is logged, never the payload.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection.
+    /// </param>
+    /// <param name="payloadLength">
+    /// The length of the message's payload, in bytes.
+    /// </param>
+    [LoggerMessage(EventId = 12, Level = LogLevel.Debug,
+        Message = "A message with a payload of {PayloadLength} bytes was too large to send to client {ClientId}; the connection was ended.")]
+    public static partial void MessageTooLargeToSend(ILogger logger, string clientId, int payloadLength);
+
+    /// <summary>
+    /// Logs that a new connection with the same client id took the place of this one.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection.
+    /// </param>
+    [LoggerMessage(EventId = 13, Level = LogLevel.Debug,
+        Message = "The connection of client {ClientId} was taken over by a new one with the same client id.")]
+    public static partial void TakenOver(ILogger logger, string clientId);
+
+    /// <summary>
+    /// Logs that the host closed the connection with <see cref="MqttWireConnection.Close"/>. The host's reason string
+    /// is not logged.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection.
+    /// </param>
+    /// <param name="reasonCode">
+    /// The host's reason code, which the DISCONNECT carries.
+    /// </param>
+    [LoggerMessage(EventId = 14, Level = LogLevel.Debug,
+        Message = "The host closed the connection of client {ClientId} with reason code {ReasonCode}.")]
+    public static partial void ClosedByHost(ILogger logger, string clientId, MqttReasonCode reasonCode);
 
     /// <summary>
     /// Logs that a method of the host's handler threw; the connection is closed with 0x83, or, for
@@ -42,8 +238,51 @@ internal static partial class ServerLog
     public static partial void HandlerThrew(ILogger logger, string clientId, string method, Exception exception);
 
     /// <summary>
-    /// Logs what the host's <see cref="IMqttWireHandler.OnConnectAsync"/> did after its deadline had passed or its
-    /// connection had gone: the answer is discarded either way.
+    /// Logs that the connection was ended because the server is stopping.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection; empty when it had sent no CONNECT yet.
+    /// </param>
+    [LoggerMessage(EventId = 16, Level = LogLevel.Debug,
+        Message = "The connection of client {ClientId} was ended because the server is stopping.")]
+    public static partial void ServerStopping(ILogger logger, string clientId);
+
+    /// <summary>
+    /// Logs that the client sent DISCONNECT.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection.
+    /// </param>
+    /// <param name="reasonCode">
+    /// The reason code of the client's DISCONNECT.
+    /// </param>
+    [LoggerMessage(EventId = 17, Level = LogLevel.Debug,
+        Message = "Client {ClientId} disconnected with reason code {ReasonCode}.")]
+    public static partial void ClientDisconnected(ILogger logger, string clientId, MqttReasonCode reasonCode);
+
+    /// <summary>
+    /// Logs that the link of the connection ended without a DISCONNECT.
+    /// </summary>
+    /// <param name="logger">
+    /// The server's logger.
+    /// </param>
+    /// <param name="clientId">
+    /// The client identifier of the connection; empty when it had sent no CONNECT yet.
+    /// </param>
+    [LoggerMessage(EventId = 18, Level = LogLevel.Debug,
+        Message = "The connection of client {ClientId} was lost.")]
+    public static partial void ConnectionLost(ILogger logger, string clientId);
+
+    /// <summary>
+    /// Logs how the host's <see cref="IMqttWireHandler.OnConnectAsync"/> ended once the connection had stopped waiting
+    /// for it (its deadline had passed, or its connection had gone): whether it completed, was cancelled or threw,
+    /// nothing it returned is used.
     /// </summary>
     /// <param name="logger">
     /// The server's logger.
@@ -58,12 +297,13 @@ internal static partial class ServerLog
     /// <param name="exception">
     /// What the late task threw, or <see langword="null"/> when it did not throw.
     /// </param>
-    [LoggerMessage(EventId = 19, Message = "OnConnectAsync for client {ClientId} ended after the connection had let go of it; its outcome was discarded.")]
+    [LoggerMessage(EventId = 19, Message = "OnConnectAsync for client {ClientId} ended after the connection had stopped waiting for it; nothing it returned was used.")]
     public static partial void LateConnectResult(ILogger logger, LogLevel level, string clientId, Exception? exception);
 
     /// <summary>
     /// Logs that something threw inside MqttWire while it sent to a client (an encoding, the pool, the link): the
-    /// connection was ended with <see cref="MqttCloseReason.ConnectionLost"/> and its link aborted.
+    /// connection was ended, reported to the host as <see cref="MqttCloseReason.ConnectionLost"/>, and its link
+    /// aborted.
     /// </summary>
     /// <param name="logger">
     /// The server's logger.

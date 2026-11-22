@@ -143,7 +143,7 @@ public sealed partial class MqttWireConnection
         catch (ArgumentException)
         {
             // The close finds the send path taken and aborts; then the path is given up and what waited is dropped.
-            BeginClose(MqttCloseReason.ConnectionLost, MqttReasonCode.Success, reasonString: null);
+            BeginClose(CloseCause.ConnectionLost, MqttReasonCode.Success, reasonString: null);
             ContinueSending(returned: null, failed: false, InlineWrites);
             throw;
         }

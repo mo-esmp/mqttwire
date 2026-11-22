@@ -229,9 +229,10 @@ public sealed partial class MqttWireConnection
     internal ConnectionState StateNow => _state;
 
     /// <summary>
-    /// Gets why the connection ended, recorded by the call that moved it to Closing; meaningless before.
+    /// Gets why the connection ended, recorded by the call that moved it to Closing; meaningless before. It is
+    /// narrowed to <see cref="MqttCloseReason"/> only where <see cref="IMqttWireHandler.OnClosed"/> is called.
     /// </summary>
-    internal MqttCloseReason CloseReason { get; private set; }
+    internal CloseCause CloseCause { get; private set; }
 
     /// <summary>
     /// Gets or sets the index of the connection's slot in the registry; set by the registry, under its lock.
@@ -303,7 +304,7 @@ public sealed partial class MqttWireConnection
     public void Close(MqttReasonCode reason, string? reasonString = null)
     {
         ReasonStrings.ThrowIfNotEncodable(reasonString: reasonString, paramName: nameof(reasonString));
-        BeginClose(MqttCloseReason.ClosedByHost, reason, ReasonStrings.Cut(reasonString));
+        BeginClose(CloseCause.ClosedByHost, reason, ReasonStrings.Cut(reasonString));
     }
 
     /// <summary>
