@@ -27,9 +27,17 @@ public sealed partial class MqttWireConnection
     private PacketReadBuffer _readBuffer = default;
 
     /// <summary>
-    /// When the current state was entered, a timestamp of the server's clock; 0 before the accept.
+    /// When the Accepted or the Authenticating state was entered, a timestamp of the server's clock; 0 before the
+    /// accept. The move to Closing never writes it, so a stamp written by a move that then lost its race is harmless.
     /// </summary>
     private long _stateEnteredAt;
+
+    /// <summary>
+    /// When the connection entered Closing, a timestamp of the server's clock; 0 until then. Only the winner of
+    /// the move to Closing writes it, after its compare-exchange, so the close deadline is never measured from an
+    /// older state's stamp.
+    /// </summary>
+    private long _closingAt;
 
     /// <summary>
     /// The state; it moves forward only, by <see cref="Interlocked.CompareExchange{T}(ref T, T, T)"/> where two

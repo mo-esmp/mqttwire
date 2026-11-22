@@ -106,6 +106,8 @@ public sealed partial class MqttWireConnection
             return;
         }
 
+        // Stamped before the move, so a sweep never sees Authenticating with the accept's stamp. Should the move
+        // lose to the connect deadline, the stamp is unused: Closing is measured from its own.
         Volatile.Write(ref _stateEnteredAt, _server.Time.GetTimestamp());
         if (Interlocked.CompareExchange(ref _state, ConnectionState.Authenticating, ConnectionState.Accepted)
             != ConnectionState.Accepted)

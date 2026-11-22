@@ -43,7 +43,9 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Acts on the deadlines that have passed; called by the sweep, from the timer's thread. An Accepted
-    /// connection is aborted at the connect deadline, and a Closing one at the close deadline. It allocates
+    /// connection is aborted at the connect deadline, and a Closing one at the close deadline. Each check acts only
+    /// on the state it read: the move out of Accepted is a compare-exchange that expects Accepted, and the close
+    /// deadline is measured from the stamp that only the winner of the move to Closing writes. It allocates
     /// nothing and never throws.
     /// </summary>
     /// <param name="now">
@@ -52,24 +54,24 @@ public sealed partial class MqttWireConnection
     internal void CheckDeadlines(long now)
     {
         ConnectionState state = _state;
-        long entered = Volatile.Read(ref _stateEnteredAt);
-        if (entered == 0)
+        if (state == ConnectionState.Accepted)
         {
-            return;
-        }
-
-        long elapsed = now - entered;
-        if (state == ConnectionState.Accepted && elapsed >= _server.ConnectDeadlineLength)
-        {
-            // The connection was never admitted, so no OnClosed reports the reason; the link failing is the end.
-            if (TryEnterClosing(MqttCloseReason.ConnectionLost, out _))
+            long accepted = Volatile.Read(ref _stateEnteredAt);
+            if (accepted != 0 && now - accepted >= _server.ConnectDeadlineLength
+                && TryEnterClosingFrom(ConnectionState.Accepted, MqttCloseReason.ConnectionLost))
             {
+                // The connection was never admitted, so no OnClosed reports the reason; the link failing is the end.
                 _link?.Abort();
             }
         }
-        else if (state == ConnectionState.Closing && elapsed >= _server.CloseDeadlineLength)
+        else if (state == ConnectionState.Closing)
         {
-            _link?.Abort();
+            // 0 until the winner of the move to Closing has stamped it: that sweep skips the connection.
+            long closing = Volatile.Read(ref _closingAt);
+            if (closing != 0 && now - closing >= _server.CloseDeadlineLength)
+            {
+                _link?.Abort();
+            }
         }
     }
 
@@ -117,17 +119,40 @@ public sealed partial class MqttWireConnection
         left = _state;
         while (left < ConnectionState.Closing)
         {
-            ConnectionState seen = Interlocked.CompareExchange(ref _state, ConnectionState.Closing, left);
-            if (seen == left)
+            if (TryEnterClosingFrom(left, reason))
             {
-                CloseReason = reason;
-                Volatile.Write(ref _stateEnteredAt, _server.Time.GetTimestamp());
                 return true;
             }
 
-            left = seen;
+            left = _state;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Moves the connection to Closing only from one state; the winner records the reason and writes
+    /// <see cref="_closingAt"/>, which nothing else writes.
+    /// </summary>
+    /// <param name="expected">
+    /// The state the move must start from; it is below Closing.
+    /// </param>
+    /// <param name="reason">
+    /// Why the connection ends.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when this call made the move; <see langword="false"/> when the connection was in
+    /// another state, and nothing changed.
+    /// </returns>
+    private bool TryEnterClosingFrom(ConnectionState expected, MqttCloseReason reason)
+    {
+        if (Interlocked.CompareExchange(ref _state, ConnectionState.Closing, expected) != expected)
+        {
+            return false;
+        }
+
+        CloseReason = reason;
+        Volatile.Write(ref _closingAt, _server.Time.GetTimestamp());
+        return true;
     }
 }
