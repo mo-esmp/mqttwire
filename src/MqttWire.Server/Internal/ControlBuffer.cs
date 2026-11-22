@@ -10,6 +10,8 @@ namespace MqttWire.Server.Internal;
 /// idle connection holds none. It is a mutable struct held in a field of the connection, never copied while it is
 /// in use, and not thread-safe: the connection's lock guards it. How many packets and bytes may wait is the
 /// connection's limit; this type only never rents more than <see cref="ServerLimits.MaxEncodingBufferBytes"/>.
+/// Every connection carries one, idle or not, so its counts are packed into 8 bytes beside the array: 16 bytes in
+/// all.
 /// </summary>
 [StructLayout(LayoutKind.Auto)]
 internal struct ControlBuffer
@@ -20,14 +22,31 @@ internal struct ControlBuffer
     private const int LargestArray = ServerLimits.MaxEncodingBufferBytes;
 
     /// <summary>
+    /// The bit of <see cref="_packets"/> that says a PINGRESP is among the packets that wait; the bits below it
+    /// count the packets, of which at most <see cref="ServerLimits.MaxWaitingControlPackets"/> wait.
+    /// </summary>
+    private const ushort PingRespBit = 0x8000;
+
+    /// <summary>
     /// The rented array, or <see langword="null"/> when no packet waits.
     /// </summary>
     private byte[]? _array;
 
     /// <summary>
+    /// The number of packets that wait, with <see cref="PingRespBit"/> set when a PINGRESP is among them.
+    /// </summary>
+    private ushort _packets;
+
+    /// <summary>
+    /// The number of waiting packets that are the last answer to a publish of the client; at most the number of
+    /// packets that wait.
+    /// </summary>
+    private ushort _publishAnswers;
+
+    /// <summary>
     /// Gets the number of packets that wait.
     /// </summary>
-    public int PacketCount { get; private set; }
+    public readonly int PacketCount => _packets & ~PingRespBit;
 
     /// <summary>
     /// Gets the bytes of the packets that wait, together.
@@ -37,14 +56,14 @@ internal struct ControlBuffer
     /// <summary>
     /// Gets a value indicating whether a PINGRESP is among the packets that wait.
     /// </summary>
-    public bool HasPingResp { get; private set; }
+    public readonly bool HasPingResp => (_packets & PingRespBit) != 0;
 
     /// <summary>
     /// Gets the number of waiting packets that are the last answer to a QoS 1 or 2 publish of the client: PUBACK,
     /// PUBCOMP success, or a failing PUBREC. They count against the receive maximum the server announced until they
     /// are handed to the link (<see cref="Detach"/>) or dropped (<see cref="Release"/>).
     /// </summary>
-    public int PublishAnswerCount { get; private set; }
+    public readonly int PublishAnswerCount => _publishAnswers;
 
     /// <summary>
     /// Makes room for one more packet behind those that wait and hands the room out. The first packet rents the
@@ -97,10 +116,18 @@ internal struct ControlBuffer
     /// </param>
     public void Commit(int size, bool isPingResp, bool isPublishAnswer)
     {
+        Debug.Assert(PacketCount < ServerLimits.MaxWaitingControlPackets, "The caller keeps the count within 1,024.");
         ByteCount += size;
-        PacketCount++;
-        HasPingResp |= isPingResp;
-        PublishAnswerCount += isPublishAnswer ? 1 : 0;
+        _packets++;
+        if (isPingResp)
+        {
+            _packets |= PingRespBit;
+        }
+
+        if (isPublishAnswer)
+        {
+            _publishAnswers++;
+        }
     }
 
     /// <summary>

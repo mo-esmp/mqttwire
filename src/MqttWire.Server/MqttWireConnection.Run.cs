@@ -48,9 +48,24 @@ public sealed partial class MqttWireConnection
     /// unless it is what a broken link gives; it fails only when the WebSocket cannot be accepted, before the
     /// connection takes its slot.
     /// </returns>
-    internal async Task RunAsync(IMqttLink? link)
+    internal Task RunAsync(IMqttLink? link)
     {
-        _link = link ?? await AcceptWebSocketAsync().ConfigureAwait(false);
+        // Kept in the field, not in a parameter of the async method: a parameter would live in the method's state
+        // for as long as the connection does, 8 bytes for every idle connection.
+        _link = link;
+        return RunCoreAsync();
+    }
+
+    /// <summary>
+    /// The run itself (see <see cref="RunAsync"/>): over the link already in <see cref="_link"/>, or,
+    /// when there is none, over the WebSocket of the request, which it accepts first.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the connection is Closed; it fails only when the WebSocket cannot be accepted.
+    /// </returns>
+    private async Task RunCoreAsync()
+    {
+        _link ??= await AcceptWebSocketAsync().ConfigureAwait(false);
         Volatile.Write(ref _stateEnteredAt, _server.Time.GetTimestamp());
         if (_server.Registry.Add(this))
         {
