@@ -48,6 +48,50 @@ public sealed class ClientServerInteropTests
     }
 
     /// <summary>
+    /// Proves that QoS 2 deliveries from the server to MqttWire's client complete on both sides: the host hands the
+    /// server 1,100 QoS 2 messages for one subscriber, more than four times the 256 exchanges the server keeps open
+    /// towards one client, so the later ones go out only as the client's PUBREC and PUBCOMP free the earlier ones'
+    /// places; every message arrives once, in order, and a marker sent behind them arrives next.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task TrySend_MoreQoS2MessagesThanTheWindow_AllArriveOnceInOrder()
+    {
+        // Arrange
+        const int Messages = 1_100;
+        await using ServerHost host = await ServerHost.StartAsync(static options => options.MaxOutgoingMessages = Messages);
+        Inbox inbox = new();
+        await using MqttWireClient subscriber = CreateClient(host, "wire-sub", inbox);
+        (await subscriber.ConnectAsync().WaitAsync(s_failSafe)).IsConnected.ShouldBeTrue();
+        host.Server.TryGetConnection("wire-sub", out MqttWireConnection? connection).ShouldBeTrue();
+        MqttTopic topic = MqttTopic.Create("t/1");
+
+        // Act
+        for (int i = 0; i < Messages; i++)
+        {
+            connection.TrySend(topic, Encoding.UTF8.GetBytes($"m{i}"), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
+        }
+
+        List<Received> received = [];
+        for (int i = 0; i < Messages; i++)
+        {
+            received.Add(await inbox.NextAsync());
+        }
+
+        connection.TrySend(topic, "marker"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
+        Received next = await inbox.NextAsync();
+
+        // Assert
+        received.Select(static message => message.Payload)
+            .ShouldBe(Enumerable.Range(0, Messages).Select(static i => $"m{i}"));
+        received.ShouldAllBe(static message => message.Topic == "t/1" && message.QoS == MqttQoS.ExactlyOnce);
+        next.Payload.ShouldBe("marker");
+        subscriber.IsConnected.ShouldBeTrue();
+    }
+
+    /// <summary>
     /// Proves the test host's refusal reaches the client as a refused connect that carries the host's reason code.
     /// </summary>
     [Fact]
