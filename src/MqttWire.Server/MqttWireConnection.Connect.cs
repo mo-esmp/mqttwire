@@ -123,10 +123,7 @@ public sealed partial class MqttWireConnection
         MqttReasonCode code = ConnectCodec.TryDecode(_readBuffer.GetData()[..length], out ConnectPacket connect);
         if (code != MqttReasonCode.Success)
         {
-            CloseCause cause = code == MqttReasonCode.MalformedPacket
-                ? CloseCause.MalformedPacket
-                : CloseCause.ProtocolError;
-            BeginClose(cause, code, reasonString: null);
+            CloseUndecodable(code);
             return null;
         }
 

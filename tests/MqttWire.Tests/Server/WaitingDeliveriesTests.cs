@@ -36,7 +36,6 @@ public sealed class WaitingDeliveriesTests
         queue.Capacity.ShouldBe(16);
         order.ShouldBe(Enumerable.Range(10, 14).ToList());
         queue.Count.ShouldBe(0);
-        queue.PayloadBytes.ShouldBe(0);
     }
 
     /// <summary>
@@ -80,39 +79,8 @@ public sealed class WaitingDeliveriesTests
 
         // Assert
         queue.Count.ShouldBe(0);
-        queue.PayloadBytes.ShouldBe(0);
         queue.Capacity.ShouldBe(16);
         Items(queue).ShouldAllBe(static slot => slot.Equals(default(PendingDelivery)));
-    }
-
-    /// <summary>
-    /// Proves that the payload bytes the ring reports are exact through every change: each enqueue adds its payload's
-    /// length, each dequeue takes it away, and a clear makes them 0.
-    /// </summary>
-    [Fact]
-    public void PayloadBytes_EnqueueDequeueAndClear_StayExact()
-    {
-        // Arrange
-        WaitingDeliveries queue = new();
-
-        // Act
-        // Payloads of 1 to 20 bytes: 210 bytes in all.
-        for (int length = 1; length <= 20; length++)
-        {
-            queue.Enqueue(new PendingDelivery(s_topic, new byte[length], MqttQoS.AtMostOnce));
-        }
-
-        long afterEnqueue = queue.PayloadBytes;
-
-        // The first five take away 1 + 2 + 3 + 4 + 5 = 15 bytes.
-        Dequeue(queue, count: 5);
-        long afterDequeue = queue.PayloadBytes;
-        queue.Clear();
-
-        // Assert
-        afterEnqueue.ShouldBe(210);
-        afterDequeue.ShouldBe(195);
-        queue.PayloadBytes.ShouldBe(0);
     }
 
     /// <summary>
@@ -181,7 +149,6 @@ public sealed class WaitingDeliveriesTests
         waiting.ShouldBe(2);
         afterwards.ShouldBeSameAs(pooled);
         afterwards.Count.ShouldBe(0);
-        afterwards.PayloadBytes.ShouldBe(0);
         Items(afterwards).ShouldAllBe(static slot => slot.Equals(default(PendingDelivery)));
         harness.Pool.Outstanding.ShouldBe(0);
     }

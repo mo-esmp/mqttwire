@@ -31,11 +31,6 @@ internal sealed class WaitingDeliveries
     public int Count { get; private set; }
 
     /// <summary>
-    /// Gets the payload bytes of the deliveries that wait, together.
-    /// </summary>
-    public long PayloadBytes { get; private set; }
-
-    /// <summary>
     /// Gets the number of slots of the ring: 0 before the first delivery, then a power of two from 16 up; it never
     /// shrinks.
     /// </summary>
@@ -56,7 +51,6 @@ internal sealed class WaitingDeliveries
 
         _items[(_head + Count) & (_items.Length - 1)] = delivery;
         Count++;
-        PayloadBytes += delivery.Payload.Length;
     }
 
     /// <summary>
@@ -83,9 +77,7 @@ internal sealed class WaitingDeliveries
     public void Dequeue()
     {
         ThrowIfEmpty();
-        ref PendingDelivery oldest = ref _items[_head];
-        PayloadBytes -= oldest.Payload.Length;
-        oldest = default;
+        _items[_head] = default;
         _head = (_head + 1) & (_items.Length - 1);
         Count--;
     }
@@ -100,7 +92,6 @@ internal sealed class WaitingDeliveries
         Array.Clear(_items, index: 0, Count - first);
         _head = 0;
         Count = 0;
-        PayloadBytes = 0;
     }
 
     /// <summary>

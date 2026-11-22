@@ -571,7 +571,8 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Begins the close for a packet the decoder, or the skip, refused: with <see cref="MqttCloseReason.MalformedPacket"/>
-    /// for 0x81, and <see cref="MqttCloseReason.ProtocolError"/> for any other code; the DISCONNECT carries the code.
+    /// for 0x81, and <see cref="MqttCloseReason.ProtocolError"/> for any other code; the DISCONNECT carries the code,
+    /// or, for a CONNECT, the CONNACK.
     /// </summary>
     /// <param name="code">
     /// The code the decoder gave.

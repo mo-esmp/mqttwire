@@ -110,7 +110,6 @@ public sealed class SendTests
         first.CompleteHeldWrites();
         WaitingDeliveries pooled = harness.Server.Pools.Waiting.Get();
         int countWhenPooled = pooled.Count;
-        long bytesWhenPooled = pooled.PayloadBytes;
         harness.Server.Pools.Waiting.Return(pooled);
 
         // While the second connection has it, the pool has none to give and creates another.
@@ -123,7 +122,6 @@ public sealed class SendTests
 
         // Assert
         countWhenPooled.ShouldBe(0);
-        bytesWhenPooled.ShouldBe(0);
         whileInUse.ShouldNotBeSameAs(pooled);
         afterwards.ShouldBeSameAs(pooled);
         afterwards.Count.ShouldBe(0);
