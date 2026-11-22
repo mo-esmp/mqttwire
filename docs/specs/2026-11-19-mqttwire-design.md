@@ -1172,7 +1172,10 @@ followed by event 21, which `OnClosed` receives as a lost connection).
    - admission: a takeover the host accepts and one it refuses; two CONNECTs for one client id
      finishing `OnConnectAsync` together; a new connection that fails right after admission;
      every accepted `OnAdmit` is matched by exactly one `OnClosed`;
-   - an `OnConnectAsync` that never returns and ignores cancellation;
+   - an `OnConnectAsync` that never returns and ignores cancellation, and one that blocks its
+     calling thread, at the deadline and at the stop;
+   - a link that throws when it is aborted, at every place that aborts; a peer that closes
+     between the decision to abort and the abort: the run ends only after the abort;
    - a handler method that throws, in each of the six methods;
    - an idle, connected connection costs MqttWire at most 768 bytes (6.14);
    - "request problem information" 0; a client with a small "maximum packet size";
@@ -1197,7 +1200,9 @@ followed by event 21, which `OnClosed` receives as a lost connection).
      caller adds a message" is forced, in both orders.
    - **Stress:** many threads call `TrySend` on one connection while the link completes writes
      sometimes at once and sometimes later; everything is written exactly once, in order, and
-     the connection ends idle.
+     the connection ends idle. The sweep runs on a thread of its own meanwhile, and in the test
+     of a close racing the senders it moves the clock, so that its deadlines pass during the
+     race.
 4. **Buffers.** A counting pool asserts that every rented buffer is returned exactly once
    across every way out. A second pool **overwrites every returned buffer and hands it out
    again at once**; with it, a link that holds a read or a write open is aborted, also at the
@@ -1205,7 +1210,9 @@ followed by event 21, which `OnClosed` receives as a lost connection).
    flight never sees or changes the reused memory. Repeated connect, work and disconnect cycles
    assert that nothing accumulates.
 5. **Bounds are asserted after every step of these tests, not only at the end:** records,
-   waiting packets and bytes, rented buffers.
+   waiting packets and bytes, rented buffers, on whichever pool the server rents from; and what
+   a WebSocket demands of the server on every link: one write or close at a time, nothing begun
+   after its abort but the one write already decided on, and no abort after the run has ended.
 6. **Client:** identifiers across the wrap with identifiers still in use; a PUBACK that never
    arrives ends the connection; unknown and wrong-kind acknowledgements; a small receive
    maximum; QoS 2 in both directions; a server that grants less than was asked; option checks.
@@ -1220,7 +1227,9 @@ followed by event 21, which `OnClosed` receives as a lost connection).
    - MqttWire's server with MQTTnet's client, and with MQTT.js (`tests/interop-js`);
    - MqttWire's client with MQTTnet's broker;
    - MqttWire's client with MqttWire's server;
-   - each at QoS 0, 1 and 2 in both directions.
+   - each at QoS 0, 1 and 2 in both directions;
+   - over Kestrel: sockets closed by the client just as the sweep acts on their connect
+     deadline, and a WebSocket frame whose payload is withheld.
 8. **Shared topics** (6.10): ten connections on one topic through a small host; one message
    reaches all; one member stops reading and the others keep receiving in time.
 9. **The client in a browser:** the sample is run once in Blazor WebAssembly by hand.
