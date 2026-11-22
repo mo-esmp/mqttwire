@@ -13,6 +13,8 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using MQTTnet;
 using MqttWire.Server;
+using MqttWire.Tests.Codec;
+using MqttWire.Tests.Server;
 using Xunit.Abstractions;
 
 namespace MqttWire.Interop.Tests;
@@ -32,29 +34,14 @@ public sealed class EndpointTests(ITestOutputHelper output)
     private static readonly TimeSpan s_failSafe = ServerHost.FailSafe;
 
     /// <summary>
-    /// A CONNECT with client id "c1" and keep-alive 30.
-    /// </summary>
-    private static readonly byte[] s_connect = Convert.FromHexString("100F00044D5154540502001E0000026331");
-
-    /// <summary>
-    /// The CONNACK the server answers a CONNECT with: success, receive maximum 256, no subscription identifiers.
-    /// </summary>
-    private static readonly byte[] s_connAck = Convert.FromHexString("20080000052101002900");
-
-    /// <summary>
     /// A PINGREQ.
     /// </summary>
-    private static readonly byte[] s_pingReq = Convert.FromHexString("C000");
+    private static readonly byte[] s_pingReq = Hex.Parse("C0 00");
 
     /// <summary>
     /// A PINGRESP.
     /// </summary>
-    private static readonly byte[] s_pingResp = Convert.FromHexString("D000");
-
-    /// <summary>
-    /// The DISCONNECT the server sends when it stops: "server shutting down" (0x8B).
-    /// </summary>
-    private static readonly byte[] s_disconnectShuttingDown = Convert.FromHexString("E0018B");
+    private static readonly byte[] s_pingResp = Hex.Parse("D0 00");
 
     /// <summary>
     /// Proves a WebSocket request that does not offer the sub-protocol <c>mqtt</c> is refused with HTTP 400.
@@ -159,9 +146,9 @@ public sealed class EndpointTests(ITestOutputHelper output)
     {
         // Arrange
         await using ServerHost host = await ServerHost.StartAsync();
-        await using RawWebSocket silent = await ConnectRawAsync(host);
+        await using RawWebSocket silent = await host.ConnectRawAsync();
         Task stopped = host.StopAsync();
-        (await silent.ReceiveAsync().WaitAsync(s_failSafe)).Payload.ShouldBe(s_disconnectShuttingDown);
+        (await silent.ReceiveAsync().WaitAsync(s_failSafe)).Payload.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ServerShuttingDown));
         using ClientWebSocket late = new();
         late.Options.CollectHttpResponseDetails = true;
         late.Options.AddSubProtocol("mqtt");
@@ -183,8 +170,8 @@ public sealed class EndpointTests(ITestOutputHelper output)
         // Arrange
         await using ServerHost host = await ServerHost.StartAsync();
         using ClientWebSocket webSocket = await ConnectClientWebSocketAsync(host);
-        await webSocket.SendAsync(s_connect, WebSocketMessageType.Binary, endOfMessage: true, CancellationToken.None);
-        (await ReceiveMessageAsync(webSocket)).ShouldBe(s_connAck);
+        await webSocket.SendAsync(ServerPackets.Connect, WebSocketMessageType.Binary, endOfMessage: true, CancellationToken.None);
+        (await ReceiveMessageAsync(webSocket)).ShouldBe(ServerPackets.ConnAck);
 
         // Act
         await webSocket.SendAsync("hello"u8.ToArray(), WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
@@ -228,7 +215,7 @@ public sealed class EndpointTests(ITestOutputHelper output)
     {
         // Arrange
         await using ServerHost host = await ServerHost.StartAsync(options => options.MaxOutgoingBytes = 64 << 20);
-        await using RawWebSocket client = await ConnectRawAsync(host, receiveBufferSize: 1024);
+        await using RawWebSocket client = await host.ConnectRawAsync(receiveBufferSize: 1024);
         host.Server.TryGetConnection("c1", out MqttWireConnection? connection).ShouldBeTrue();
         byte[] payload = new byte[60_000];
         MqttTopic topic = MqttTopic.Create("a/b");
@@ -319,7 +306,7 @@ public sealed class EndpointTests(ITestOutputHelper output)
                 builder.Services.Configure<WebSocketOptions>(options => options.KeepAliveInterval = TimeSpan.FromMilliseconds(50)),
             ConfigureApp = app => app.Map("/control", HoldWebSocketAsync),
         });
-        await using RawWebSocket mqtt = await ConnectRawAsync(host);
+        await using RawWebSocket mqtt = await host.ConnectRawAsync();
         await using RawWebSocket control = await RawWebSocket.ConnectAsync(new Uri(host.BaseUri, "/control"));
         for (int i = 0; i < 3; i++)
         {
@@ -451,10 +438,10 @@ public sealed class EndpointTests(ITestOutputHelper output)
         // Arrange
         await using ServerHost host = await ServerHost.StartAsync<StackRecordingHandler>(new ServerHost.Setup());
         StackRecordingHandler handler = (StackRecordingHandler)host.Services.GetRequiredService<IMqttWireHandler>();
-        await using RawWebSocket client = await ConnectRawAsync(host);
+        await using RawWebSocket client = await host.ConnectRawAsync();
         host.Server.TryGetConnection("c1", out MqttWireConnection? connection).ShouldBeTrue();
         connection.Close(MqttReasonCode.AdministrativeAction);
-        (await client.ReceiveAsync().WaitAsync(s_failSafe)).Payload.ShouldBe(Convert.FromHexString("E00198"));
+        (await client.ReceiveAsync().WaitAsync(s_failSafe)).Payload.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.AdministrativeAction));
         (await client.ReceiveAsync().WaitAsync(s_failSafe)).Opcode.ShouldBe(RawWebSocket.Close);
 
         // Act: the client does not answer the close, so the sweep aborts the link 2 to 4 seconds later.
@@ -481,7 +468,7 @@ public sealed class EndpointTests(ITestOutputHelper output)
             ConfigureServer = options => options.MaxOutgoingBytes = 64 << 20,
         });
         StackRecordingHandler handler = (StackRecordingHandler)host.Services.GetRequiredService<IMqttWireHandler>();
-        await using RawWebSocket client = await ConnectRawAsync(host, receiveBufferSize: 1024);
+        await using RawWebSocket client = await host.ConnectRawAsync(receiveBufferSize: 1024);
         host.Server.TryGetConnection("c1", out MqttWireConnection? connection).ShouldBeTrue();
         for (int i = 0; i < 200; i++)
         {
@@ -582,28 +569,6 @@ public sealed class EndpointTests(ITestOutputHelper output)
         while (!result.EndOfMessage);
 
         return buffer[..count];
-    }
-
-    /// <summary>
-    /// Opens a raw WebSocket to the endpoint and connects as client "c1".
-    /// </summary>
-    /// <param name="host">
-    /// The host.
-    /// </param>
-    /// <param name="receiveBufferSize">
-    /// The socket's receive buffer, or 0 for the system's.
-    /// </param>
-    /// <returns>
-    /// The client, after the CONNACK.
-    /// </returns>
-    private static async Task<RawWebSocket> ConnectRawAsync(ServerHost host, int receiveBufferSize = 0)
-    {
-        RawWebSocket client = await RawWebSocket.ConnectAsync(host.WebSocketUri, receiveBufferSize);
-        client.StatusCode.ShouldBe(101);
-        client.SubProtocol.ShouldBe("mqtt");
-        await client.SendAsync(RawWebSocket.Binary, s_connect);
-        (await client.ReceiveAsync().WaitAsync(s_failSafe)).Payload.ShouldBe(s_connAck);
-        return client;
     }
 
     /// <summary>

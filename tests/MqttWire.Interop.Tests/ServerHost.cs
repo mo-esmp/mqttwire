@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging;
 using MQTTnet;
 using MqttWire.Server;
 using MqttWire.TestHost;
+using MqttWire.Tests.Server;
 
 namespace MqttWire.Interop.Tests;
 
@@ -190,6 +191,25 @@ internal sealed class ServerHost : IAsyncDisposable
             throw new InvalidOperationException($"The MQTTnet client {clientId} was refused: {result.ResultCode}.");
         }
 
+        return client;
+    }
+
+    /// <summary>
+    /// Opens a raw WebSocket to the endpoint and connects as client "c1", with keep-alive 30.
+    /// </summary>
+    /// <param name="receiveBufferSize">
+    /// The socket's receive buffer, or 0 for the system's.
+    /// </param>
+    /// <returns>
+    /// The client, after the CONNACK.
+    /// </returns>
+    public async Task<RawWebSocket> ConnectRawAsync(int receiveBufferSize = 0)
+    {
+        RawWebSocket client = await RawWebSocket.ConnectAsync(WebSocketUri, receiveBufferSize).ConfigureAwait(false);
+        client.StatusCode.ShouldBe(101);
+        client.SubProtocol.ShouldBe("mqtt");
+        await client.SendAsync(RawWebSocket.Binary, ServerPackets.Connect).ConfigureAwait(false);
+        (await client.ReceiveAsync().WaitAsync(FailSafe).ConfigureAwait(false)).Payload.ShouldBe(ServerPackets.ConnAck);
         return client;
     }
 

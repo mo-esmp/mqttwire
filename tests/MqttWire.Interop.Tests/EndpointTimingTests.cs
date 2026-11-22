@@ -2,6 +2,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using MqttWire.Tests.Server;
 
 namespace MqttWire.Interop.Tests;
 
@@ -23,11 +24,6 @@ public sealed partial class EndpointTimingTests
     /// How many sockets the connect-deadline test opens.
     /// </summary>
     private const int SilentSockets = 24;
-
-    /// <summary>
-    /// A CONNECT with client id "c1" and keep-alive 30.
-    /// </summary>
-    private static readonly byte[] s_connect = Convert.FromHexString("100F00044D5154540502001E0000026331");
 
     /// <summary>
     /// How long the logger holds the sweep after it has closed a socket, so that the server's run of that connection
@@ -140,9 +136,7 @@ public sealed partial class EndpointTimingTests
     {
         // Arrange
         await using ServerHost host = await ServerHost.StartAsync();
-        await using RawWebSocket client = await RawWebSocket.ConnectAsync(host.WebSocketUri);
-        await client.SendAsync(RawWebSocket.Binary, s_connect);
-        RawWebSocket.Frame connAck = await client.ReceiveAsync().WaitAsync(s_failSafe);
+        await using RawWebSocket client = await host.ConnectRawAsync();
 
         // Act: a final binary frame, masked, of two bytes, of which only the header and the mask are sent.
         await client.SendRawAsync(new byte[] { 0x82, 0x82, 0x01, 0x02, 0x03, 0x04 });
@@ -150,9 +144,8 @@ public sealed partial class EndpointTimingTests
         RawWebSocket.Frame close = await client.ReceiveAsync().WaitAsync(s_failSafe);
 
         // Assert
-        connAck.Payload[0].ShouldBe((byte)0x20);
         disconnect.Opcode.ShouldBe(RawWebSocket.Binary);
-        disconnect.Payload.ShouldBe(new byte[] { 0xE0, 0x01, 0x82 });
+        disconnect.Payload.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ProtocolError));
         close.Opcode.ShouldBe(RawWebSocket.Close);
         close.CloseStatus.ShouldBe(1000);
     }
