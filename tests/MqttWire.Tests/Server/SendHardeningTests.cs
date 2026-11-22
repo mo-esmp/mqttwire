@@ -373,6 +373,53 @@ public sealed class SendHardeningTests
     }
 
     /// <summary>
+    /// Proves that the records' pool throwing when the drain takes a record ends the connection like any fault of the
+    /// send path: a QoS 1 delivery waits behind a held QoS 0 write while the connection holds no records object; when
+    /// the write ends, the drain's attempt to take a record throws; the connection ends with
+    /// <see cref="MqttCloseReason.ConnectionLost"/> and event 20, the waiting delivery's queue goes back to its pool
+    /// once, the run completes, the slot is freed and nothing is held.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Drain_RecordsPoolThrowsOnGet_EndsTheConnectionAndDropsTheWaitingDeliveryOnce()
+    {
+        // Arrange
+        ThrowingRecordsPool records = new();
+        CountingObjectPool<WaitingDeliveries> waiting = new(new ServerPools().Waiting);
+        ServerHarness harness = ServerHarness.Create(pools: new ServerPools(waiting, records));
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        connection.Link.HoldWrites();
+        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        harness.AssertBounds();
+        server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+        harness.AssertBounds();
+        ConnectionCounts before = server.GetCounts();
+        records.ThrowOnGet = true;
+
+        // Act
+        connection.CompleteHeldWrites();
+        bool aborted = connection.Link.IsAborted;
+        await connection.Run;
+
+        // Assert
+        before.WaitingDeliveries.ShouldBe(1);
+        before.HoldsRecords.ShouldBeFalse();
+        aborted.ShouldBeTrue();
+        connection.TakeWritten().ShouldBe(ServerPackets.Delivery("m1"u8));
+        harness.Log.Entries.ShouldContain(entry => entry.Id.Id == SendPathFaultedEvent && entry.Exception == records.Thrown);
+        waiting.Outstanding.ShouldBe(0);
+        waiting.Distinct.ShouldBe(1);
+        harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
+        server.GetCounts().ShouldBe(s_idle);
+        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        harness.Pool.Outstanding.ShouldBe(0);
+        harness.Pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves that a pool that throws when the DISCONNECT of a host's close is rented, while the close holds the send
     /// path, throws nothing at the host and ends the connection: the link is aborted, the run completes, the reason
     /// the host gave is kept, and the fault is logged with event 20.
@@ -569,73 +616,5 @@ public sealed class SendHardeningTests
         /// The records.
         /// </param>
         public override void Return(ExchangeRecords obj) => obj.Clear();
-    }
-
-    /// <summary>
-    /// A pool over a <see cref="CountingPool"/> that throws on one chosen rent, as a pool may that cannot allocate.
-    /// </summary>
-    private sealed class ThrowingPool : ArrayPool<byte>
-    {
-        /// <summary>
-        /// How many rents are left before the one that throws; 0 when none is to throw.
-        /// </summary>
-        private int _rentsLeft;
-
-        /// <summary>
-        /// Gets the pool every rent and return goes to, which counts what is out.
-        /// </summary>
-        public CountingPool Inner { get; } = new();
-
-        /// <summary>
-        /// Gets the exception the chosen rent throws.
-        /// </summary>
-        public InvalidOperationException Thrown { get; } = new("The pool cannot rent.");
-
-        /// <summary>
-        /// Gets a value indicating whether the chosen rent has thrown.
-        /// </summary>
-        public bool HasThrown { get; private set; }
-
-        /// <summary>
-        /// Chooses the rent that throws, counted from the next one; only that one throws.
-        /// </summary>
-        /// <param name="which">
-        /// 1 for the next rent, 2 for the one after it, and so on.
-        /// </param>
-        public void ThrowOnRent(int which) => Volatile.Write(ref _rentsLeft, which);
-
-        /// <summary>
-        /// Rents from <see cref="Inner"/>, unless this is the chosen rent.
-        /// </summary>
-        /// <param name="minimumLength">
-        /// The smallest length the buffer must have.
-        /// </param>
-        /// <returns>
-        /// A buffer at least <paramref name="minimumLength"/> long.
-        /// </returns>
-        /// <exception cref="InvalidOperationException">
-        /// This is the chosen rent; nothing is rented.
-        /// </exception>
-        public override byte[] Rent(int minimumLength)
-        {
-            if (Volatile.Read(ref _rentsLeft) > 0 && Interlocked.Decrement(ref _rentsLeft) == 0)
-            {
-                HasThrown = true;
-                throw Thrown;
-            }
-
-            return Inner.Rent(minimumLength);
-        }
-
-        /// <summary>
-        /// Returns a buffer to <see cref="Inner"/>.
-        /// </summary>
-        /// <param name="array">
-        /// The buffer.
-        /// </param>
-        /// <param name="clearArray">
-        /// Whether the buffer is cleared.
-        /// </param>
-        public override void Return(byte[] array, bool clearArray = false) => Inner.Return(array, clearArray);
     }
 }

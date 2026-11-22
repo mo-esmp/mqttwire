@@ -251,6 +251,78 @@ public sealed class StopTests
     }
 
     /// <summary>
+    /// Proves that an Authenticating connection whose request is aborted during the stop gets nothing written, no
+    /// CONNACK, and no <c>OnAdmit</c>, and that the stop completes: the stop cancels the host's token, and the request
+    /// is aborted from inside that cancellation, before the connect phase looks at why its wait ended.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task StopAsync_AuthenticatingWhoseRequestIsAbortedDuringIt_WritesNothingAndCompletes()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TaskCompletionSource<MqttConnectResult> never = new();
+        CancellationToken given = default;
+        harness.Handler.Connect = (_, cancellationToken) =>
+        {
+            given = cancellationToken;
+            return new ValueTask<MqttConnectResult>(never.Task);
+        };
+        TestConnection connection = harness.Accept();
+        connection.Deliver(ServerPackets.Connect);
+
+        // Registered after the connect phase began to wait on the token, so it runs before the connect phase's own
+        // callback when the token is cancelled (a token runs its callbacks in the reverse order of their registration).
+        using CancellationTokenRegistration abortTheRequest = given.Register(() => connection.RequestAborted.Cancel());
+
+        // Act
+        Task stop = harness.Server.StopAsync();
+        await connection.Run;
+        await stop;
+
+        // Assert
+        given.IsCancellationRequested.ShouldBeTrue();
+        connection.RequestAborted.IsCancellationRequested.ShouldBeTrue();
+        connection.TakeWritten().ShouldBeEmpty();
+        harness.Handler.Calls.ShouldBe(["OnConnectAsync c1"]);
+        harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a connection whose host has been deciding for 9 seconds when the stop begins, a second before its
+    /// authentication deadline, is refused with the stop's CONNACK 0x8B, not 0x88, and that no authentication timeout
+    /// (event 4) is logged.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task StopAsync_HostDecidingForNineSeconds_AnswersConnAck0x8BNot0x88()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TaskCompletionSource<MqttConnectResult> never = new();
+        harness.Handler.Connect = (_, _) => new ValueTask<MqttConnectResult>(never.Task);
+        TestConnection connection = harness.Accept();
+        connection.Deliver(ServerPackets.Connect);
+        harness.Advance(TimeSpan.FromSeconds(9));
+
+        // Act
+        Task stop = harness.Server.StopAsync();
+        await connection.Run;
+        await stop;
+
+        // Assert
+        connection.TakeWritten().ShouldBe(s_connAckShuttingDown);
+        harness.Log.Entries.ShouldNotContain(static entry => entry.Id.Id == 4);
+        harness.Handler.Calls.ShouldBe(["OnConnectAsync c1"]);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves that a connection that has sent no CONNECT when the stop begins is aborted at once, without a write or a
     /// handler call.
     /// </summary>

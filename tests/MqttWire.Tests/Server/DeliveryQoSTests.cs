@@ -222,6 +222,7 @@ public sealed class DeliveryQoSTests
         fifth.ShouldBe(MqttSendResult.Evicted);
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.QuotaExceeded));
         harness.Handler.Calls.ShouldContain("OnClosed c1 OutgoingLimitPassed");
+        server.GetCounts().ShouldBe(s_idle);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -258,6 +259,7 @@ public sealed class DeliveryQoSTests
         fifth.ShouldBe(MqttSendResult.Evicted);
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.QuotaExceeded));
         harness.Handler.Calls.ShouldContain("OnClosed c1 OutgoingLimitPassed");
+        server.GetCounts().ShouldBe(s_idle);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -456,6 +458,41 @@ public sealed class DeliveryQoSTests
     }
 
     /// <summary>
+    /// Proves that a failing PUBREC for a QoS 2 delivery that waits for its PUBCOMP already is taken as the harmless
+    /// repetition of a PUBREC (design 6.6): it is answered with PUBREL again, and the record and its place in the
+    /// client's window stay, so that with the client's Receive Maximum 1 the next delivery still waits, until the
+    /// PUBCOMP lets it out.
+    /// </summary>
+    [Fact]
+    public void PubRec_FailingForAQoS2DeliveryWaitingForPubComp_AnswersPubRelAgainAndKeepsTheRecord()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect(connect: ServerPackets.ConnectReceiveMaximum1);
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
+        harness.AssertBounds();
+        connection.Deliver(ClientPackets.PubRec1);
+        server.TrySend(s_topic, "B"u8.ToArray(), MqttQoS.ExactlyOnce).ShouldBe(MqttSendResult.Taken);
+        harness.AssertBounds();
+        connection.TakeWritten().ShouldBe([.. ClientPackets.PublishQoS2, .. ClientPackets.PubRel1]);
+
+        // Act
+        connection.Deliver(Hex.Parse("50 03 00 01 87"));
+        byte[] answer = connection.TakeWritten();
+        ConnectionCounts afterTheRepeat = server.GetCounts();
+        connection.Deliver(ClientPackets.PubComp1);
+        byte[] afterThePubComp = connection.TakeWritten();
+
+        // Assert
+        answer.ShouldBe(ClientPackets.PubRel1);
+        afterTheRepeat.DeliveryRecords.ShouldBe(1);
+        afterTheRepeat.WaitingDeliveries.ShouldBe(1);
+        afterThePubComp.ShouldBe(ServerPackets.Delivery(MqttQoS.ExactlyOnce, packetIdentifier: 2, "B"u8));
+        connection.Run.IsCompleted.ShouldBeFalse();
+    }
+
+    /// <summary>
     /// Proves that an acknowledgement of the wrong kind for an identifier that has a record closes the connection
     /// with DISCONNECT 0x82 and <see cref="MqttCloseReason.ProtocolError"/>.
     /// </summary>
@@ -465,20 +502,33 @@ public sealed class DeliveryQoSTests
     /// <param name="acknowledgement">
     /// The acknowledgement from the client, in hex.
     /// </param>
+    /// <param name="before">
+    /// An acknowledgement the client sends first, in hex, which moves the exchange on; empty for none.
+    /// </param>
     /// <returns>
     /// A task that completes when the test has run.
     /// </returns>
     [Theory]
-    [InlineData(MqttQoS.ExactlyOnce, "40 02 00 01")] // A PUBACK for a QoS 2 delivery.
-    [InlineData(MqttQoS.ExactlyOnce, "70 02 00 01")] // A PUBCOMP before the PUBREC.
-    [InlineData(MqttQoS.AtLeastOnce, "50 02 00 01")] // A PUBREC for a QoS 1 delivery.
-    public async Task Ack_WrongKindForAKnownIdentifier_ClosesWith0x82(MqttQoS qos, string acknowledgement)
+    [InlineData(MqttQoS.ExactlyOnce, "40 02 00 01", "")] // A PUBACK for a QoS 2 delivery.
+    [InlineData(MqttQoS.ExactlyOnce, "70 02 00 01", "")] // A PUBCOMP before the PUBREC.
+    [InlineData(MqttQoS.AtLeastOnce, "50 02 00 01", "")] // A PUBREC for a QoS 1 delivery.
+    [InlineData(MqttQoS.AtLeastOnce, "70 02 00 01", "")] // A PUBCOMP for a QoS 1 delivery.
+    [InlineData(MqttQoS.ExactlyOnce, "40 02 00 01", "50 02 00 01")] // A PUBACK for a QoS 2 delivery after its PUBREC.
+    [InlineData(MqttQoS.AtLeastOnce, "50 03 00 01 87", "")] // A failing PUBREC for a QoS 1 delivery.
+    public async Task Ack_WrongKindForAKnownIdentifier_ClosesWith0x82(MqttQoS qos, string acknowledgement,
+        string before)
     {
         // Arrange
         ServerHarness harness = ServerHarness.Create();
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();
         server.TrySend(s_topic, "hi"u8.ToArray(), qos);
+        harness.AssertBounds();
+        if (before.Length > 0)
+        {
+            connection.Deliver(Hex.Parse(before));
+        }
+
         connection.TakeWritten();
 
         // Act

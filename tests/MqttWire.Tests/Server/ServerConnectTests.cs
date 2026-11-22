@@ -424,6 +424,98 @@ public sealed class ServerConnectTests
     }
 
     /// <summary>
+    /// Proves that an <c>OnConnectAsync</c> that fails after the authentication deadline has its exception observed
+    /// and logged as an error with event 19, and changes nothing else: nothing is admitted and nothing is written.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Connect_HostFaultsAfterTheDeadline_LogsTheLateFaultAsAnError()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TaskCompletionSource<MqttConnectResult> late = new();
+        harness.Handler.Connect = (_, _) => new ValueTask<MqttConnectResult>(late.Task);
+        TestConnection connection = harness.Accept();
+        connection.Deliver(ServerPackets.Connect);
+        harness.Advance(ServerLimits.AuthenticationDeadline);
+        await connection.Run;
+        connection.TakeWritten().ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.ServerUnavailable));
+        InvalidOperationException thrown = new("The host's late failure.");
+
+        // Act
+        late.SetException(thrown);
+        await harness.Log.WhenLoggedAsync(LateConnectResultEvent);
+
+        // Assert
+        harness.Log.Entries.ShouldContain(entry =>
+            entry.Id.Id == LateConnectResultEvent && entry.Level == LogLevel.Error && entry.Exception == thrown);
+        harness.Handler.Calls.ShouldBe(["OnConnectAsync c1"]);
+        connection.TakeWritten().ShouldBeEmpty();
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a host that answers at the very sweep that fires the authentication deadline gets exactly one
+    /// CONNACK whichever comes first, with both orders forced: answering from inside the deadline's cancellation,
+    /// before the connect phase sees it, the host wins and the CONNACK is success; answering just after the connect
+    /// phase saw the cancellation, the deadline wins and the CONNACK is 0x88. In both, <c>OnClosed</c> is called as
+    /// many times as <c>OnAdmit</c> accepted, and every buffer is back once the run has ended.
+    /// </summary>
+    /// <param name="hostFirst">
+    /// Whether the host's answer comes before the connect phase sees the cancellation.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Connect_HostAnswersAtTheSweepOfTheDeadline_WritesExactlyOneConnAck(bool hostFirst)
+    {
+        // Arrange
+        // A token runs its callbacks in the reverse order of their registration. The host registers inside
+        // OnConnectAsync, before the connect phase waits on the token, so its answer comes after the connect phase saw
+        // the cancellation; the test registers once the connect phase waits, so its answer comes before.
+        ServerHarness harness = ServerHarness.Create();
+        TaskCompletionSource<MqttConnectResult> answer = new();
+        CancellationToken given = default;
+        harness.Handler.Connect = (_, cancellationToken) =>
+        {
+            given = cancellationToken;
+            if (!hostFirst)
+            {
+                cancellationToken.Register(() => answer.TrySetResult(MqttConnectResult.Accept()));
+            }
+
+            return new ValueTask<MqttConnectResult>(answer.Task);
+        };
+        TestConnection connection = harness.Accept();
+        connection.Deliver(ServerPackets.Connect);
+        if (hostFirst)
+        {
+            given.Register(() => answer.TrySetResult(MqttConnectResult.Accept()));
+        }
+
+        // Act
+        harness.Advance(ServerLimits.AuthenticationDeadline);
+        await connection.Link.WhenWrittenAsync(1);
+        connection.Link.EndFromPeer();
+        await connection.Run;
+
+        // Assert
+        connection.TakeWritten().ShouldBe(
+            hostFirst ? ServerPackets.ConnAck : ServerPackets.ConnAckRefused(MqttReasonCode.ServerUnavailable));
+        int admitted = harness.Handler.Calls.Count(static call => call.StartsWith("OnAdmit", StringComparison.Ordinal));
+        int closed = harness.Handler.Calls.Count(static call => call.StartsWith("OnClosed", StringComparison.Ordinal));
+        admitted.ShouldBe(hostFirst ? 1 : 0);
+        closed.ShouldBe(admitted);
+        harness.Pool.Outstanding.ShouldBe(0);
+        harness.Pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves that a token callback of the host's that throws at the authentication deadline is logged as an error
     /// of <c>OnConnectAsync</c>, and the connection still gets CONNACK 0x88 and ends.
     /// </summary>

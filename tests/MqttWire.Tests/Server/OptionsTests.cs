@@ -5,7 +5,8 @@ using MqttWire.Server.Internal;
 namespace MqttWire.Tests.Server;
 
 /// <summary>
-/// Tests of <see cref="MqttWireServerOptionsValidator"/>.
+/// Tests of <see cref="MqttWireServerOptionsValidator"/>, of the default options and of the fixed limits of
+/// <see cref="ServerLimits"/>.
 /// </summary>
 public sealed class OptionsTests
 {
@@ -27,6 +28,40 @@ public sealed class OptionsTests
         options.MaxPublishPayloadBytes.ShouldBe(65_536);
         options.MaxOutgoingMessages.ShouldBe(1_000);
         options.MaxOutgoingBytes.ShouldBe(1_048_576);
+    }
+
+    /// <summary>
+    /// Proves that every fixed limit and deadline of <see cref="ServerLimits"/> has the value design 6.6 gives it.
+    /// </summary>
+    [Fact]
+    public void Limits_EachConstant_HasTheValueOfTheDesign()
+    {
+        // Arrange
+        // Act
+        TimeSpan[] deadlines =
+        [
+            ServerLimits.SweepInterval, ServerLimits.ConnectDeadline, ServerLimits.AuthenticationDeadline,
+            ServerLimits.PartialPacketDeadline, ServerLimits.WriteDeadline, ServerLimits.AcknowledgementDeadline,
+            ServerLimits.CloseDeadline,
+        ];
+        int[] limits =
+        [
+            ServerLimits.MaxKeepAliveSeconds, ServerLimits.ReceiveMaximum, ServerLimits.MaxWaitingControlPackets,
+            ServerLimits.MaxControlPacketBytes, ServerLimits.MaxEncodingBufferBytes, ServerLimits.CopyThresholdBytes,
+            ServerLimits.FirstReadBufferBytes, ServerLimits.PublishOverheadBytes, ServerLimits.SkipFactor,
+            ServerLimits.MinClientMaximumPacketSize, ServerLimits.MaxReasonStringBytes,
+            ServerLimits.MaxConnAckUserPropertyBytes, ServerLimits.MaxClientIdBytes, ServerLimits.MaxTopicBytes,
+            ServerLimits.MaxPooledObjects, ServerLimits.MaxPooledQueueCapacity,
+        ];
+
+        // Assert
+        deadlines.ShouldBe(
+        [
+            TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10),
+            TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(2),
+        ]);
+        limits.ShouldBe([60, 256, 1_024, 16_384, 65_536, 16_384, 4_096, 5_120, 16, 4_096, 256, 1_024, 256, 65_526, 1_024, 64]);
+        (ServerLimits.KeepAliveFactorNumerator, ServerLimits.KeepAliveFactorDenominator).ShouldBe((3, 2));
     }
 
     /// <summary>

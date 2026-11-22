@@ -407,6 +407,266 @@ public sealed class IncomingQoSTests
     }
 
     /// <summary>
+    /// Proves by identity that the records object goes back to the server's pool when the last exchange ends: once a
+    /// QoS 2 exchange from the client has ended, the next object the pool hands out is the very one the connection
+    /// used, and it holds no record.
+    /// </summary>
+    [Fact]
+    public void PublishQoS2_ExchangeEnded_TheRecordsObjectIsBackInThePool()
+    {
+        // Arrange
+        ServerPools defaults = new();
+        CountingObjectPool<ExchangeRecords> records = new(defaults.Records);
+        ServerHarness harness = ServerHarness.Create(pools: new ServerPools(defaults.Waiting, records));
+        TestConnection connection = harness.Connect();
+        connection.Deliver(ClientPackets.PublishQoS2);
+        ExchangeRecords used = records.LastHandedOut.ShouldNotBeNull();
+
+        // Act
+        connection.Deliver(ClientPackets.PubRel1);
+        ExchangeRecords next = harness.Server.Pools.Records.Get();
+
+        // Assert
+        connection.TakeWritten().ShouldBe([.. ClientPackets.PubRec1, .. ClientPackets.PubComp1]);
+        next.ShouldBeSameAs(used);
+        next.IsEmpty.ShouldBeTrue();
+        next.IncomingCount.ShouldBe(0);
+        next.DeliveryCount.ShouldBe(0);
+        records.Distinct.ShouldBe(1);
+        harness.Server.Pools.Records.Return(next);
+        records.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that an <c>OnPublish</c> that throws at QoS 2 closes the connection with DISCONNECT 0x83 and
+    /// <see cref="MqttCloseReason.HandlerThrew"/>, answers no PUBREC, and remembers nothing: the identifier is not
+    /// remembered at any moment up to the close, so a PUBREL for it would be answered 0x92.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task PublishQoS2_HostThrows_ClosesWith0x83AndRemembersNothing()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        harness.Handler.Publish = static (_, in _) => throw new InvalidOperationException("The host's bug.");
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+
+        // Every buffer that goes back is seen here, the DISCONNECT's among them: its write has ended and the Closing
+        // step has not yet dropped what the connection holds, so a record remembered before the close would show.
+        List<int> rememberedAtEachReturn = [];
+        harness.Pool.Returning = _ => rememberedAtEachReturn.Add(server.GetCounts().IncomingRecords);
+
+        // Act
+        connection.Deliver(ClientPackets.PublishQoS2);
+        await connection.Run;
+
+        // Assert
+        connection.TakeWritten().ShouldBe(Hex.Parse("E0 01 83"));
+        rememberedAtEachReturn.ShouldNotBeEmpty();
+        rememberedAtEachReturn.ShouldAllBe(static count => count == 0);
+        harness.Handler.Calls.ShouldContain("OnClosed c1 HandlerThrew");
+        server.GetCounts().HoldsRecords.ShouldBeFalse();
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a host that closes the connection from inside <c>OnPublish</c> at QoS 2 gets no PUBREC written and
+    /// no record kept: the DISCONNECT of its close is the last and only packet.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task PublishQoS2_HostClosesInsideOnPublish_WritesNoPubRecAndKeepsNoRecord()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        harness.Handler.Publish = static (publisher, in _) =>
+        {
+            publisher.Close(MqttReasonCode.AdministrativeAction);
+            return MqttPublishResult.Accepted;
+        };
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+
+        // Act
+        connection.Deliver(ClientPackets.PublishQoS2);
+        await connection.Run;
+
+        // Assert
+        connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.AdministrativeAction));
+        server.GetCounts().IncomingRecords.ShouldBe(0);
+        server.GetCounts().HoldsRecords.ShouldBeFalse();
+        harness.Handler.Calls.ShouldContain("OnClosed c1 ClosedByHost");
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a connection lost while QoS 2 identifiers are remembered gives its records object back to the
+    /// server's pool once, with no fault, and that the connection holds nothing once its run has ended.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task PublishQoS2_ConnectionLostWithIdentifiersRemembered_ReturnsTheRecordsOnce()
+    {
+        // Arrange
+        ServerPools defaults = new();
+        CountingObjectPool<ExchangeRecords> records = new(defaults.Records);
+        ServerHarness harness = ServerHarness.Create(pools: new ServerPools(defaults.Waiting, records));
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        connection.Deliver(ClientPackets.PublishQoS2Id7);
+        connection.Deliver(ClientPackets.PublishQoS2);
+        ConnectionCounts remembered = server.GetCounts();
+
+        // Act
+        connection.Link.EndFromPeer();
+        await connection.Run;
+
+        // Assert
+        remembered.IncomingRecords.ShouldBe(2);
+        records.Outstanding.ShouldBe(0);
+        records.Distinct.ShouldBe(1);
+        harness.Log.Entries.ShouldNotContain(static entry => entry.Id.Id == 20);
+        server.GetCounts().ShouldBe(new ConnectionCounts(IncomingRecords: 0, DeliveryRecords: 0, IncomingInFlight: 0,
+            HoldsRecords: false, WaitingDeliveries: 0, WaitingControlPackets: 0, OutgoingBytes: 0, IsWriting: false,
+            HoldsReadBuffer: false));
+        harness.Handler.Calls.ShouldContain("OnClosed c1 ConnectionLost");
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a PUBLISH refused as too large counts against the receive maximum like any other: with 256 PUBACKs
+    /// waiting behind a held write, a 257th publish at QoS 1 or 2 whose payload is over the limit, read whole or
+    /// skipped, closes the connection with <see cref="MqttCloseReason.ReceiveMaximumPassed"/> (0x93) before it is
+    /// answered; the write being held, the link is aborted and no DISCONNECT is written.
+    /// </summary>
+    /// <param name="qos">
+    /// The QoS of the 257th publish.
+    /// </param>
+    /// <param name="remainingLength">
+    /// Its Remaining Length: 2,000 is read whole and judged, 16,384 is skipped, against a payload limit of 1,024.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Theory]
+    [InlineData(MqttQoS.AtLeastOnce, 2_000)]
+    [InlineData(MqttQoS.ExactlyOnce, 2_000)]
+    [InlineData(MqttQoS.AtLeastOnce, 16 * 1_024)]
+    [InlineData(MqttQoS.ExactlyOnce, 16 * 1_024)]
+    public async Task PublishTooLarge_The257thUnansweredBehindAHeldWrite_ClosesWith0x93(MqttQoS qos,
+        int remainingLength)
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create(static options => options.MaxPublishPayloadBytes = 1_024);
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        connection.Link.HoldWrites();
+
+        // The PINGRESP is the write with the link; every PUBACK after it waits.
+        connection.Deliver(ClientPackets.PingReq);
+        for (int identifier = 1; identifier <= 256; identifier++)
+        {
+            connection.Deliver(PublishQoS1((ushort)identifier));
+        }
+
+        ConnectionCounts full = server.GetCounts();
+
+        // Act
+        connection.Deliver(ServerPackets.BuildPublishOfLength(qos, remainingLength, packetIdentifier: 257));
+        bool aborted = connection.Link.IsAborted;
+        connection.CompleteHeldWrites();
+        await connection.Run;
+
+        // Assert
+        full.IncomingInFlight.ShouldBe(256);
+        aborted.ShouldBeTrue();
+        connection.TakeWritten().ShouldBe(ClientPackets.PingResp);
+        harness.Handler.Calls.ShouldContain("OnClosed c1 ReceiveMaximumPassed");
+        PublishCalls(harness).Count.ShouldBe(256);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a remembered QoS 2 identifier published again does not start its acknowledgement deadline again:
+    /// remembered at 0 s and repeated at 20 s, the connection is still open at the sweep at 28 s and is closed with
+    /// DISCONNECT 0x82 at the sweep at 30 s, not 50 s.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task PublishQoS2_RepeatedAtTwentySeconds_DoesNotRestartTheAcknowledgementDeadline()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect();
+        connection.Deliver(ClientPackets.PublishQoS2);
+        connection.TakeWritten().ShouldBe(ClientPackets.PubRec1);
+
+        // Act
+        harness.Advance(TimeSpan.FromSeconds(20));
+        connection.Deliver(ClientPackets.PublishQoS2);
+        byte[] repeated = connection.TakeWritten();
+        harness.Advance(TimeSpan.FromSeconds(8));
+        byte[] writtenAt28 = connection.TakeWritten();
+        bool openAt28 = !connection.Run.IsCompleted && !connection.Link.IsAborted;
+        harness.Advance(TimeSpan.FromSeconds(2));
+        byte[] writtenAt30 = connection.TakeWritten();
+        connection.Link.EndFromPeer();
+        await connection.Run;
+
+        // Assert
+        repeated.ShouldBe(ClientPackets.PubRec1);
+        writtenAt28.ShouldBeEmpty();
+        openAt28.ShouldBeTrue();
+        writtenAt30.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ProtocolError));
+        harness.Handler.Calls.ShouldContain("OnClosed c1 AcknowledgementTimedOut");
+        PublishCalls(harness).Count.ShouldBe(1);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that the acknowledgement deadline is per record, measured from its own stamp: a QoS 2 publish remembered
+    /// at 1 s is still open at the sweep at 30 s, 29 s on, and is closed with DISCONNECT 0x82 at the sweep at 32 s.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task PubRel_NeverComesForARecordEnteredAtOneSecond_ClosesAtTheSweepAt32Seconds()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect();
+        harness.Advance(TimeSpan.FromSeconds(1));
+        connection.Deliver(ClientPackets.PublishQoS2);
+        connection.TakeWritten().ShouldBe(ClientPackets.PubRec1);
+
+        // Act
+        harness.Advance(TimeSpan.FromSeconds(29));
+        byte[] writtenAt30 = connection.TakeWritten();
+        bool openAt30 = !connection.Run.IsCompleted && !connection.Link.IsAborted;
+        harness.Advance(TimeSpan.FromSeconds(2));
+        byte[] writtenAt32 = connection.TakeWritten();
+        connection.Link.EndFromPeer();
+        await connection.Run;
+
+        // Assert
+        writtenAt30.ShouldBeEmpty();
+        openAt30.ShouldBeTrue();
+        writtenAt32.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ProtocolError));
+        harness.Handler.Calls.ShouldContain("OnClosed c1 AcknowledgementTimedOut");
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Gets the calls of <c>OnPublish</c> the handler recorded, oldest first.
     /// </summary>
     /// <param name="harness">

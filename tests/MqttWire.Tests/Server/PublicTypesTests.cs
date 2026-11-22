@@ -159,6 +159,61 @@ public sealed class PublicTypesTests
     }
 
     /// <summary>
+    /// Proves that a grant of QoS 1 carries reason code 0x01 and a grant of QoS 2 carries 0x02, the codes a SUBACK
+    /// sends for them.
+    /// </summary>
+    [Fact]
+    public void Granted_AtLeastOnceAndExactlyOnce_Carry0x01And0x02()
+    {
+        // Arrange
+        // Act
+        MqttSubscribeResult atLeastOnce = MqttSubscribeResult.Granted(MqttQoS.AtLeastOnce);
+        MqttSubscribeResult exactlyOnce = MqttSubscribeResult.Granted(MqttQoS.ExactlyOnce);
+
+        // Assert
+        atLeastOnce.IsAccepted.ShouldBeTrue();
+        ((byte)atLeastOnce.ReasonCode).ShouldBe((byte)0x01);
+        exactlyOnce.IsAccepted.ShouldBeTrue();
+        ((byte)exactlyOnce.ReasonCode).ShouldBe((byte)0x02);
+    }
+
+    /// <summary>
+    /// Proves that every result type refuses 0x7F, the last code below the failures, with an out-of-range exception,
+    /// and accepts 0x80, the first failure, as a refusal.
+    /// </summary>
+    [Fact]
+    public void Refuse_ReasonCodesAtTheBoundary_Throws0x7FAndAccepts0x80()
+    {
+        // Arrange
+        MqttReasonCode below = (MqttReasonCode)0x7F;
+        MqttReasonCode first = (MqttReasonCode)0x80;
+
+        // Act
+        Action connectBelow = () => MqttConnectResult.Refuse(below);
+        Action admitBelow = () => MqttAdmitResult.Refuse(below);
+        Action subscribeBelow = () => MqttSubscribeResult.Refuse(below);
+        Action publishBelow = () => MqttPublishResult.Refuse(below);
+        MqttConnectResult connect = MqttConnectResult.Refuse(first);
+        MqttAdmitResult admit = MqttAdmitResult.Refuse(first);
+        MqttSubscribeResult subscribe = MqttSubscribeResult.Refuse(first);
+        MqttPublishResult publish = MqttPublishResult.Refuse(first);
+
+        // Assert
+        connectBelow.ShouldThrow<ArgumentOutOfRangeException>();
+        admitBelow.ShouldThrow<ArgumentOutOfRangeException>();
+        subscribeBelow.ShouldThrow<ArgumentOutOfRangeException>();
+        publishBelow.ShouldThrow<ArgumentOutOfRangeException>();
+        connect.IsAccepted.ShouldBeFalse();
+        connect.ReasonCode.ShouldBe(first);
+        admit.IsAccepted.ShouldBeFalse();
+        admit.ReasonCode.ShouldBe(first);
+        subscribe.IsAccepted.ShouldBeFalse();
+        subscribe.ReasonCode.ShouldBe(first);
+        publish.IsAccepted.ShouldBeFalse();
+        publish.ReasonCode.ShouldBe(first);
+    }
+
+    /// <summary>
     /// Proves that the not-authorized subscribe result carries reason code 0x87 and no reason string.
     /// </summary>
     [Fact]

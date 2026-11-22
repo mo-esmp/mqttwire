@@ -218,6 +218,98 @@ public sealed class PacketTests
     }
 
     /// <summary>
+    /// Proves that a host that throws at the 300th filter of a SUBSCRIBE of 400, whose codes are collected in a rented
+    /// buffer, closes the connection with DISCONNECT 0x83 and <see cref="MqttCloseReason.HandlerThrew"/>, is not asked
+    /// about the filters after it, and that the buffer of the codes goes back to the pool once.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Subscribe_HostThrowsAtFilter300_ClosesWith0x83AndReturnsTheCodesBuffer()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        int calls = 0;
+        harness.Handler.Subscribe = (_, _, requested) => ++calls == 300
+            ? throw new InvalidOperationException("The host's bug.")
+            : MqttSubscribeResult.Granted(requested);
+        TestConnection connection = harness.Connect();
+        byte[] subscribe = ServerPackets.BuildSubscribe(packetIdentifier: 1, properties: [],
+            Enumerable.Range(0, 400).Select(static index => ($"f{index}", (byte)0)));
+
+        // Act
+        connection.Deliver(subscribe);
+        await connection.Run;
+
+        // Assert
+        connection.TakeWritten().ShouldBe(Hex.Parse("E0 01 83"));
+        SubscribeCalls(harness).Count.ShouldBe(300);
+        harness.Handler.Calls.ShouldContain("OnClosed c1 HandlerThrew");
+        harness.Pool.Outstanding.ShouldBe(0);
+        harness.Pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that an invalid filter (<c>a#</c>) among the 300 filters of a SUBSCRIBE, whose codes are collected in a
+    /// rented buffer, is answered with 0x8F at its position without the host, that the other 299 are granted, and that
+    /// the buffer of the codes goes back to the pool.
+    /// </summary>
+    [Fact]
+    public void Subscribe_OneInvalidAmongThreeHundredFilters_Answers0x8FAtItsPosition()
+    {
+        // Arrange
+        const int Invalid = 270;
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect();
+        byte[] subscribe = ServerPackets.BuildSubscribe(packetIdentifier: 1, properties: [],
+            Enumerable.Range(0, 300).Select(static index => (index == Invalid ? "a#" : $"f{index}", (byte)1)));
+        byte[] codes = new byte[300];
+        codes.AsSpan().Fill(0x01);
+        codes[Invalid] = 0x8F;
+
+        // Act
+        connection.Deliver(subscribe);
+
+        // Assert
+        // Remaining Length 303: the identifier, the property length and 300 codes.
+        connection.TakeWritten().ShouldBe([.. Hex.Parse("90 AF 02 00 01 00"), .. codes]);
+        SubscribeCalls(harness).Count.ShouldBe(299);
+        SubscribeCalls(harness).ShouldNotContain(static call => call.Contains("a#", StringComparison.Ordinal));
+        connection.Run.IsCompleted.ShouldBeFalse();
+        harness.Pool.Outstanding.ShouldBe(0);
+        harness.Pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a SUBSCRIBE whose SUBACK is exactly the client's Maximum Packet Size of 4,096 bytes is answered: 4,090
+    /// filters give a fixed header of 3 bytes, the identifier, the property length and 4,090 codes. The test below it
+    /// proves that one filter more closes the connection.
+    /// </summary>
+    [Fact]
+    public void Subscribe_SubAckExactlyTheClientsMaximumPacketSize_IsAnswered()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect(connect: ServerPackets.ConnectMaxPacketSize4096);
+        byte[] subscribe = ServerPackets.BuildSubscribe(packetIdentifier: 1, properties: [],
+            Enumerable.Repeat(("a", (byte)0), 4_090));
+
+        // Act
+        connection.Deliver(subscribe);
+
+        // Assert
+        // Remaining Length 4,093, a variable byte integer of two bytes.
+        byte[] written = connection.TakeWritten();
+        written.Length.ShouldBe(4_096);
+        written.AsSpan(0, 6).ToArray().ShouldBe(Hex.Parse("90 FD 1F 00 01 00"));
+        written.AsSpan(6).ToArray().ShouldAllBe(static code => code == 0x00);
+        SubscribeCalls(harness).Count.ShouldBe(4_090);
+        connection.Run.IsCompleted.ShouldBeFalse();
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves that a SUBSCRIBE whose SUBACK would pass the client's Maximum Packet Size even without a reason string
     /// closes the connection with DISCONNECT 0x95 and <see cref="MqttCloseReason.ProtocolError"/>, without calling the
     /// host.

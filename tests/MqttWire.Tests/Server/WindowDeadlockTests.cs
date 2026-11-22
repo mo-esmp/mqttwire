@@ -179,6 +179,50 @@ public sealed class WindowDeadlockTests
     }
 
     /// <summary>
+    /// Proves that an acknowledgement that frees a place in the window while a write is held leaves the waiting
+    /// delivery to the holder of the send path: with the client's Receive Maximum 1, A at QoS 1 is written and B waits;
+    /// the link then holds the PINGRESP of a PINGREQ; A's PUBACK frees the place, but nothing more is written while
+    /// the PINGRESP is held; when it completes, the drain takes B at once.
+    /// </summary>
+    [Fact]
+    public void Window_PlaceFreedWhileAWriteIsHeld_TheDrainTakesTheWaitingDelivery()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect(connect: ServerPackets.ConnectReceiveMaximum1);
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        server.TrySend(s_topic, "A"u8.ToArray(), MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+        harness.AssertBounds();
+        server.TrySend(s_topic, "B"u8.ToArray(), MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+        harness.AssertBounds();
+        byte[] beforeTheHold = connection.TakeWritten();
+        connection.Link.HoldWrites();
+        connection.Deliver(ClientPackets.PingReq);
+
+        // Act
+        connection.Deliver(ServerPackets.PubAck(1));
+        byte[] whileHeld = connection.TakeWritten();
+        ConnectionCounts afterThePubAck = server.GetCounts();
+        connection.CompleteHeldWrites();
+        byte[] released = connection.TakeWritten();
+        ConnectionCounts afterTheRelease = server.GetCounts();
+
+        // Assert
+        beforeTheHold.ShouldBe(ServerPackets.Delivery(MqttQoS.AtLeastOnce, packetIdentifier: 1, "A"u8));
+        whileHeld.ShouldBeEmpty();
+        afterThePubAck.DeliveryRecords.ShouldBe(0);
+        afterThePubAck.WaitingDeliveries.ShouldBe(1);
+        afterThePubAck.IsWriting.ShouldBeTrue();
+        released.ShouldBe([
+            .. ClientPackets.PingResp,
+            .. ServerPackets.Delivery(MqttQoS.AtLeastOnce, packetIdentifier: 2, "B"u8),
+        ]);
+        afterTheRelease.WaitingDeliveries.ShouldBe(0);
+        afterTheRelease.DeliveryRecords.ShouldBe(1);
+        afterTheRelease.IsWriting.ShouldBeFalse();
+    }
+
+    /// <summary>
     /// Steps 1 and 2 of the deadlock: A at QoS 2 is written and fills the window, and B at QoS 2 is taken and waits,
     /// with nothing being written.
     /// </summary>
