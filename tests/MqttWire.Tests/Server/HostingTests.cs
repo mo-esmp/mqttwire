@@ -106,12 +106,12 @@ public sealed class HostingTests
         builder.Services.AddSingleton<StopRecorder>();
         builder.Services.AddHostedService(static provider => provider.GetRequiredService<StopRecorder>());
         using IHost host = builder.Build();
-        await host.StartAsync(CancellationToken.None);
+        await host.StartAsync(CancellationToken.None).Within("The host's start");
         StopRecorder recorder = host.Services.GetRequiredService<StopRecorder>();
         bool stoppingWhenStarted = host.Services.GetRequiredService<MqttWireServer>().IsStopping;
 
         // Act
-        await host.StopAsync(CancellationToken.None);
+        await host.StopAsync(CancellationToken.None).Within("The host's stop");
 
         // Assert
         stoppingWhenStarted.ShouldBeFalse();
@@ -135,9 +135,9 @@ public sealed class HostingTests
         MqttWireServerLifetime lifetime = new(server);
 
         // Act
-        await lifetime.StartingAsync(CancellationToken.None);
+        await lifetime.StartingAsync(CancellationToken.None).Within("The lifetime's starting");
         int timersAfterStarting = timers.PeriodicTimers().Count;
-        await lifetime.StartAsync(CancellationToken.None);
+        await lifetime.StartAsync(CancellationToken.None).Within("The lifetime's start");
 
         // Assert
         timersAfterStarting.ShouldBe(1);

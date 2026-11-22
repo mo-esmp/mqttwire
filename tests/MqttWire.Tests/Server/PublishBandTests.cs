@@ -292,7 +292,7 @@ public sealed class PublishBandTests
 
         // Act
         connection.Deliver(packet);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         packet.Length.ShouldBe(SkipBandEnd + 4);
@@ -318,7 +318,7 @@ public sealed class PublishBandTests
 
         // Act
         connection.Deliver(packet);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ProtocolError));
@@ -377,7 +377,7 @@ public sealed class PublishBandTests
 
         // Act
         connection.Deliver(packet);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.PacketTooLarge));
@@ -461,7 +461,7 @@ public sealed class PublishBandTests
 
         // Act
         connection.Deliver(start);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.MalformedPacket));
@@ -488,7 +488,7 @@ public sealed class PublishBandTests
 
         // Act
         connection.Deliver(packet);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.MalformedPacket));
@@ -520,7 +520,7 @@ public sealed class PublishBandTests
         harness.Advance(TimeSpan.FromSeconds(2));
         byte[] written = connection.TakeWritten();
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         writtenAt8.ShouldBeEmpty();
@@ -547,7 +547,7 @@ public sealed class PublishBandTests
 
         // Act
         connection.Deliver(packet);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.PacketTooLarge));

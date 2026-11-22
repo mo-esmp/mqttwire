@@ -213,7 +213,7 @@ public sealed class DeliveryQoSTests
         // Act
         MqttSendResult fifth = server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         waiting.WaitingDeliveries.ShouldBe(3);
@@ -253,7 +253,7 @@ public sealed class DeliveryQoSTests
         // Act
         MqttSendResult fifth = server.TrySend(s_topic, payload, MqttQoS.AtLeastOnce);
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         fifth.ShouldBe(MqttSendResult.Evicted);
@@ -286,7 +286,7 @@ public sealed class DeliveryQoSTests
         harness.Advance(TimeSpan.FromSeconds(2));
         byte[] writtenAt30 = connection.TakeWritten();
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         writtenAt28.ShouldBeEmpty();
@@ -323,7 +323,7 @@ public sealed class DeliveryQoSTests
         harness.Advance(TimeSpan.FromSeconds(2));
         byte[] writtenAt50 = connection.TakeWritten();
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         pubRel.ShouldBe(ClientPackets.PubRel1);
@@ -447,7 +447,7 @@ public sealed class DeliveryQoSTests
         harness.Advance(TimeSpan.FromSeconds(10));
         byte[] writtenAt30 = connection.TakeWritten();
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         secondPubRel.ShouldBe(ClientPackets.PubRel1);
@@ -533,7 +533,7 @@ public sealed class DeliveryQoSTests
 
         // Act
         connection.Deliver(Hex.Parse(acknowledgement));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ProtocolError));

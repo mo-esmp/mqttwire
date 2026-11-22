@@ -35,7 +35,7 @@ public sealed class AcceptTests
         connection.Link.IsAborted.ShouldBeTrue();
         connection.TakeWritten().ShouldBeEmpty();
         connection.Run.IsCompleted.ShouldBeTrue();
-        await connection.Run;
+        await connection.RunEnded();
         harness.Handler.Calls.ShouldBeEmpty();
         harness.Pool.Outstanding.ShouldBe(0);
     }
@@ -60,7 +60,7 @@ public sealed class AcceptTests
         connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.ProtocolError);
         connection.TakeWritten().ShouldBeEmpty();
         connection.Run.IsCompleted.ShouldBeTrue();
-        await connection.Run;
+        await connection.RunEnded();
         harness.Handler.Calls.ShouldBeEmpty();
         harness.Pool.Outstanding.ShouldBe(0);
     }
@@ -83,7 +83,7 @@ public sealed class AcceptTests
 
         // Assert
         connection.Run.IsCompleted.ShouldBeTrue();
-        await connection.Run;
+        await connection.RunEnded();
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Pool.FaultyReturns.ShouldBe(0);
         harness.Handler.Calls.ShouldBeEmpty();
@@ -113,7 +113,7 @@ public sealed class AcceptTests
             // Assert
             harness.Handler.Calls.ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-"], $"cut at {cut}");
             connection.Link.EndFromPeer();
-            await connection.Run;
+            await connection.RunEnded();
             harness.Pool.Outstanding.ShouldBe(0);
         }
     }
@@ -141,7 +141,7 @@ public sealed class AcceptTests
         heldWhileWaiting.ShouldBe(1);
         connection.Link.IsAborted.ShouldBeTrue();
         connection.Run.IsCompleted.ShouldBeTrue();
-        await connection.Run;
+        await connection.RunEnded();
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Handler.Calls.ShouldBeEmpty();
     }
@@ -185,8 +185,8 @@ public sealed class AcceptTests
         first.Link.EndFromPeer();
         second.Deliver(ServerPackets.Connect);
         second.Link.EndFromPeer();
-        await first.Run;
-        await second.Run;
+        await first.RunEnded();
+        await second.RunEnded();
 
         // Act
         harness.Advance(ServerLimits.SweepInterval);

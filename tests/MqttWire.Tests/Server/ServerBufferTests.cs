@@ -229,7 +229,7 @@ public sealed class ServerBufferTests
         TestConnection[] ended = await TakeWayOutAsync(harness, pool, wayOut);
         foreach (TestConnection connection in ended)
         {
-            await connection.Run;
+            await connection.RunEnded();
         }
 
         // Assert
@@ -237,6 +237,7 @@ public sealed class ServerBufferTests
         harness.Pool.FaultyReturns.ShouldBe(0);
         harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
         ClosedCalls(harness).ShouldBe(ExpectedClosed(wayOut));
+        AssertTheWayOutWasTaken(wayOut, ended);
     }
 
     /// <summary>
@@ -278,7 +279,7 @@ public sealed class ServerBufferTests
         bool outAfterOtherRents = pool.IsRented(pending);
         bool readStillPending = first.Link.IsReadPending;
         first.Link.Deliver(ClientPackets.PublishQoS0);
-        await first.Run;
+        await first.RunEnded();
         second.Deliver(ClientPackets.PingReq);
         byte[] secondsLaterAnswer = second.TakeWritten();
 
@@ -335,7 +336,7 @@ public sealed class ServerBufferTests
         bool outBeforeTheWriteEnds = pool.IsRented(held);
         first.CompleteHeldWrites();
         byte[] written = first.TakeWritten();
-        await first.Run;
+        await first.RunEnded();
 
         // Assert
         abortedAtOnce.ShouldBeTrue();
@@ -396,11 +397,15 @@ public sealed class ServerBufferTests
         bool beforeAborted = abortedBefore.Link.IsAborted;
         int beforeOutAfterTheAbort = before.Pool.Outstanding;
         abortedBefore.CompleteHeldWrites();
-        await abortedBefore.Run;
+        await abortedBefore.RunEnded();
 
         abortedInside.CompleteHeldWrites();
         bool insideAborted = abortedInside.Link.IsAborted;
-        await abortedInside.Run;
+
+        // Should the close inside the return never come, the peer ends the link, so the test fails on what it asserts
+        // instead of waiting.
+        abortedInside.Link.EndFromPeer();
+        await abortedInside.RunEnded();
 
         // Assert
         beforeAborted.ShouldBeTrue();
@@ -446,17 +451,18 @@ public sealed class ServerBufferTests
             // The close is otherwise far quicker to reach the send path's lock than the completion: delaying it by a
             // little more in each round moves the moment of the abort across the whole of the completion.
             int closerDelay = round % RaceDelaySteps * RaceDelayStep;
-            Thread completer = new(() => RunAtTheGate(ref ready, delay: 0, () => connection.Link.CompleteHeldWrites()));
-            Thread closer = new(() => RunAtTheGate(ref ready, closerDelay,
+            Thread completer = new(() =>
+                RunAtTheGate(ref ready, threads: 2, delay: 0, () => connection.Link.CompleteHeldWrites()));
+            Thread closer = new(() => RunAtTheGate(ref ready, threads: 2, closerDelay,
                 () => server.Close(MqttReasonCode.AdministrativeAction)));
 
             // Act
             completer.Start();
             closer.Start();
-            completer.Join();
-            closer.Join();
+            completer.JoinWithin("The completing thread");
+            closer.JoinWithin("The closing thread");
             connection.Link.EndFromPeer();
-            await connection.Run;
+            await connection.RunEnded();
 
             // Assert, collected so that one report names every round that failed.
             byte[] written = connection.TakeWritten();
@@ -465,6 +471,275 @@ public sealed class ServerBufferTests
             {
                 failures.Add($"round {round}: faulty returns {harness.Pool.FaultyReturns}, outstanding "
                              + $"{harness.Pool.Outstanding}, written {Convert.ToHexString(written)}");
+            }
+        }
+
+        failures.ShouldBeEmpty();
+    }
+
+    /// <summary>
+    /// Proves, with a pool that overwrites every returned array and hands it out again at once, that a write aborted at
+    /// the very moment its completion gives its buffer back never had that buffer taken from it early: the host's
+    /// close runs from inside the pool as the completed write's buffer comes back, and another connection connects and
+    /// works there too; at that moment the link has taken the PUBLISH, the buffer is still out and still holds the
+    /// PUBLISH, and the other connection is answered correctly. The other order, the abort just before the
+    /// completion, is <see cref="Abort_WriteHeldOpen_TheWriteNeverSeesReusedMemory"/>.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Abort_InsideTheReturnOfTheCompletedWritesBuffer_TheWriteNeverSeesReusedMemory()
+    {
+        // Arrange
+        OverwritingPool pool = new();
+        ServerHarness harness = ServerHarness.Create(pool: pool);
+        TestConnection first = harness.Connect("c1");
+        MqttWireConnection server = first.Connection.ShouldNotBeNull();
+        first.Link.HoldWrites();
+        server.TrySend(s_topic, s_hi, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+        harness.AssertBounds();
+        ReadOnlyMemory<byte> held = first.Link.HeldWriteBuffer;
+        MemoryMarshal.TryGetArray(held, out ArraySegment<byte> heldSegment).ShouldBeTrue();
+        byte[] heldArray = heldSegment.Array.ShouldNotBeNull();
+        int writesBefore = first.Link.WriteCount;
+        byte[]? bytesAtTheReturn = null;
+        int writesAtTheReturn = 0;
+        bool abortedAtTheReturn = false;
+        bool outAfterTheOtherConnection = false;
+        byte[]? secondsAnswer = null;
+        TestConnection? second = null;
+        pool.Returning = array =>
+        {
+            if (!ReferenceEquals(array, heldArray) || second is not null)
+            {
+                return;
+            }
+
+            bytesAtTheReturn = held.ToArray();
+            writesAtTheReturn = first.Link.WriteCount;
+            server.Close(MqttReasonCode.AdministrativeAction);
+            abortedAtTheReturn = first.Link.IsAborted;
+            second = harness.Connect("c2");
+            second.Deliver(ClientPackets.PingReq);
+            secondsAnswer = second.TakeWritten();
+            outAfterTheOtherConnection = pool.IsRented(held);
+        };
+
+        // Act
+        first.CompleteHeldWrites();
+
+        // Should the close inside the return never come, the peer ends the link, so the test fails on what it asserts
+        // instead of waiting.
+        first.Link.EndFromPeer();
+        await first.RunEnded();
+
+        // Assert
+        bytesAtTheReturn.ShouldBe(ClientPackets.PublishQoS1);
+        writesAtTheReturn.ShouldBe(writesBefore + 1);
+        abortedAtTheReturn.ShouldBeTrue();
+        outAfterTheOtherConnection.ShouldBeTrue();
+        secondsAnswer.ShouldBe(ClientPackets.PingResp);
+        first.TakeWritten().ShouldBe(ClientPackets.PublishQoS1);
+        pool.IsRented(held).ShouldBeFalse();
+        ClosedCalls(harness).ShouldBe(["OnClosed c1 ClosedByHost"]);
+        pool.Outstanding.ShouldBe(0);
+        pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves, with a pool that overwrites every returned array and hands it out again at once, that a held write whose
+    /// completion races an abort and other rents never sees reused memory: in each of 500 rounds one thread completes
+    /// the write, one closes the connection and one rents arrays and fills them, all released by one gate with delays
+    /// that change from round to round. In every round the link took exactly the PUBLISH (followed at most by a
+    /// DISCONNECT), not overwritten or foreign bytes; the arrays rented meanwhile were not changed
+    /// by it; no buffer was returned twice; and once the run has ended and the test's arrays are back, none
+    /// is out.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Abort_RacingTheWritesCompletion_TheWriteNeverSeesReusedMemory()
+    {
+        // Arrange
+        List<string> failures = [];
+        byte[] publishThenDisconnect =
+            [.. ClientPackets.PublishQoS1, .. ServerPackets.Disconnect(MqttReasonCode.AdministrativeAction)];
+
+        for (int round = 0; round < RaceRounds; round++)
+        {
+            OverwritingPool pool = new();
+            ServerHarness harness = ServerHarness.Create(pool: pool);
+            TestConnection connection = harness.Connect();
+            MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+            connection.Link.HoldWrites();
+            server.TrySend(s_topic, s_hi, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+            ReadOnlyMemory<byte> held = connection.Link.HeldWriteBuffer;
+            byte[][] mine = new byte[3][];
+            int ready = 0;
+            int closerDelay = round % RaceDelaySteps * RaceDelayStep;
+            int renterDelay = round * 7 % RaceDelaySteps * RaceDelayStep;
+            Thread completer = new(() =>
+                RunAtTheGate(ref ready, threads: 3, delay: 0, () => connection.Link.CompleteHeldWrites()));
+            Thread closer = new(() => RunAtTheGate(ref ready, threads: 3, closerDelay,
+                () => server.Close(MqttReasonCode.AdministrativeAction)));
+            Thread renter = new(() => RunAtTheGate(ref ready, threads: 3, renterDelay, () => RentAndFill(pool, mine,
+                held.Length)));
+
+            // Act
+            completer.Start();
+            closer.Start();
+            renter.Start();
+            completer.JoinWithin("The completing thread");
+            closer.JoinWithin("The closing thread");
+            renter.JoinWithin("The renting thread");
+            connection.Link.EndFromPeer();
+            await connection.RunEnded();
+
+            // Assert, collected so that one report names every round that failed.
+            byte[] written = connection.TakeWritten();
+            bool mineIntact = mine.All(static array => array.All(static b => b == Mine));
+            foreach (byte[] array in mine)
+            {
+                pool.Return(array);
+            }
+
+            if (!(written.SequenceEqual(ClientPackets.PublishQoS1) || written.SequenceEqual(publishThenDisconnect))
+                || !mineIntact || pool.FaultyReturns != 0 || pool.Outstanding != 0)
+            {
+                failures.Add($"round {round}: written {Convert.ToHexString(written)}, the test's arrays intact "
+                             + $"{mineIntact}, faulty returns {pool.FaultyReturns}, outstanding {pool.Outstanding}");
+            }
+        }
+
+        failures.ShouldBeEmpty();
+    }
+
+    /// <summary>
+    /// Proves, with a pool that overwrites every returned array and hands it out again at once, that a read aborted at
+    /// the moment its data has arrived never has its buffer taken from it: a PINGREQ and a PUBLISH arrive in the
+    /// pending read's buffer, and while the PINGREQ is being handled, as its PINGRESP's buffer goes back, the host's
+    /// close aborts the link and another connection connects and works, and the test rents. At that moment the read's
+    /// buffer is still out and still holds the bytes that arrived, the arrays rented meanwhile are not it and stay as
+    /// they were filled, the PUBLISH is not handed on, and the read's buffer goes back once the read loop has ended.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Abort_WhileTheReadsDataIsHandled_TheReadNeverSeesReusedMemory()
+    {
+        // Arrange
+        OverwritingPool pool = new();
+        ServerHarness harness = ServerHarness.Create(pool: pool);
+        TestConnection first = harness.Connect("c1");
+        MqttWireConnection server = first.Connection.ShouldNotBeNull();
+        first.Link.SkipWaits();
+        first.Deliver(ClientPackets.PingReq);
+        first.TakeWritten().ShouldBe(ClientPackets.PingResp);
+        Memory<byte> pending = first.Link.PendingReadBuffer;
+        byte[] arriving = [.. ClientPackets.PingReq, .. ClientPackets.PublishQoS0];
+        bool armed = true;
+        byte[]? bytesAtTheAbort = null;
+        bool abortedThere = false;
+        bool outAfterOtherRents = false;
+        byte[]? secondsAnswer = null;
+        byte[] mine = [];
+        pool.Returning = array =>
+        {
+            if (!armed || SameArray(array, pending))
+            {
+                return;
+            }
+
+            // The first buffer back is the PINGRESP's, while the read's buffer still holds what arrived.
+            armed = false;
+            server.Close(MqttReasonCode.AdministrativeAction);
+            abortedThere = first.Link.IsAborted;
+            TestConnection second = harness.Connect("c2");
+            second.Deliver(ClientPackets.PingReq);
+            secondsAnswer = second.TakeWritten();
+            mine = pool.Rent(pending.Length);
+            mine.AsSpan().Fill(Mine);
+            bytesAtTheAbort = pending[..arriving.Length].ToArray();
+            outAfterOtherRents = pool.IsRented(pending);
+        };
+
+        // Act
+        first.Link.Deliver(arriving);
+        await first.RunEnded();
+
+        // Assert
+        abortedThere.ShouldBeTrue();
+        bytesAtTheAbort.ShouldBe(arriving);
+        outAfterOtherRents.ShouldBeTrue();
+        SameArray(mine, pending).ShouldBeFalse();
+        mine.ShouldAllBe(static b => b == Mine);
+        secondsAnswer.ShouldBe(ClientPackets.PingResp);
+        harness.Handler.Calls.ShouldNotContain(static call => call.StartsWith("OnPublish c1", StringComparison.Ordinal));
+        first.TakeWritten().ShouldBe(ClientPackets.PingResp);
+        pool.IsRented(pending).ShouldBeFalse();
+        ClosedCalls(harness).ShouldContain("OnClosed c1 ClosedByHost");
+        pool.Outstanding.ShouldBe(1);
+        pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves, with a pool that overwrites every returned array and hands it out again at once, that a pending read
+    /// whose data races an abort of the link and other rents never sees reused memory: in each of 500 rounds one
+    /// thread delivers a PINGREQ and a PUBLISH to the pending read, one aborts the link and one rents arrays and fills
+    /// them, all released by one gate with delays that change from round to round. In every round the arrays rented
+    /// meanwhile were not changed by the read, what was written is at most the PINGRESP, no buffer was returned twice,
+    /// and once the run has ended only the test's arrays are out.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Abort_RacingTheReadsData_TheReadNeverSeesReusedMemory()
+    {
+        // Arrange
+        List<string> failures = [];
+        byte[] arriving = [.. ClientPackets.PingReq, .. ClientPackets.PublishQoS0];
+
+        for (int round = 0; round < RaceRounds; round++)
+        {
+            OverwritingPool pool = new();
+            ServerHarness harness = ServerHarness.Create(pool: pool);
+            TestConnection connection = harness.Connect();
+            connection.Link.SkipWaits();
+            connection.Deliver(ClientPackets.PingReq);
+            connection.TakeWritten();
+            Memory<byte> pending = connection.Link.PendingReadBuffer;
+            byte[][] mine = new byte[3][];
+            int ready = 0;
+            int aborterDelay = round % RaceDelaySteps * RaceDelayStep;
+            int renterDelay = round * 7 % RaceDelaySteps * RaceDelayStep;
+            Thread deliverer = new(() =>
+                RunAtTheGate(ref ready, threads: 3, delay: 0, () => connection.Link.Deliver(arriving)));
+            Thread aborter = new(() => RunAtTheGate(ref ready, threads: 3, aborterDelay, connection.Link.Abort));
+            Thread renter = new(() =>
+                RunAtTheGate(ref ready, threads: 3, renterDelay, () => RentAndFill(pool, mine, pending.Length)));
+
+            // Act
+            deliverer.Start();
+            aborter.Start();
+            renter.Start();
+            deliverer.JoinWithin("The delivering thread");
+            aborter.JoinWithin("The aborting thread");
+            renter.JoinWithin("The renting thread");
+            await connection.RunEnded();
+
+            // Assert, collected so that one report names every round that failed.
+            byte[] written = connection.TakeWritten();
+            bool mineIntact = mine.All(static array => array.All(static b => b == Mine));
+            int outstanding = pool.Outstanding;
+            if (!(written.Length == 0 || written.SequenceEqual(ClientPackets.PingResp)) || !mineIntact
+                || pool.FaultyReturns != 0 || outstanding != mine.Length)
+            {
+                failures.Add($"round {round}: written {Convert.ToHexString(written)}, the test's arrays intact "
+                             + $"{mineIntact}, faulty returns {pool.FaultyReturns}, outstanding {outstanding}");
             }
         }
 
@@ -500,7 +775,7 @@ public sealed class ServerBufferTests
         bool aborted = connection.Link.IsAborted;
         int outAfterTheAbort = harness.Pool.Outstanding;
         connection.CompleteHeldWrites(new OperationCanceledException());
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         waiting.WaitingControlPackets.ShouldBe(2);
@@ -537,7 +812,7 @@ public sealed class ServerBufferTests
         // Act
         server.Close(MqttReasonCode.AdministrativeAction);
         connection.CompleteHeldWrites(new OperationCanceledException());
-        await connection.Run;
+        await connection.RunEnded();
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
@@ -902,7 +1177,7 @@ public sealed class ServerBufferTests
         Task stop = harness.Server.StopAsync();
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ServerShuttingDown));
         connection.Link.EndFromPeer();
-        await stop;
+        await stop.Within("The server's stop");
         return connection;
     }
 
@@ -924,7 +1199,7 @@ public sealed class ServerBufferTests
         TestConnection late = harness.Accept();
         late.Link.IsAborted.ShouldBeTrue();
         first.Link.EndFromPeer();
-        await stop;
+        await stop.Within("The server's stop");
         return [first, late];
     }
 
@@ -973,6 +1248,30 @@ public sealed class ServerBufferTests
     {
         server.TrySend(s_topic, s_hi, qos).ShouldBe(expected);
         harness.AssertBounds();
+    }
+
+    /// <summary>
+    /// Asserts what shows that a way out without an <c>OnClosed</c> call was the one taken, once its run has ended: the
+    /// authentication deadline answered with CONNACK 0x88, and the connect deadline aborted the link without a write.
+    /// The other ways out are told apart by their <c>OnClosed</c> reason, or by the CONNACK their own steps assert.
+    /// </summary>
+    /// <param name="wayOut">
+    /// The way out.
+    /// </param>
+    /// <param name="ended">
+    /// The connections whose runs it ended.
+    /// </param>
+    private static void AssertTheWayOutWasTaken(WayOut wayOut, TestConnection[] ended)
+    {
+        if (wayOut == WayOut.AuthenticationTimeout)
+        {
+            ended[0].TakeWritten().ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.ServerUnavailable));
+        }
+        else if (wayOut == WayOut.ConnectTimeout)
+        {
+            ended[0].Link.IsAborted.ShouldBeTrue();
+            ended[0].TakeWritten().ShouldBeEmpty();
+        }
     }
 
     /// <summary>
@@ -1053,7 +1352,7 @@ public sealed class ServerBufferTests
         connection.CompleteHeldWrites();
         connection.Deliver(ClientPackets.PubAck1);
         connection.Deliver(ClientPackets.Disconnect);
-        await connection.Run;
+        await connection.RunEnded();
         connection.TakeWritten().ShouldBe([
             .. ClientPackets.PubAck1, .. ClientPackets.PubRec1, .. ClientPackets.PubComp1,
             .. ClientPackets.PublishQoS0, .. ClientPackets.PingResp, .. ClientPackets.PublishQoS1,
@@ -1086,11 +1385,14 @@ public sealed class ServerBufferTests
     }
 
     /// <summary>
-    /// Runs an action on the calling thread once both threads of a race are at the gate, so that they start as close
-    /// together as the scheduler allows, after a spin of its own that shifts where in the other's work it lands.
+    /// Runs an action on the calling thread once every thread of a race is at the gate, so that they start as close
+    /// together as the scheduler allows, after a spin of its own that shifts where in the others' work it lands.
     /// </summary>
     /// <param name="ready">
-    /// The number of threads at the gate, shared by both.
+    /// The number of threads at the gate, shared by all of them.
+    /// </param>
+    /// <param name="threads">
+    /// The number of threads the gate waits for.
     /// </param>
     /// <param name="delay">
     /// How many iterations to spin once the gate is open; 0 for none.
@@ -1098,17 +1400,42 @@ public sealed class ServerBufferTests
     /// <param name="action">
     /// What the thread does.
     /// </param>
-    private static void RunAtTheGate(ref int ready, int delay, Action action)
+    private static void RunAtTheGate(ref int ready, int threads, int delay, Action action)
     {
         Interlocked.Increment(ref ready);
         SpinWait spin = default;
-        while (Volatile.Read(ref ready) < 2)
+        while (Volatile.Read(ref ready) < threads)
         {
             spin.SpinOnce(sleep1Threshold: -1);
         }
 
         Thread.SpinWait(delay);
         action();
+    }
+
+    /// <summary>
+    /// Rents three arrays, as another connection would, one of the length of the buffer an operation in flight holds
+    /// and two of other sizes, and fills each with <see cref="Mine"/>, so that a write into them by that operation
+    /// shows.
+    /// </summary>
+    /// <param name="pool">
+    /// The pool to rent from.
+    /// </param>
+    /// <param name="mine">
+    /// Receives the three arrays.
+    /// </param>
+    /// <param name="length">
+    /// The length of the buffer the operation in flight holds.
+    /// </param>
+    private static void RentAndFill(OverwritingPool pool, byte[][] mine, int length)
+    {
+        mine[0] = pool.Rent(length);
+        mine[1] = pool.Rent(minimumLength: 16);
+        mine[2] = pool.Rent(minimumLength: 4_096);
+        foreach (byte[] array in mine)
+        {
+            array.AsSpan().Fill(Mine);
+        }
     }
 
     /// <summary>

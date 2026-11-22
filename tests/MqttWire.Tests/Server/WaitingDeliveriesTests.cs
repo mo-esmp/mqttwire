@@ -174,7 +174,7 @@ public sealed class WaitingDeliveriesTests
         // The close finds the write in progress and aborts; the write then ends and drops what waits.
         server.Close(MqttReasonCode.AdministrativeAction);
         connection.CompleteHeldWrites(new IOException("The socket was aborted."));
-        await connection.Run;
+        await connection.RunEnded();
         WaitingDeliveries afterwards = harness.Server.Pools.Waiting.Get();
 
         // Assert

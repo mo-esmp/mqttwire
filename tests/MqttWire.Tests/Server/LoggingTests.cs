@@ -153,7 +153,7 @@ public sealed class LoggingTests
 
         // Act
         connection.Deliver(ServerPackets.Subscribe);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         EndEvents(harness).ShouldBe([HandlerThrewEvent]);
@@ -185,7 +185,7 @@ public sealed class LoggingTests
 
         // Act
         harness.Advance(ServerLimits.AuthenticationDeadline);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         EndEvents(harness).ShouldBe([AuthenticationTimedOutEvent]);
@@ -219,7 +219,7 @@ public sealed class LoggingTests
         takenOver.Link.EndFromPeer();
         harness.Advance(TimeSpan.FromSeconds(46));
         replacement.Link.EndFromPeer();
-        await Task.WhenAll(disconnects.Run, lost.Run, closed.Run, takenOver.Run, replacement.Run);
+        await Task.WhenAll(disconnects.Run, lost.Run, closed.Run, takenOver.Run, replacement.Run).Within("The connections' runs");
 
         // Assert
         EndEvents(harness).ShouldBe([17, 18, 14, 13, KeepAliveTimedOutEvent], ignoreOrder: true);
@@ -247,7 +247,7 @@ public sealed class LoggingTests
         TestConnection thrower = harness.Accept();
         thrower.Deliver(ServerPackets.ConnectFor("c2"));
         harness.Advance(ServerLimits.AuthenticationDeadline);
-        await Task.WhenAll(accepted.Run, thrower.Run);
+        await Task.WhenAll(accepted.Run, thrower.Run).Within("The connections' runs");
         InvalidOperationException thrown = new("The host failed late.");
 
         // Act
@@ -308,7 +308,7 @@ public sealed class LoggingTests
         refused.Deliver(ServerPackets.ConnectFor("c3"));
         closed.Connection.ShouldNotBeNull().Close(MqttReasonCode.AdministrativeAction, HostReason);
         closed.Link.EndFromPeer();
-        await Task.WhenAll(publisher.Run, receiver.Run, refused.Run, closed.Run);
+        await Task.WhenAll(publisher.Run, receiver.Run, refused.Run, closed.Run).Within("The connections' runs");
 
         // Assert
         EndEvents(harness).ShouldBe([HandlerThrewEvent, 12, 3, 14], ignoreOrder: true);
@@ -341,7 +341,7 @@ public sealed class LoggingTests
 
         // Act
         harness.Advance(ServerLimits.ConnectDeadline);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         EndEvents(harness).ShouldBe([5]);
@@ -393,7 +393,7 @@ public sealed class LoggingTests
                 break;
 
             case "stop":
-                await harness.Server.StopAsync();
+                await harness.Server.StopAsync().Within("The server's stop");
                 break;
 
             default:
@@ -401,7 +401,7 @@ public sealed class LoggingTests
                 break;
         }
 
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         EndEvents(harness).ShouldBe([eventId]);
@@ -433,7 +433,7 @@ public sealed class LoggingTests
         // Act
         connection.Deliver(ClientPackets.PublishQoS1);
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         EndEvents(harness).ShouldBe([14, HandlerThrewEvent]);
@@ -465,7 +465,7 @@ public sealed class LoggingTests
         byte[] writtenToSecond = second.TakeWritten();
         first.Link.EndFromPeer();
         second.Link.EndFromPeer();
-        await Task.WhenAll(first.Run, second.Run);
+        await Task.WhenAll(first.Run, second.Run).Within("The connections' runs");
 
         // Assert
         writtenToFirst.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.KeepAliveTimeout));
@@ -602,7 +602,7 @@ public sealed class LoggingTests
                 connection = harness.Connect();
                 Task stop = harness.Server.StopAsync();
                 connection.Link.EndFromPeer();
-                await stop;
+                await stop.Within("The server's stop");
                 break;
 
             case 17:
@@ -616,7 +616,7 @@ public sealed class LoggingTests
                 break;
         }
 
-        await connection.Run;
+        await connection.RunEnded();
     }
 
     /// <summary>

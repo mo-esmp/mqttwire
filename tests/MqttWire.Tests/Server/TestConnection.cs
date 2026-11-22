@@ -104,7 +104,17 @@ internal sealed class TestConnection(
     /// <returns>
     /// A task that completes once the path is idle; at once when it is idle now.
     /// </returns>
-    public Task WhenSendPathIdleAsync() => Connection.ShouldNotBeNull().WhenSendPathIdleAsync();
+    public Task WhenSendPathIdleAsync() =>
+        Connection.ShouldNotBeNull().WhenSendPathIdleAsync().Within("The give-up of the send path");
+
+    /// <summary>
+    /// Waits until the server's run of the connection has ended, at most <see cref="BoundedWaits.Limit"/>, so that a
+    /// run that never ends fails the test instead of hanging it.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the run has; it fails with <see cref="TimeoutException"/> when the run is stuck.
+    /// </returns>
+    public Task RunEnded() => Run.Within("The connection's run");
 
     /// <summary>
     /// Takes everything the server wrote since the last call.

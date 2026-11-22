@@ -56,7 +56,7 @@ public sealed class StopTests
             connection.Link.EndFromPeer();
         }
 
-        await stop;
+        await stop.Within("The server's stop");
 
         // Assert
         foreach (TestConnection connection in connections)
@@ -95,7 +95,7 @@ public sealed class StopTests
 
         // Act
         harness.Advance(s_justShort);
-        await stop;
+        await stop.Within("The server's stop");
 
         // Assert
         completedBeforeTheDeadline.ShouldBeFalse();
@@ -128,12 +128,12 @@ public sealed class StopTests
         TestConnection refused = harness.Accept();
         refused.Deliver(ServerPackets.ConnectFor("c4"));
         refused.Link.EndFromPeer();
-        await refused.Run;
+        await refused.RunEnded();
 
         // Act
         Task stop = harness.Server.StopAsync();
         harness.Advance(ServerLimits.CloseDeadline);
-        await stop;
+        await stop.Within("The server's stop");
 
         // Assert
         harness.Pool.Outstanding.ShouldBe(0);
@@ -164,7 +164,7 @@ public sealed class StopTests
 
         // Act
         connection.Link.EndFromPeer();
-        await stop;
+        await stop.Within("The server's stop");
 
         // Assert
         disposedWhileStopping.ShouldBeFalse();
@@ -198,7 +198,7 @@ public sealed class StopTests
         harness.Advance(s_justShort + ServerLimits.SweepInterval);
         bool completedWhileTheWriteIsHeld = stop.IsCompleted;
         connection.CompleteHeldWrites(new IOException("The socket is gone."));
-        await stop;
+        await stop.Within("The server's stop");
 
         // Assert
         abortedAtOnce.ShouldBeTrue();
@@ -239,7 +239,7 @@ public sealed class StopTests
         await second.Link.WhenWrittenAsync(1);
         first.Link.EndFromPeer();
         second.Link.EndFromPeer();
-        await stop;
+        await stop.Within("The server's stop");
 
         // Assert
         given.IsCancellationRequested.ShouldBeTrue();
@@ -275,12 +275,14 @@ public sealed class StopTests
 
         // Registered after the connect phase began to wait on the token, so it runs before the connect phase's own
         // callback when the token is cancelled (a token runs its callbacks in the reverse order of their registration).
+        // The test relies on that order: in another, the connect phase would see the stop first and write CONNACK 0x8B,
+        // and the test would fail, not pass.
         using CancellationTokenRegistration abortTheRequest = given.Register(() => connection.RequestAborted.Cancel());
 
         // Act
         Task stop = harness.Server.StopAsync();
-        await connection.Run;
-        await stop;
+        await connection.RunEnded();
+        await stop.Within("The server's stop");
 
         // Assert
         given.IsCancellationRequested.ShouldBeTrue();
@@ -312,8 +314,8 @@ public sealed class StopTests
 
         // Act
         Task stop = harness.Server.StopAsync();
-        await connection.Run;
-        await stop;
+        await connection.RunEnded();
+        await stop.Within("The server's stop");
 
         // Assert
         connection.TakeWritten().ShouldBe(s_connAckShuttingDown);
@@ -339,7 +341,7 @@ public sealed class StopTests
         // Act
         Task stop = harness.Server.StopAsync();
         bool abortedAtOnce = connection.Link.IsAborted;
-        await stop;
+        await stop.Within("The server's stop");
 
         // Assert
         abortedAtOnce.ShouldBeTrue();
@@ -369,7 +371,7 @@ public sealed class StopTests
         TestConnection late = harness.Accept();
         bool abortedAtOnce = late.Link.IsAborted;
         first.Link.EndFromPeer();
-        await stop;
+        await stop.Within("The server's stop");
 
         // Assert
         abortedAtOnce.ShouldBeTrue();
@@ -400,7 +402,7 @@ public sealed class StopTests
         Task stop = harness.Server.StopAsync();
         bool abortedAtOnce = connection.Link.IsAborted;
         connection.Link.Deliver(ServerPackets.Connect.AsSpan(half));
-        await stop;
+        await stop.Within("The server's stop");
 
         // Assert
         abortedAtOnce.ShouldBeTrue();
@@ -422,7 +424,7 @@ public sealed class StopTests
     {
         // Arrange
         ServerHarness harness = ServerHarness.Create();
-        await harness.Server.StopAsync();
+        await harness.Server.StopAsync().Within("The server's stop");
         CountingTimeProvider.CountedTimer timer = harness.Timers.PeriodicTimers().ShouldHaveSingleItem();
 
         // Act
@@ -455,7 +457,7 @@ public sealed class StopTests
         // Act
         Task second = harness.Server.StopAsync();
         connection.Link.EndFromPeer();
-        await second;
+        await second.Within("The server's stop");
 
         // Assert
         second.ShouldBeSameAs(first);

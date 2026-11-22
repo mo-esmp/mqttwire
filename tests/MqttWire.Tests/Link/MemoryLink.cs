@@ -345,7 +345,8 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     /// The value <see cref="WriteCount"/> must reach.
     /// </param>
     /// <returns>
-    /// A task that completes, never inline, once that many writes were taken.
+    /// A task that completes, never inline, once that many writes were taken; it fails with
+    /// <see cref="TimeoutException"/> when they are not taken within <see cref="BoundedWaits.Limit"/>.
     /// </returns>
     public Task WhenWrittenAsync(int count)
     {
@@ -358,7 +359,7 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
 
             _writesWanted = count;
             _writesWaiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            return _writesWaiter.Task;
+            return _writesWaiter.Task.Within($"Write {count} on the link");
         }
     }
 

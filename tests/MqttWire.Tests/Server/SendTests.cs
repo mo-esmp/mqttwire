@@ -495,7 +495,7 @@ public sealed class SendTests
         int closedWhileWriting = ClosedCalls(harness).Count;
         MqttSendResult afterwards = server.TrySend(s_topic, payload, MqttQoS.AtMostOnce);
         connection.CompleteHeldWrites(new IOException("The socket was aborted."));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         fifth.ShouldBe(MqttSendResult.Evicted);
@@ -535,7 +535,7 @@ public sealed class SendTests
         harness.AssertBounds();
         bool aborted = connection.Link.IsAborted;
         connection.CompleteHeldWrites(new IOException("The socket was aborted."));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         held.ShouldBe(MqttSendResult.Taken);
@@ -606,7 +606,7 @@ public sealed class SendTests
         MqttSendResult result = server.TrySend(s_topic, new byte[1_048_577], MqttQoS.AtMostOnce);
         byte[] written = connection.TakeWritten();
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         result.ShouldBe(MqttSendResult.TooLarge);
@@ -640,7 +640,7 @@ public sealed class SendTests
         MqttSendResult over = server.TrySend(s_topic, new byte[5_000], MqttQoS.AtMostOnce);
         byte[] written = connection.TakeWritten();
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         atTheLimit.ShouldBe(MqttSendResult.Taken);
@@ -671,7 +671,7 @@ public sealed class SendTests
         // Act
         MqttSendResult whileClosing = server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtMostOnce);
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
         MqttSendResult whenClosed = server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtMostOnce);
 
         // Assert
@@ -770,7 +770,7 @@ public sealed class SendTests
         connection.Deliver(ServerPackets.BuildUnsubscribe(packetIdentifier: 1_025, ["a/b"]));
         bool aborted = connection.Link.IsAborted;
         connection.CompleteHeldWrites(new IOException("The socket was aborted."));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         waiting.ShouldBe(1_024);
@@ -890,7 +890,7 @@ public sealed class SendTests
         connection.Deliver(SubscribeOf(packetIdentifier: 17, filters: 4_000));
         bool aborted = connection.Link.IsAborted;
         connection.CompleteHeldWrites(new IOException("The socket was aborted."));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         before.WaitingControlPackets.ShouldBe(16);
@@ -928,7 +928,7 @@ public sealed class SendTests
         connection.Deliver(SubscribeOf(packetIdentifier: 2, filters: 3_000));
         bool aborted = connection.Link.IsAborted;
         connection.CompleteHeldWrites(new IOException("The socket was aborted."));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         before.WaitingControlPackets.ShouldBe(1);

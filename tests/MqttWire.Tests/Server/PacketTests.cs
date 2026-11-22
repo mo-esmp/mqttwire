@@ -163,7 +163,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(subscribe);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.SubscriptionIdentifiersNotSupported));
@@ -240,7 +240,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(subscribe);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(Hex.Parse("E0 01 83"));
@@ -330,7 +330,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(subscribe);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(Hex.Parse("E0 01 95"));
@@ -356,7 +356,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(unsubscribe);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(Hex.Parse("E0 01 95"));
@@ -409,7 +409,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(subscribe);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         SubscribeCalls(harness).ShouldBe(["OnSubscribe c1 a q0"]);
@@ -437,7 +437,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(unsubscribe);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         harness.Handler.Calls.Where(static call => call.StartsWith("OnUnsubscribe", StringComparison.Ordinal))
@@ -481,7 +481,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(Hex.Parse("C0 01 00"));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.MalformedPacket));
@@ -507,7 +507,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(disconnect);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBeEmpty();
@@ -533,7 +533,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(disconnect);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.MalformedPacket));
@@ -556,7 +556,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(ServerPackets.Connect);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(Hex.Parse("E0 01 82"));
@@ -581,7 +581,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(ServerPackets.Auth);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ProtocolError));
@@ -604,7 +604,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(ClientPackets.ConnAckAccepted);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ProtocolError));
@@ -634,7 +634,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(Hex.Parse(packet));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ProtocolError));
@@ -658,7 +658,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(ClientPackets.PublishTopicNotUtf8);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(Hex.Parse("E0 01 81"));
@@ -682,7 +682,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(ClientPackets.PublishWithTopicAlias);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ClientPackets.DisconnectTopicAliasInvalid);
@@ -708,7 +708,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(publish);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.ProtocolError));
@@ -734,7 +734,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(publish);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.TopicNameInvalid));
@@ -758,7 +758,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(ClientPackets.PublishQoS2);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.QoSNotSupported));
@@ -788,7 +788,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(ServerPackets.BuildPublishOfLength(MqttQoS.ExactlyOnce, 16_384));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.QoSNotSupported));
@@ -885,7 +885,7 @@ public sealed class PacketTests
         byte[] accepted = connection.TakeWritten();
         connection.Deliver(ServerPackets.BuildPublish(MqttQoS.AtLeastOnce, "a/b"u8, packetIdentifier: 2, twice,
             payload: "hi"u8));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         accepted.ShouldBe(ClientPackets.PubAck1);
@@ -934,7 +934,7 @@ public sealed class PacketTests
 
         // Act
         connection.Deliver(packet);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(Hex.Parse("E0 01 83"));

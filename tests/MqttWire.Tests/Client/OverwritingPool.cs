@@ -36,6 +36,12 @@ internal sealed class OverwritingPool : ArrayPool<byte>
     private int _faultyReturns;
 
     /// <summary>
+    /// Gets or sets a callback that sees each array as it comes back, before it is overwritten and while it is still
+    /// counted as rented, so a test can act at the very moment of a return; or <see langword="null"/>.
+    /// </summary>
+    public Action<byte[]>? Returning { get; set; }
+
+    /// <summary>
     /// Gets the number of arrays rented and not yet returned.
     /// </summary>
     public int Outstanding
@@ -133,6 +139,7 @@ internal sealed class OverwritingPool : ArrayPool<byte>
     public override void Return(byte[] array, bool clearArray = false)
     {
         ArgumentNullException.ThrowIfNull(array);
+        Returning?.Invoke(array);
         lock (_gate)
         {
             if (!_rented.Remove(array))

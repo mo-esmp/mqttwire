@@ -132,10 +132,10 @@ public sealed class ServerStressTests
         toggler.Start();
         foreach (Thread sender in senders)
         {
-            sender.Join();
+            sender.JoinWithin("A sending thread");
         }
 
-        toggler.Join();
+        toggler.JoinWithin("The toggling thread");
         await connection.WhenSendPathIdleAsync();
         ConnectionCounts counts = server.GetCounts();
         harness.AssertBounds();
@@ -237,7 +237,7 @@ public sealed class ServerStressTests
 
             foreach (Thread thread in threads)
             {
-                thread.Join();
+                thread.JoinWithin("A sending or closing thread");
             }
 
             if (held)
@@ -246,7 +246,7 @@ public sealed class ServerStressTests
             }
 
             link.EndFromPeer();
-            await connection.Run;
+            await connection.RunEnded();
 
             // Assert, collected so that one report names every round that failed.
             List<byte> types = PacketTypes(link.TakeWritten());

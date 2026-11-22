@@ -54,7 +54,7 @@ public sealed class SendHardeningTests
         // Act
         MqttSendResult result = server.TrySend(s_topic, payload.Memory, MqttQoS.AtMostOnce);
         bool aborted = connection.Link.IsAborted;
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         result.ShouldBe(MqttSendResult.NotOpen);
@@ -88,7 +88,7 @@ public sealed class SendHardeningTests
 
         // Act
         MqttSendResult result = server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtMostOnce);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         result.ShouldBe(MqttSendResult.NotOpen);
@@ -121,7 +121,7 @@ public sealed class SendHardeningTests
 
         // Act
         connection.Deliver(ClientPackets.PingReq);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         pool.HasThrown.ShouldBeTrue();
@@ -158,7 +158,7 @@ public sealed class SendHardeningTests
         connection.CompleteHeldWrites();
         bool aborted = connection.Link.IsAborted;
         ConnectionCounts afterTheFault = server.GetCounts();
-        await connection.Run;
+        await connection.RunEnded();
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
@@ -211,7 +211,7 @@ public sealed class SendHardeningTests
         {
             // Act
             connection.CompleteHeldWrites();
-            await connection.Run;
+            await connection.RunEnded();
             GC.Collect();
             GC.WaitForPendingFinalizers();
             GC.Collect();
@@ -250,7 +250,7 @@ public sealed class SendHardeningTests
             .ShouldBe(MqttSendResult.NotOpen);
 
         // Act
-        await connection.Run;
+        await connection.RunEnded();
         Task empty = harness.Server.Registry.WhenEmptyAsync();
 
         // Assert
@@ -279,7 +279,7 @@ public sealed class SendHardeningTests
         // Act
         MqttSendResult result = server.TrySend(s_topic, new ThrowingMemory(length: 10).Memory, MqttQoS.AtMostOnce);
         bool aborted = connection.Link.IsAborted;
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         result.ShouldBe(MqttSendResult.NotOpen);
@@ -322,7 +322,7 @@ public sealed class SendHardeningTests
         connection.CompleteHeldWrites();
         bool aborted = connection.Link.IsAborted;
         ConnectionCounts afterTheFault = server.GetCounts();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         before.WaitingDeliveries.ShouldBe(3);
@@ -359,7 +359,7 @@ public sealed class SendHardeningTests
 
         // Act
         MqttSendResult result = server.TrySend(s_topic, "hi"u8.ToArray(), MqttQoS.AtLeastOnce);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         result.ShouldBe(MqttSendResult.NotOpen);
@@ -402,7 +402,7 @@ public sealed class SendHardeningTests
         // Act
         connection.CompleteHeldWrites();
         bool aborted = connection.Link.IsAborted;
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         before.WaitingDeliveries.ShouldBe(1);
@@ -417,6 +417,50 @@ public sealed class SendHardeningTests
         ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a pool that throws when the buffer of a write that has ended goes back, inside the send path, does
+    /// not leave the path taken: m1's write is held, m2 waits behind it; when the write completes, the return of m1's
+    /// buffer throws; the connection ends with <see cref="MqttCloseReason.ConnectionLost"/> and event 20, nothing more
+    /// is written, the run completes, the slot is freed and the connection holds nothing. The refused buffer is left
+    /// to the garbage collector, never returned twice.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Drain_PoolThrowsOnTheReturnOfAWrittenBuffer_GivesThePathUpAndEndsTheConnection()
+    {
+        // Arrange
+        ThrowingPool pool = new();
+        ServerHarness harness = ServerHarness.Create(pool: pool);
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        connection.Link.HoldWrites();
+        server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(s_topic, "m2"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        harness.AssertBounds();
+        pool.ThrowOnReturn(which: 1);
+
+        // Act
+        // On a thread of its own, not through TestConnection.CompleteHeldWrites: the refused buffer stays out of the
+        // pool for good, past the bound AssertBounds holds once the connection has ended.
+        await Task.Run(() => connection.Link.CompleteHeldWrites()).Within("The completion of the held write");
+        bool aborted = connection.Link.IsAborted;
+        await connection.RunEnded();
+
+        // Assert
+        pool.HasThrownOnReturn.ShouldBeTrue();
+        aborted.ShouldBeTrue();
+        connection.TakeWritten().ShouldBe(ServerPackets.Delivery("m1"u8));
+        harness.Log.Entries.ShouldContain(entry =>
+            entry.Id.Id == SendPathFaultedEvent && entry.Exception == pool.ThrownOnReturn);
+        harness.Server.Registry.Slots.ShouldAllBe(static slot => slot == null);
+        server.GetCounts().ShouldBe(s_idle);
+        ClosedCalls(harness).ShouldBe(["OnClosed c1 ConnectionLost"]);
+        pool.Inner.Outstanding.ShouldBe(1);
+        pool.Inner.FaultyReturns.ShouldBe(0);
     }
 
     /// <summary>
@@ -440,7 +484,7 @@ public sealed class SendHardeningTests
         // Act
         server.Close(MqttReasonCode.AdministrativeAction);
         bool aborted = connection.Link.IsAborted;
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         pool.HasThrown.ShouldBeTrue();
@@ -475,7 +519,7 @@ public sealed class SendHardeningTests
 
         // Act
         connection.Deliver(ServerPackets.Connect);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         pool.HasThrown.ShouldBeTrue();

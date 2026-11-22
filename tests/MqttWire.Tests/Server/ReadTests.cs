@@ -125,7 +125,7 @@ public sealed class ReadTests
         harness.Advance(TimeSpan.FromSeconds(2));
         byte[] written = connection.TakeWritten();
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         writtenAt8.ShouldBeEmpty();
@@ -156,7 +156,7 @@ public sealed class ReadTests
         harness.Advance(TimeSpan.FromSeconds(2));
         byte[] writtenAt46 = connection.TakeWritten();
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         writtenAt44.ShouldBeEmpty();
@@ -188,7 +188,7 @@ public sealed class ReadTests
         answer.SetResult(MqttConnectResult.Accept());
 
         // The link has the CONNACK before the connect phase, on another thread, gives the send path up.
-        await connAckWritten;
+        await connAckWritten.Within("The CONNACK's write");
         await connection.WhenSendPathIdleAsync();
         byte[] connAck = connection.TakeWritten();
 
@@ -198,7 +198,7 @@ public sealed class ReadTests
         harness.Advance(TimeSpan.FromSeconds(2));
         byte[] writtenAt4 = connection.TakeWritten();
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connAck.ShouldBe(ServerPackets.ConnAck);
@@ -270,7 +270,7 @@ public sealed class ReadTests
 
         // Act
         connection.Deliver(Hex.Parse("82 81 80 01 00 01 00"));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.PacketTooLarge));
@@ -295,7 +295,7 @@ public sealed class ReadTests
 
         // Act
         connection.Deliver(Hex.Parse("FF FF FF FF FF"));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.MalformedPacket));
@@ -320,7 +320,7 @@ public sealed class ReadTests
 
         // Act
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBeEmpty();
@@ -344,7 +344,7 @@ public sealed class ReadTests
 
         // Act
         connection.Link.FailReads(new WebSocketException());
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBeEmpty();
@@ -375,7 +375,7 @@ public sealed class ReadTests
         bool openAfterDelivery = !connection.Run.IsCompleted;
         int outstandingAfterDelivery = harness.Pool.Outstanding;
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         written.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.AdministrativeAction));

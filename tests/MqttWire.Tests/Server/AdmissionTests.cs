@@ -62,7 +62,7 @@ public sealed class AdmissionTests
         TestConnection second = harness.Connect();
         byte[] writtenToFirst = first.TakeWritten();
         first.Link.EndFromPeer();
-        await first.Run;
+        await first.RunEnded();
 
         // Assert
         writtenToFirst.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.SessionTakenOver));
@@ -96,7 +96,7 @@ public sealed class AdmissionTests
 
         // Act
         second.Deliver(ServerPackets.Connect);
-        await second.Run;
+        await second.RunEnded();
 
         // Assert
         second.TakeWritten().ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.NotAuthorized));
@@ -156,10 +156,10 @@ public sealed class AdmissionTests
 
         // Act
         release.SetResult(MqttConnectResult.Accept());
-        await bothAdmitted.Task;
+        await bothAdmitted.Task.Within("Both admissions");
         first.Link.EndFromPeer();
         second.Link.EndFromPeer();
-        await Task.WhenAll(first.Run, second.Run);
+        await Task.WhenAll(first.Run, second.Run).Within("The connections' runs");
 
         // Assert
         admissions.Count.ShouldBe(2);
@@ -194,10 +194,10 @@ public sealed class AdmissionTests
 
         // Act
         second.Deliver(ServerPackets.Connect);
-        await second.Run;
+        await second.RunEnded();
         bool foundAfterTheFailure = harness.Server.TryGetConnection("c1", out _);
         first.Link.EndFromPeer();
-        await first.Run;
+        await first.RunEnded();
 
         // Assert
         foundAfterTheFailure.ShouldBeFalse();
@@ -230,7 +230,7 @@ public sealed class AdmissionTests
 
         // Act
         second.Deliver(ServerPackets.Connect);
-        await second.Run;
+        await second.RunEnded();
 
         // Assert
         second.TakeWritten().ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.ImplementationSpecificError));
@@ -275,9 +275,9 @@ public sealed class AdmissionTests
         // Act
         TestConnection second = harness.Connect();
         first.Link.EndFromPeer();
-        await first.Run;
+        await first.RunEnded();
         second.Link.EndFromPeer();
-        await second.Run;
+        await second.RunEnded();
 
         // Assert
         replaces.ShouldBeSameAs(closing);
@@ -326,7 +326,7 @@ public sealed class AdmissionTests
 
         // Act
         second.Deliver(ServerPackets.Connect);
-        await second.Run;
+        await second.RunEnded();
 
         // Assert
         second.TakeWritten().ShouldBeEmpty();
@@ -367,7 +367,7 @@ public sealed class AdmissionTests
 
         // Act
         connection.Deliver(ServerPackets.Connect);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBeEmpty();
@@ -400,7 +400,7 @@ public sealed class AdmissionTests
 
         // Act
         connection.Deliver(ServerPackets.Connect);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBeEmpty();
@@ -456,7 +456,7 @@ public sealed class AdmissionTests
 
         // Act
         first.Link.EndFromPeer();
-        await first.Run;
+        await first.RunEnded();
 
         // Assert
         harness.Server.TryGetConnection("c1", out MqttWireConnection? found).ShouldBeTrue();
@@ -516,7 +516,7 @@ public sealed class AdmissionTests
         foreach (TestConnection connection in connections)
         {
             connection.Link.EndFromPeer();
-            await connection.Run;
+            await connection.RunEnded();
         }
 
         // Assert
@@ -555,7 +555,7 @@ public sealed class AdmissionTests
 
         // Act
         connection.Deliver(ClientPackets.Disconnect);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         sent.ShouldBe(MqttSendResult.NotOpen);
@@ -584,7 +584,7 @@ public sealed class AdmissionTests
 
         // Act
         connection.Deliver(ClientPackets.Disconnect);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         harness.Log.Entries.ShouldContain(entry =>
@@ -613,7 +613,7 @@ public sealed class AdmissionTests
 
         // Act
         connection.Deliver(ClientPackets.Disconnect);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         harness.Handler.Calls.ShouldBe(["OnConnectAsync c1", "OnAdmit c1 replaces=-", "OnClosed c1 ClientDisconnected"]);

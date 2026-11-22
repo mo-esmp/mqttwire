@@ -251,7 +251,7 @@ public sealed class ServerConnectTests
         // Assert
         connection.TakeWritten().ShouldBe(connAck);
         connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
-        await connection.Run;
+        await connection.RunEnded();
         harness.Handler.Calls.ShouldBeEmpty();
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Pool.LargestRent.ShouldBeLessThanOrEqualTo(ServerLimits.MaxControlPacketBytes);
@@ -279,7 +279,7 @@ public sealed class ServerConnectTests
         // Assert
         connection.TakeWritten().ShouldBe(Hex.Parse("20 08 00 86 05 1F 00 02 6E 6F"));
         connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
-        await connection.Run;
+        await connection.RunEnded();
         harness.Handler.Calls.ShouldBe(["OnConnectAsync c1"]);
         harness.Pool.Outstanding.ShouldBe(0);
     }
@@ -306,7 +306,7 @@ public sealed class ServerConnectTests
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.ImplementationSpecificError));
         connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
-        await connection.Run;
+        await connection.RunEnded();
         harness.Log.Entries.ShouldContain(entry =>
             entry.Id.Id == HandlerThrewEvent && entry.Level == LogLevel.Error && entry.Exception == thrown);
         harness.Handler.Calls.ShouldBe(["OnConnectAsync c1"]);
@@ -340,7 +340,7 @@ public sealed class ServerConnectTests
 
         // Act
         connection.Deliver(ServerPackets.Connect);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.ImplementationSpecificError));
@@ -380,7 +380,7 @@ public sealed class ServerConnectTests
 
         // Act
         harness.Advance(ServerLimits.SweepInterval);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         cancelledEarly.ShouldBeFalse();
@@ -409,7 +409,7 @@ public sealed class ServerConnectTests
         TestConnection connection = harness.Accept();
         connection.Deliver(ServerPackets.Connect);
         harness.Advance(ServerLimits.AuthenticationDeadline);
-        await connection.Run;
+        await connection.RunEnded();
         connection.TakeWritten();
 
         // Act
@@ -440,7 +440,7 @@ public sealed class ServerConnectTests
         TestConnection connection = harness.Accept();
         connection.Deliver(ServerPackets.Connect);
         harness.Advance(ServerLimits.AuthenticationDeadline);
-        await connection.Run;
+        await connection.RunEnded();
         connection.TakeWritten().ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.ServerUnavailable));
         InvalidOperationException thrown = new("The host's late failure.");
 
@@ -477,7 +477,8 @@ public sealed class ServerConnectTests
         // Arrange
         // A token runs its callbacks in the reverse order of their registration. The host registers inside
         // OnConnectAsync, before the connect phase waits on the token, so its answer comes after the connect phase saw
-        // the cancellation; the test registers once the connect phase waits, so its answer comes before.
+        // the cancellation; the test registers once the connect phase waits, so its answer comes before. The test relies
+        // on that order: in another, each case would get the other CONNACK, and the test would fail, not pass.
         ServerHarness harness = ServerHarness.Create();
         TaskCompletionSource<MqttConnectResult> answer = new();
         CancellationToken given = default;
@@ -502,7 +503,7 @@ public sealed class ServerConnectTests
         harness.Advance(ServerLimits.AuthenticationDeadline);
         await connection.Link.WhenWrittenAsync(1);
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(
@@ -540,8 +541,8 @@ public sealed class ServerConnectTests
 
         // Act
         harness.Advance(ServerLimits.AuthenticationDeadline);
-        await connection.Run;
-        await logged;
+        await connection.RunEnded();
+        await logged.Within("The log entry");
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.ServerUnavailable));
@@ -578,7 +579,7 @@ public sealed class ServerConnectTests
 
         // Act
         await connection.RequestAborted.CancelAsync();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         given.IsCancellationRequested.ShouldBeTrue();

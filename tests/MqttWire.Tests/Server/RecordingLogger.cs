@@ -44,7 +44,8 @@ internal sealed class RecordingLogger : ILogger<MqttWireServer>
     /// </param>
     /// <returns>
     /// A task that completes, never inline, once such an entry is in <see cref="Entries"/>; at once when one is
-    /// there already.
+    /// there already. It fails with <see cref="TimeoutException"/> when none is logged within
+    /// <see cref="BoundedWaits.Limit"/>.
     /// </returns>
     public Task WhenLoggedAsync(int eventId)
     {
@@ -57,7 +58,7 @@ internal sealed class RecordingLogger : ILogger<MqttWireServer>
 
             _awaitedEventId = eventId;
             _awaited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            return _awaited.Task;
+            return _awaited.Task.Within($"The log entry with event {eventId}");
         }
     }
 

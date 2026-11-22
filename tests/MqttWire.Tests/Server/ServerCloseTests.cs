@@ -43,7 +43,7 @@ public sealed class ServerCloseTests
         bool endedBeforeThePeer = connection.Run.IsCompleted;
         int closedBeforeThePeer = ClosedCalls(harness).Count;
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         written.ShouldBe(Hex.Parse("E0 01 98"));
@@ -126,7 +126,7 @@ public sealed class ServerCloseTests
 
         // The write in progress completes at the same moment as the abort: it ends, and nothing follows it.
         connection.CompleteHeldWrites();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         abortedAtOnce.ShouldBeTrue();
@@ -161,7 +161,7 @@ public sealed class ServerCloseTests
 
         // Act
         MqttSendResult result = server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         result.ShouldBe(MqttSendResult.Taken);
@@ -195,7 +195,7 @@ public sealed class ServerCloseTests
         connection.CompleteHeldWrites();
         WebSocketCloseStatus? closedAfterwards = connection.Link.ClosedWith;
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         closedWhileHeld.ShouldBeNull();
@@ -234,10 +234,10 @@ public sealed class ServerCloseTests
             together.SignalAndWait();
             server.Close(MqttReasonCode.ServerShuttingDown);
         });
-        await Task.WhenAll(first, second);
+        await Task.WhenAll(first, second).Within("The two closes");
         byte[] written = connection.TakeWritten();
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         written.Length.ShouldBe(3);
@@ -269,7 +269,7 @@ public sealed class ServerCloseTests
         bool abortedAtOnce = connection.Link.IsAborted;
         bool endedAtOnce = connection.Run.IsCompleted;
         harness.Advance(TimeSpan.FromSeconds(2));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         abortedAtOnce.ShouldBeFalse();
@@ -309,7 +309,7 @@ public sealed class ServerCloseTests
         bool emptyAfterTheAbort = harness.Server.Registry.WhenEmptyAsync().IsCompleted;
         connection.CompleteHeldWrites(new IOException("The socket was aborted."));
         int outstandingAfterTheWrite = harness.Pool.Outstanding;
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         outstandingWhileWriting.ShouldBe(1);
@@ -349,7 +349,7 @@ public sealed class ServerCloseTests
         int closedWhileWriting = ClosedCalls(harness).Count;
         bool slotHeldWhileWriting = harness.Server.Registry.Slots.Contains(server);
         connection.CompleteHeldWrites(new IOException("The socket is gone."));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         stateWhileWriting.ShouldBe(ConnectionState.Closing);
@@ -394,7 +394,7 @@ public sealed class ServerCloseTests
 
         // Act
         second.Deliver(ServerPackets.Connect);
-        await second.Run;
+        await second.RunEnded();
 
         // Assert
         second.Link.IsAborted.ShouldBeTrue();
@@ -427,7 +427,7 @@ public sealed class ServerCloseTests
         bool aborted = connection.Link.IsAborted;
         int outstandingAfterTheAbort = harness.Pool.Outstanding;
         connection.CompleteHeldWrites();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         aborted.ShouldBeTrue();
@@ -467,7 +467,7 @@ public sealed class ServerCloseTests
         ConnectionCounts heldAt16 = server.GetCounts();
         harness.AssertBounds();
         connection.CompleteHeldWrites(new IOException("The socket was aborted."));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         abortedAt14.ShouldBeFalse();
@@ -537,7 +537,7 @@ public sealed class ServerCloseTests
 
         // Act
         MqttSendResult result = server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         result.ShouldBe(MqttSendResult.Taken);
@@ -568,7 +568,7 @@ public sealed class ServerCloseTests
 
         // Act
         MqttSendResult result = server.TrySend(s_topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         result.ShouldBe(MqttSendResult.Taken);
@@ -600,7 +600,7 @@ public sealed class ServerCloseTests
 
         // Act
         connection.CompleteHeldWrites(new WebSocketException("The socket is gone."));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBeEmpty();

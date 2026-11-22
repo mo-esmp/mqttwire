@@ -182,7 +182,7 @@ public sealed class IncomingQoSTests
         harness.Advance(TimeSpan.FromSeconds(2));
         byte[] writtenAt30 = connection.TakeWritten();
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         writtenAt28.ShouldBe(ClientPackets.PingResp);
@@ -243,7 +243,7 @@ public sealed class IncomingQoSTests
 
         // Act
         connection.Deliver(PublishQoS2(257));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         repeated.ShouldBe(PubRec(1));
@@ -284,7 +284,7 @@ public sealed class IncomingQoSTests
         connection.Deliver(PublishQoS1(257));
         bool aborted = connection.Link.IsAborted;
         connection.CompleteHeldWrites();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         full.IncomingInFlight.ShouldBe(256);
@@ -376,7 +376,7 @@ public sealed class IncomingQoSTests
 
         // Act
         connection.Deliver(Hex.Parse(packet));
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(code));
@@ -461,7 +461,7 @@ public sealed class IncomingQoSTests
 
         // Act
         connection.Deliver(ClientPackets.PublishQoS2);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(Hex.Parse("E0 01 83"));
@@ -494,7 +494,7 @@ public sealed class IncomingQoSTests
 
         // Act
         connection.Deliver(ClientPackets.PublishQoS2);
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.AdministrativeAction));
@@ -526,7 +526,7 @@ public sealed class IncomingQoSTests
 
         // Act
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         remembered.IncomingRecords.ShouldBe(2);
@@ -582,7 +582,7 @@ public sealed class IncomingQoSTests
         connection.Deliver(ServerPackets.BuildPublishOfLength(qos, remainingLength, packetIdentifier: 257));
         bool aborted = connection.Link.IsAborted;
         connection.CompleteHeldWrites();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         full.IncomingInFlight.ShouldBe(256);
@@ -620,7 +620,7 @@ public sealed class IncomingQoSTests
         harness.Advance(TimeSpan.FromSeconds(2));
         byte[] writtenAt30 = connection.TakeWritten();
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         repeated.ShouldBe(ClientPackets.PubRec1);
@@ -656,7 +656,7 @@ public sealed class IncomingQoSTests
         harness.Advance(TimeSpan.FromSeconds(2));
         byte[] writtenAt32 = connection.TakeWritten();
         connection.Link.EndFromPeer();
-        await connection.Run;
+        await connection.RunEnded();
 
         // Assert
         writtenAt30.ShouldBeEmpty();
