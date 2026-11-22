@@ -4,6 +4,7 @@
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/MqttWire/MqttWire.csproj" />
+    <Project Path="src/MqttWire.Server/MqttWire.Server.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/MqttWire.Interop.Tests/MqttWire.Interop.Tests.csproj" />
