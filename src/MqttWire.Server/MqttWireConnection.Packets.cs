@@ -146,10 +146,11 @@ public sealed partial class MqttWireConnection
     /// Handles a SUBSCRIBE: a subscription identifier ends the connection with 0xA1, and a SUBACK that could not
     /// fit the client's Maximum Packet Size even without a reason string ends it with 0x95, both before the host is
     /// called. Otherwise each filter in order is either invalid (0x8F, without the host) or handed to the host's
-    /// <see cref="IMqttWireHandler.OnSubscribe"/> with the QoS the client asked for; a granted QoS above
-    /// <see cref="MqttWireServerOptions.MaxQoS"/> is lowered to it. One SUBACK answers, with one code per filter and
-    /// the reason string of the host's first refusal. The codes are collected on the stack up to
-    /// <see cref="MaxStackReasonCodes"/>, and in a rented buffer above that, which goes back on every way out.
+    /// <see cref="IMqttWireHandler.OnSubscribe"/> with the QoS the client asked for; a granted QoS above what the
+    /// client asked for that filter, or above <see cref="MqttWireServerOptions.MaxQoS"/>, is lowered to the lower of
+    /// the two. One SUBACK answers, with one code per filter and the reason string of the host's first refusal. The
+    /// codes are collected on the stack up to <see cref="MaxStackReasonCodes"/>, and in a rented buffer above that,
+    /// which goes back on every way out.
     /// </summary>
     /// <param name="packet">
     /// The whole packet, a view of the read buffer, valid only during the call.
@@ -210,9 +211,10 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Decides each subscription of a SUBSCRIBE, in order, and writes its SUBACK code: 0x8F for an invalid filter,
-    /// without the host; otherwise the host's answer, with a granted QoS above
-    /// <see cref="MqttWireServerOptions.MaxQoS"/> lowered to it. The filter is handed over as a string, which the
-    /// interface asks for.
+    /// without the host; otherwise the host's answer, with a grant lowered to the lowest of what the host granted,
+    /// what the client asked for that filter and <see cref="MqttWireServerOptions.MaxQoS"/>: a SUBACK never grants
+    /// more than the SUBSCRIBE asked for (MQTT 5, 3.9.3), whatever the host answers. The filter is handed over as a
+    /// string, which the interface asks for.
     /// </summary>
     /// <param name="subscribe">
     /// The decoded SUBSCRIBE, a view of the read buffer.
@@ -262,11 +264,16 @@ public sealed partial class MqttWireConnection
             }
 
             MqttReasonCode granted = result.ReasonCode;
-            if (result.IsAccepted && (byte)granted > (byte)maxQoS)
+            if (result.IsAccepted)
             {
-                granted = (MqttReasonCode)(byte)maxQoS;
+                // The lowest of the three: the codes 0x00 to 0x02 of a grant are the QoS itself.
+                MqttQoS ceiling = subscription.MaximumQoS < maxQoS ? subscription.MaximumQoS : maxQoS;
+                if ((byte)granted > (byte)ceiling)
+                {
+                    granted = (MqttReasonCode)(byte)ceiling;
+                }
             }
-            else if (!result.IsAccepted && !refused)
+            else if (!refused)
             {
                 refused = true;
                 reasonString = result.ReasonString;

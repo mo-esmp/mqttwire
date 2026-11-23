@@ -74,8 +74,11 @@ public interface IMqttWireHandler
     /// The QoS the client asked for.
     /// </param>
     /// <returns>
-    /// Grant at a QoS (the server lowers it to <see cref="MqttWireServerOptions.MaxQoS"/> if needed), or refuse with
-    /// a reason code and a reason string. The server does not remember the grant.
+    /// Grant at a QoS, or refuse with a reason code and a reason string. The SUBACK never carries more than the
+    /// client asked for: the server lowers a grant to <paramref name="requested"/> and to
+    /// <see cref="MqttWireServerOptions.MaxQoS"/>, whichever is lower. The server does not remember the grant, so a
+    /// host that granted above <paramref name="requested"/> remembers the lower one, which is what the client was
+    /// told.
     /// </returns>
     MqttSubscribeResult OnSubscribe(MqttWireConnection connection, string topicFilter, MqttQoS requested);
 

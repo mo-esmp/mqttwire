@@ -205,7 +205,7 @@ public sealed class MqttWireServer
 | `MqttConnectRequest` | The CONNECT as the host needs it: client id, user name, password (bytes), the user properties the client sent, the remote end point, whether the connection is secure, and the `HttpContext` of the WebSocket request (headers, cookies, the authenticated user). It owns copies of what it holds, so it may be used across awaits inside `OnConnectAsync`. |
 | `MqttConnectResult` | Accept, with the host's state object for the connection and optional user properties for CONNACK; or refuse, with a reason code and a reason string. `Accept` throws `ArgumentException` for user properties that cannot be encoded or that are over 1 KiB encoded; a host that changes the array afterwards so that it cannot be encoded is treated as a handler that threw (CONNACK `0x83`, and `OnClosed` says "handler threw"). Every `Refuse` throws `ArgumentOutOfRangeException` for a reason code below `0x80`, and `ArgumentException` for a reason string that no packet can carry (U+0000, an unpaired surrogate); `Close` throws the same `ArgumentException`. |
 | `MqttAdmitResult` | Accept or refuse (reason code and string). When `replaces` is not null and the host accepts, the new connection takes over and the old one is closed with "session taken over" (6.6). |
-| `MqttSubscribeResult` | Grant at a QoS (MqttWire lowers it to `MaxQoS` if needed), or refuse with a reason code and string. MqttWire keeps no record of subscriptions: what a subscription means, and remembering it, is the host's. |
+| `MqttSubscribeResult` | Grant at a QoS, or refuse with a reason code and string. The SUBACK carries the lowest of the host's grant, the QoS the client asked for that filter and `MaxQoS`: a client is never granted more than it asked for (MQTT 5, 3.9.3), whatever the host answers. MqttWire keeps no record of subscriptions: what a subscription means, and remembering it, is the host's. |
 | `MqttPublish` | Topic, payload, QoS, the retain flag. A view; valid during the call only. |
 | `MqttPublishResult` | Accept, or refuse with a reason code and string. MqttWire sends the answer in the form the QoS calls for. |
 | `TrySend` | Hands a message for this connection to MqttWire and **returns at once**; it never waits for the network (6.6). Safe to call from any thread. The payload and the topic are not copied: the caller must not change them afterwards, and one payload may be handed to any number of connections. The result says: taken, connection not open, too large, or the connection was just evicted. "Taken" means accepted, not delivered. A QoS above `MaxQoS` is lowered to it; `default(MqttTopic)` and a QoS that is not 0, 1 or 2 throw `ArgumentException`; an empty payload is a valid message. |
@@ -656,7 +656,7 @@ loop:
 |---|---|
 | PUBLISH, QoS 0, 1 or 2 | `OnPublish`. QoS 1 gets a PUBACK at once, QoS 2 a PUBREC (see "QoS 1 and 2"): success, or the host's refusal. QoS 0 gets nothing. A QoS above `MaxQoS`: DISCONNECT `0x9B` (QoS not supported), close; CONNACK has announced "maximum QoS 1" in that case. |
 | PUBACK, PUBREC, PUBREL, PUBCOMP | See "QoS 1 and 2 inside a connection". |
-| SUBSCRIBE | `OnSubscribe` once per filter; SUBACK carries one reason code per filter, and the reason string of the host's first refusal. A filter that is not a valid MQTT filter gets `0x8F` (topic filter invalid) without the host being called. Subscription options are passed on to nobody and have no effect. |
+| SUBSCRIBE | `OnSubscribe` once per filter, with the QoS the client asked for; SUBACK carries one reason code per filter, and the reason string of the host's first refusal. A grant is the lowest of what the host granted, what the client asked for that filter and `MaxQoS`. A filter that is not a valid MQTT filter gets `0x8F` (topic filter invalid) without the host being called. Subscription options are passed on to nobody and have no effect. |
 | UNSUBSCRIBE | `OnUnsubscribe` once per filter; UNSUBACK with success. |
 | PINGREQ | PINGRESP. |
 | DISCONNECT | Close, with no DISCONNECT back. |
@@ -1432,6 +1432,13 @@ owner:
     not escape it could otherwise be forged. Raised in the review of mo-esmp/mqttwire#9.
 40. When the thread pool cannot take the work that cancels a host's token (out of memory), the
     token is cancelled on the calling thread (6.6). Raised in the same review.
+
+Decided in the second round of the review of mo-esmp/mqttwire#9 (2026-11-23), each raised by
+the owner there:
+
+41. A SUBACK grants a filter the lowest of the host's grant, the QoS the client asked for it and
+    `MaxQoS`; it used to be capped at `MaxQoS` only, so a host that granted more than was asked
+    made the server send a grant MQTT forbids (6.2, 6.6).
 
 ## 11. Left to the builder
 

@@ -81,6 +81,75 @@ public sealed class PacketTests
     }
 
     /// <summary>
+    /// Proves that the SUBACK never grants a filter more than the client asked for it (MQTT 5, 3.9.3): the grant is
+    /// the lowest of the host's answer, the QoS the filter asked for and <see cref="MqttWireServerOptions.MaxQoS"/>.
+    /// </summary>
+    /// <param name="requested">
+    /// The QoS the client asks for the filter.
+    /// </param>
+    /// <param name="granted">
+    /// The QoS the host grants.
+    /// </param>
+    /// <param name="maxQoS">
+    /// The server's <see cref="MqttWireServerOptions.MaxQoS"/>.
+    /// </param>
+    /// <param name="expected">
+    /// The QoS the SUBACK carries.
+    /// </param>
+    [Theory]
+    [InlineData(0, 2, 2, 0)]
+    [InlineData(1, 2, 2, 1)]
+    [InlineData(2, 2, 1, 1)]
+    [InlineData(0, 1, 1, 0)]
+    [InlineData(2, 1, 2, 1)]
+    [InlineData(2, 2, 2, 2)]
+    public void Subscribe_GrantedAboveTheQoSAskedFor_IsLoweredToWhatWasAsked(int requested, int granted, int maxQoS,
+        int expected)
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create(options => options.MaxQoS = (MqttQoS)maxQoS);
+        harness.Handler.Subscribe = (_, _, _) => MqttSubscribeResult.Granted((MqttQoS)granted);
+        TestConnection connection = harness.Connect(connect: ServerPackets.Connect);
+        byte[] subscribe = ServerPackets.BuildSubscribe(packetIdentifier: 1, properties: [],
+            [("a/b", (byte)requested)]);
+
+        // Act
+        connection.Deliver(subscribe);
+
+        // Assert
+        connection.TakeWritten().ShouldBe([0x90, 0x04, 0x00, 0x01, 0x00, (byte)expected]);
+        SubscribeCalls(harness).ShouldBe([$"OnSubscribe c1 a/b q{requested}"]);
+    }
+
+    /// <summary>
+    /// Proves that each filter of one SUBSCRIBE is capped at its own request: a host that grants QoS 2 to every
+    /// filter is answered for at QoS 0, 1 and 2 when the filters asked for 0, 1 and 2, and a refusal among them
+    /// stays a refusal.
+    /// </summary>
+    [Fact]
+    public void Subscribe_SeveralFiltersGrantedAboveTheirRequests_CapsEachAtItsOwnRequest()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        harness.Handler.Subscribe = static (_, filter, _) =>
+            filter == "d" ? MqttSubscribeResult.NotAuthorized : MqttSubscribeResult.Granted(MqttQoS.ExactlyOnce);
+        TestConnection connection = harness.Connect();
+        byte[] subscribe = ServerPackets.BuildSubscribe(packetIdentifier: 1, properties: [],
+            [("a", (byte)0), ("b", (byte)1), ("c", (byte)2), ("d", (byte)0), ("e", (byte)1)]);
+
+        // Act
+        connection.Deliver(subscribe);
+
+        // Assert
+        connection.TakeWritten().ShouldBe(Hex.Parse("90 08 00 01 00 00 01 02 87 01"));
+        SubscribeCalls(harness).ShouldBe(
+        [
+            "OnSubscribe c1 a q0", "OnSubscribe c1 b q1", "OnSubscribe c1 c q2", "OnSubscribe c1 d q0",
+            "OnSubscribe c1 e q1",
+        ]);
+    }
+
+    /// <summary>
     /// Proves that the SUBACK carries the reason string of the first refusal, and not that of a later one.
     /// </summary>
     [Fact]

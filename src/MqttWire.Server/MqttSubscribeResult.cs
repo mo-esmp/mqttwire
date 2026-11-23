@@ -4,9 +4,9 @@ using MqttWire.Server.Internal;
 namespace MqttWire.Server;
 
 /// <summary>
-/// The answer to <see cref="IMqttWireHandler.OnSubscribe"/>: grant at a QoS (the server lowers it to the highest
-/// QoS it supports if needed), or refuse with a reason code and a reason string. Only <see cref="Granted"/>
-/// grants: the default value is a refusal with 0x87 (not authorized) and no reason string, so a handler that
+/// The answer to <see cref="IMqttWireHandler.OnSubscribe"/>: grant at a QoS (the server lowers it to the QoS the
+/// client asked for and to the highest QoS it supports, whichever is lower), or refuse with a reason code and a
+/// reason string. Only <see cref="Granted"/> grants: the default value is a refusal with 0x87 (not authorized) and no reason string, so a handler that
 /// returns <c>default</c> grants nothing.
 /// </summary>
 [StructLayout(LayoutKind.Auto)]
@@ -65,7 +65,8 @@ public readonly struct MqttSubscribeResult
     /// Grants the subscription at a QoS.
     /// </summary>
     /// <param name="qos">
-    /// The QoS granted; the server lowers it to <see cref="MqttWireServerOptions.MaxQoS"/> if needed.
+    /// The QoS granted. The SUBACK carries the lowest of it, the QoS the client asked for the filter and
+    /// <see cref="MqttWireServerOptions.MaxQoS"/>: a grant above what was asked is lowered, never sent.
     /// </param>
     /// <returns>
     /// A grant.
