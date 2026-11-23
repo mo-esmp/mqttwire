@@ -488,7 +488,7 @@ One `MqttWireConnection` per connection holds the MQTT state and the host's stat
 | **Authenticating** | CONNECT is valid so far | `OnConnectAsync` answers (to admission); its deadline; the socket closing; the server stopping | the request and a short-lived cancellation source; the read buffer only when packets came behind the CONNECT in it, which are handled, in order, after the CONNACK. With nothing behind the CONNECT, the buffer is returned before `OnConnectAsync` is called. |
 | **Active** | the admission step accepted | any end of the connection (to Closing) | what the rest of 6.6 allows |
 | **Closing** | the decision to end is made, once | the bounded close below | no new work is accepted |
-| **Closed** | the read loop has ended and no write is in progress | | nothing |
+| **Closed** | the read loop has ended, no write is in progress and no abort of the link is in flight | | nothing |
 
 A connection moves forward only. The move to Closing happens exactly once, whoever asks first.
 
