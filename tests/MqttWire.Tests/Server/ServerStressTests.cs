@@ -438,6 +438,13 @@ public sealed class ServerStressTests
                 link.HoldWrites();
             }
         };
+        if (stall)
+        {
+            // Held before any thread starts: the first eviction then meets a held write whichever thread runs
+            // first, so what waited at that moment is still there for every look that follows.
+            link.HoldWrites();
+        }
+
         Thread toggler = new(() =>
         {
             Gate.Wait(ref ready, Senders + 1);

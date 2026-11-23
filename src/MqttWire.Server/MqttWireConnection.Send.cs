@@ -466,7 +466,8 @@ public sealed partial class MqttWireConnection
                 {
                     // Stamped only for a write that stays with the link: one that completed at once needs no
                     // deadline. The stamp is cleared by whatever ends the write, all of which starts after this
-                    // line, so it is never left set.
+                    // line. It is left set only when the write's continuation could not be registered: the
+                    // connection is then Closing, where the sweep no longer reads it.
                     Volatile.Write(ref _writeStartedAt, _server.Time.GetTimestamp());
                     CompleteWrite(write, buffer, inlineWrites);
                     return;

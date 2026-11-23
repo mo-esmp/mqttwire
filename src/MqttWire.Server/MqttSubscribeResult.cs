@@ -6,8 +6,8 @@ namespace MqttWire.Server;
 /// <summary>
 /// The answer to <see cref="IMqttWireHandler.OnSubscribe"/>: grant at a QoS (the server lowers it to the QoS the
 /// client asked for and to the highest QoS it supports, whichever is lower), or refuse with a reason code and a
-/// reason string. Only <see cref="Granted"/> grants: the default value is a refusal with 0x87 (not authorized) and no reason string, so a handler that
-/// returns <c>default</c> grants nothing.
+/// reason string. Only <see cref="Granted"/> grants: the default value is a refusal with 0x87 (not authorized) and no
+/// reason string, so a handler that returns <c>default</c> grants nothing.
 /// </summary>
 [StructLayout(LayoutKind.Auto)]
 public readonly struct MqttSubscribeResult

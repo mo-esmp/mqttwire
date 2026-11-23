@@ -871,9 +871,12 @@ public sealed class SendTests
     public void IsTooLargeToSend_ClientsMaximumPacketSizeAndMaxOutgoingBytes_AreBothHeld(int topicLength,
         int payloadLength, int maxOutgoingBytes, int clientMaxPacketSize, bool tooLarge)
     {
+        // Arrange
+        const MqttQoS QoS = MqttQoS.AtMostOnce;
+
         // Act
-        bool result = MqttWireConnection.IsTooLargeToSend(topicLength, payloadLength, MqttQoS.AtMostOnce,
-            maxOutgoingBytes, clientMaxPacketSize);
+        bool result = MqttWireConnection.IsTooLargeToSend(topicLength, payloadLength, QoS, maxOutgoingBytes,
+            clientMaxPacketSize);
 
         // Assert
         result.ShouldBe(tooLarge);

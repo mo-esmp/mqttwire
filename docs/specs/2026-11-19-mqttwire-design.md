@@ -710,17 +710,22 @@ instant.
   takes its outcome, goes back to the pool, and only then carries the send path on, so one
   object serves all the pending writes of a drain. A write that has completed by the time it is
   looked at takes nothing from the pool and is handled on the caller's stack, as one more of
-  that caller's 16 writes; so is one that completes at the very moment its continuation is
-  registered. Should the pool fail, that one write is awaited by an `async` method instead, so
+  that caller's 16 writes; so is one whose continuation is run inside its own registration,
+  by a write that completed at that very moment (the runtime's tasks and value-task sources
+  queue such a continuation to the thread pool instead, where it carries on like any pending
+  write). Should the pool fail, that one write is awaited by an `async` method instead, so
   its buffer is still returned once, after the write. The WebSocket close of a connection,
   which happens once, at its end, is still awaited by an `async` method.
-- **What runs when a pending write ends does not run in the context of the caller that started
-  it.** The continuation is registered without the caller's execution context, as the hand-over
-  to the thread pool is: the drain is not the host's call. So what the completion of a write
-  reaches (the drain of what waits, the close that follows a failed write, the log line of that
-  close or of a fault, memory of the host's that is read as a payload is encoded) sees no
-  `AsyncLocal` value of the `TrySend` caller, a logging scope included; it sees what the thread
-  that completed the write has. `OnClosed` is not reached this way: it is called by the
+- **MqttWire does not carry the caller's context to what runs when a pending write ends.** The
+  continuation is registered without the caller's execution context, as the hand-over to the
+  thread pool is: the drain is not the host's call. So what the completion of a write reaches
+  (the drain of what waits, the close that follows a failed write, the log line of that close
+  or of a fault, memory of the host's that is read as a payload is encoded) runs in whatever
+  context the code that completes the write has. A host must not count on that being the
+  context of its `TrySend` call, `AsyncLocal` values and logging scopes included, and must not
+  count on it being a different one either: a link whose pending write is itself an `async`
+  method, as ASP.NET Core's WebSocket send is, runs the continuation in the context in which
+  that write was started. `OnClosed` is not reached this way: it is called by the
   connection's own run, in the context of its request, as before.
 - **A write in progress:** the message is added to what waits for this connection. Whoever
   completes the write in progress sends what has been added, by the scheduling rule below. A
@@ -1552,8 +1557,9 @@ the owner there:
     own and empty payloads were held without bound but for `MaxOutgoingMessages` (6.2, 6.6).
 47. A write that does not complete at once is awaited by an object pooled per server, at most
     1,024 retained, not by an `async` method: a pending write, and each pending piece of a
-    large PUBLISH, used to allocate a state machine and a task. Its continuation runs without
-    the execution context of the caller that started the write (6.6).
+    large PUBLISH, used to allocate a state machine and a task. MqttWire registers its
+    continuation without the execution context of the caller that started the write; which
+    context it then runs in is the link's (6.6).
 48. The table of the worst case held for one connection states, for each pooled buffer, the
     size asked for and the capacity held apart: the shared pool hands out the next power of
     two, and a buffer that grows holds two arrays while it copies. The rows used to give the
