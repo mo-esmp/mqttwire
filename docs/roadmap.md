@@ -1,6 +1,6 @@
 # Roadmap
 
-Last updated: 2026-11-21
+Last updated: 2026-11-23
 
 Which release delivers what, for GrainWire and for MqttWire, the MQTT library it will run on.
 It records decisions that have been made; it has no dates, and the version numbers after the
@@ -10,7 +10,7 @@ first preview are proposals. The designs behind it:
 - [GrainWire on MqttWire](specs/2026-11-19-grainwire-on-mqttwire-design.md)
 
 Both designs were approved by the owner on 2026-11-19. Of the work below, GrainWire 0.1.0-preview.1
-exists, and steps 0, 1 and 2 of the order of work are done. Step 3 is next. On 2026-11-21 the
+exists, and steps 0 to 3 of the order of work are done. Step 4 is next. On 2026-11-21 the
 owner decided that MqttWire is finished first, and GrainWire moves to it afterwards.
 
 ## MqttWire
@@ -60,8 +60,8 @@ design.
 | 0 | GrainWire | Measure what an idle connection costs today and what the floor is; report to the owner. **Done** on 2026-11-20: the floor is 35% of today, and the owner set the GrainWire target to floor + 3 KB ([the report](https://github.com/mo-esmp/grainwire/blob/main/docs/step-0-idle-memory.md)). |
 | 1 | MqttWire | The repository, the codec and its tests. Planned in [docs/plans/2026-11-20-step-1-codec-plan.md](plans/2026-11-20-step-1-codec-plan.md), tracked in #1. **Done**: merged in #2. |
 | 2 | MqttWire | The client and the reconnecting client. Planned in [docs/plans/2026-11-20-step-2-client-plan.md](plans/2026-11-20-step-2-client-plan.md), tracked in #3; the local package `0.1.0-dev.2` was the hand-over to GrainWire's move, now step 5. **Done**: merged in #4. |
-| 3 | MqttWire | The server, its tests, the interops with MQTTnet and MQTT.js, the `GroupChat` sample and the benchmark. Tracked in #6. |
-| 4 | MqttWire | The preview package `0.1.0-preview.1` of both packages, with `docs/mqtt-support.md`. Tracked in #7. |
+| 3 | MqttWire | The server, its tests, the interops with MQTTnet and MQTT.js, the `GroupChat` sample and the benchmark. Planned in [docs/plans/2026-11-22-step-3-server-plan.md](plans/2026-11-22-step-3-server-plan.md), tracked in #6. **Done** in two pull requests: the server, its tests and the .NET interops in #9; MQTT.js, the sample and the benchmark in #10. The benchmark measured 519 to 624 bytes above the floor for an idle connection; on 2026-11-23 the owner decided that the target of floor + 1 KB is judged on MqttWire's own state, which meets it before and after activity ([the report](bench/2026-11-idle-memory.md)). |
+| 4 | MqttWire | The preview package `0.1.0-preview.1` of both packages, with `docs/mqtt-support.md`. Tracked in #7. **Next.** |
 | 5 | GrainWire | `GrainWire.Client` moves to MqttWire's client. Tracked in [mo-esmp/grainwire#8](https://github.com/mo-esmp/grainwire/issues/8). |
 | 6 | GrainWire | The gateway becomes MqttWire's host, `ScriptedGateway` is rebuilt on MqttWire's server, and MQTTnet's server packages leave GrainWire. |
 | 7 | GrainWire | Measure again and write up. |

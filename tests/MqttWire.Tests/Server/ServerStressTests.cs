@@ -424,8 +424,14 @@ public sealed class ServerStressTests
 
         // A write the toggler released carries the send path on, on the toggler's thread, for as long as the writes
         // after it complete at once; every 61st write is held as it begins, so that such a drain also stops halfway.
+        // That lasts only while the toggler is there to release what is held. The server may hand a drain to the
+        // thread pool, which on a busy machine runs it after every sender and the toggler have ended: a write held
+        // then would be held for ever. So the hold and the toggler's last release are told apart under one lock:
+        // no write is held once the toggler has decided to make its last release.
         int writes = 0;
         int writesAfterTheClose = 0;
+        Lock holding = new();
+        bool lastReleaseDecided = false;
         link.Writing = _ =>
         {
             if (link.ClosedWith is not null)
@@ -435,7 +441,13 @@ public sealed class ServerStressTests
 
             if (Interlocked.Increment(ref writes) % 61 == 0)
             {
-                link.HoldWrites();
+                lock (holding)
+                {
+                    if (!lastReleaseDecided)
+                    {
+                        link.HoldWrites();
+                    }
+                }
             }
         };
         if (stall)
@@ -462,6 +474,13 @@ public sealed class ServerStressTests
                 }
 
                 Thread.SpinWait(turn % 7 * 50);
+            }
+
+            // After this, the hook holds nothing more; a hold it made before is released by the call below, also
+            // when its write has not reached the link yet, because the release ends the holding.
+            lock (holding)
+            {
+                lastReleaseDecided = true;
             }
 
             link.CompleteHeldWrites(stall ? new IOException("The socket was aborted.") : null);

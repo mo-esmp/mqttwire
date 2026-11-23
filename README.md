@@ -13,6 +13,10 @@ application decides all of that, through one small handler interface, and sends 
 connections itself. An idle connection costs MqttWire almost nothing, and every connection is
 bounded in bytes and in time, including one that has stopped reading.
 
+Measured at 3,000 and 12,000 connections, an idle connection costs MqttWire about 600 bytes on
+top of what a bare ASP.NET Core WebSocket costs, which is about 10,800 bytes on the machine of
+[the report](docs/bench/2026-11-idle-memory.md).
+
 What it does not do:
 
 - **No routing between clients.** No subscription table, no wildcard matching, no fan-out. Your
@@ -129,6 +133,20 @@ come before the endpoint.
 
 An invalid option throws `OptionsValidationException` at start-up, and the host does not start.
 The deadlines and the other bounds are fixed.
+
+### Sample: a group chat
+
+[`samples/GroupChat`](samples/GroupChat) is a chat with a topic per group and every member
+subscribed: an ASP.NET Core server whose handler is all of the chat's logic, and a Blazor
+WebAssembly client on the reconnecting client. It shows how a host puts many connections on one
+topic: one copy of a payload goes to every member, each at no higher QoS than it was granted,
+and a member that stops reading is disconnected without delaying the others.
+
+```
+dotnet run --project samples/GroupChat/GroupChat.Server
+```
+
+Then open <http://localhost:5210> in two browser tabs.
 
 ## Client
 

@@ -1,0 +1,161 @@
+@* The chat's one page: a name to connect with, groups to join, a message box and the messages received. *@
+@page "/"
+@implements IAsyncDisposable
+@inject NavigationManager Navigation
+
+<PageTitle>GroupChat</PageTitle>
+<h1>GroupChat</h1>
+
+@if (_session is null)
+{
+    <form @onsubmit="Connect">
+        <input @bind="_name" @bind:event="oninput" placeholder="Your name" aria-label="Your name" maxlength="32" />
+        <button type="submit" disabled="@string.IsNullOrWhiteSpace(_name)">Connect</button>
+    </form>
+}
+else
+{
+    @* role="status" makes a screen reader announce the change from "reconnecting" to "connected". *@
+    <p class="status" role="status" data-status="@_session.Status">
+        @_session.Name: @_session.Status@(_session.StatusDetail is null ? string.Empty : $" ({_session.StatusDetail})")
+    </p>
+
+    <form @onsubmit="JoinAsync">
+        <input @bind="_group" @bind:event="oninput" placeholder="A group to join" aria-label="A group to join" maxlength="32" />
+        <button type="submit" disabled="@string.IsNullOrWhiteSpace(_group)">Join</button>
+    </form>
+
+    @if (_session.Groups.Count > 0)
+    {
+        <form @onsubmit="SendAsync">
+            <select @bind="_sendTo" aria-label="The group to send to">
+                @foreach (string group in _session.Groups)
+                {
+                    <option value="@group">@group</option>
+                }
+            </select>
+            <input @bind="_text" @bind:event="oninput" placeholder="A message" aria-label="A message" maxlength="500" />
+            <button type="submit" disabled="@string.IsNullOrWhiteSpace(_text)">Send</button>
+        </form>
+    }
+
+    @if (_notice is not null)
+    {
+        <p class="notice">@_notice</p>
+    }
+
+    <ul class="messages">
+        @foreach (string message in _session.Messages)
+        {
+            <li>@message</li>
+        }
+    </ul>
+}
+
+@code {
+    /// <summary>
+    /// The session, once a name was given; <see langword="null"/> before.
+    /// </summary>
+    private ChatSession? _session;
+
+    /// <summary>
+    /// The name typed into the first form.
+    /// </summary>
+    private string _name = string.Empty;
+
+    /// <summary>
+    /// The group typed into the join form.
+    /// </summary>
+    private string _group = string.Empty;
+
+    /// <summary>
+    /// The group the next message goes to; empty until a group was joined.
+    /// </summary>
+    private string _sendTo = string.Empty;
+
+    /// <summary>
+    /// The text typed into the message box.
+    /// </summary>
+    private string _text = string.Empty;
+
+    /// <summary>
+    /// Why the last join or send did not work, or <see langword="null"/> when it did.
+    /// </summary>
+    private string? _notice;
+
+    /// <summary>
+    /// Ends the session when the page goes away.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the session has ended.
+    /// </returns>
+    public async ValueTask DisposeAsync()
+    {
+        if (_session is not null)
+        {
+            _session.Changed -= Render;
+            await _session.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// Starts a session with the name typed in. The page does not wait for the connection: the status line shows
+    /// how it goes.
+    /// </summary>
+    private void Connect()
+    {
+        if (_session is not null || string.IsNullOrWhiteSpace(_name))
+        {
+            return;
+        }
+
+        _session = new ChatSession(new Uri(Navigation.BaseUri), _name.Trim());
+        _session.Changed += Render;
+        _ = _session.StartAsync();
+    }
+
+    /// <summary>
+    /// Joins the group typed in and makes it the group the next message goes to.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the server has answered.
+    /// </returns>
+    private async Task JoinAsync()
+    {
+        if (_session is null || string.IsNullOrWhiteSpace(_group))
+        {
+            return;
+        }
+
+        string group = _group.Trim();
+        _notice = await _session.JoinAsync(group);
+        if (_notice is null)
+        {
+            _sendTo = group;
+            _group = string.Empty;
+        }
+    }
+
+    /// <summary>
+    /// Sends the text typed in to the chosen group. The message appears in the list when the server sends it back.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the server has acknowledged the message, or it could not be sent.
+    /// </returns>
+    private async Task SendAsync()
+    {
+        if (_session is null || string.IsNullOrWhiteSpace(_text) || _sendTo.Length == 0)
+        {
+            return;
+        }
+
+        string text = _text.Trim();
+        _text = string.Empty;
+        _notice = await _session.SendAsync(_sendTo, text);
+    }
+
+    /// <summary>
+    /// Renders the page again after the session changed.
+    /// </summary>
+    private void Render() => _ = InvokeAsync(StateHasChanged);
+}

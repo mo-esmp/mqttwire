@@ -39,6 +39,12 @@ public sealed class MqttWireServer
     private TaskCompletionSource? _stopped;
 
     /// <summary>
+    /// How long the last <see cref="Sweep"/> took, in timestamp units of <see cref="Time"/>; 0 before the first.
+    /// Written by the sweep and read by whoever measures it, on different threads.
+    /// </summary>
+    private long _lastSweepTicks;
+
+    /// <summary>
     /// Creates the server; it enforces no deadline until <see cref="Start"/>.
     /// </summary>
     /// <param name="handler">
@@ -159,6 +165,13 @@ public sealed class MqttWireServer
     /// Gets the clock every deadline is measured on.
     /// </summary>
     internal TimeProvider Time { get; }
+
+    /// <summary>
+    /// Gets how long the last <see cref="Sweep"/> took, in timestamp units of <see cref="Time"/>
+    /// (<see cref="TimeProvider.TimestampFrequency"/> of them are a second); 0 before the first sweep. The
+    /// benchmark reports it (design 6.14).
+    /// </summary>
+    internal long LastSweepTicks => Volatile.Read(ref _lastSweepTicks);
 
     /// <summary>
     /// Gets the pool every buffer is rented from.
@@ -463,7 +476,8 @@ public sealed class MqttWireServer
     /// The sweep: lets every connection act on the deadlines that have passed. It walks the slots without the lock
     /// and allocates nothing. It runs on the timer's thread, where an exception would end the process, so nothing a
     /// connection's check throws leaves it: a check does not throw, and should one all the same (a fault inside
-    /// MqttWire), that connection is ended as a fault, logged with event 20, and the sweep goes on to the next.
+    /// MqttWire), that connection is ended as a fault, logged with event 20, and the sweep goes on to the next. When
+    /// it has walked every slot it records how long it took, in <see cref="LastSweepTicks"/>.
     /// </summary>
     internal void Sweep()
     {
@@ -486,6 +500,8 @@ public sealed class MqttWireServer
                 connection.EndFaulted(exception);
             }
         }
+
+        Volatile.Write(ref _lastSweepTicks, Time.GetTimestamp() - now);
     }
 
     /// <summary>

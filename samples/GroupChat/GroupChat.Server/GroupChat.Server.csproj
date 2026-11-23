@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Serves the Blazor WebAssembly client from this host; used by the sample only. -->
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../src/MqttWire.Server/MqttWire.Server.csproj" />
+    <ProjectReference Include="../GroupChat.Client/GroupChat.Client.csproj" />
+  </ItemGroup>
+
+</Project>

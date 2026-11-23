@@ -3,6 +3,7 @@
 Date: 2026-11-19
 Status: final design (v6), approved by the owner on 2026-11-19
 Updated on 2026-11-22 to the server as built in step 3 (mo-esmp/mqttwire#6).
+Updated on 2026-11-23 to the rest of step 3: MQTT.js, the sample and the benchmark.
 Moved to the `mqttwire` repository on 2026-11-20.
 Companion: [GrainWire on MqttWire](2026-11-19-grainwire-on-mqttwire-design.md), the first host.
 History: this design is v5 of ["GrainWire: its own minimal MQTT 5 implementation"](2026-11-19-minimal-mqtt-design.md),
@@ -140,12 +141,14 @@ mqttwire/
                                 MqttWire's server and client
   tests/MqttWire.TestHost/      a small host with an exact-topic handler, shared by the interops,
                                 MQTT.js and the shared-topics test
-  tests/interop-js/             (part B) MQTT.js against the test host
+  tests/interop-js/             MQTT.js against the test host
   bench/MqttWire.Microbench/    BenchmarkDotNet runs of the codec and the client
-  bench/MqttWire.Bench/         (part B) the floor, and idle connections on a handler that does
-                                nothing
-  samples/GroupChat/            (part B) shared topics through the host (6.10)
-  docs/                         this design; (step 4) "the part of MQTT 5 that is implemented"
+  bench/MqttWire.Bench/         the floor, the traffic floor, and idle connections on a handler that
+                                does nothing
+  samples/GroupChat/            shared topics through the host (6.10): a server and a Blazor
+                                WebAssembly client
+  docs/                         this design; the benchmark's report (docs/bench); (step 4) "the part
+                                of MQTT 5 that is implemented"
 ```
 
 ### 6.2 Public API: the server
@@ -1364,10 +1367,48 @@ If the floor alone is most of what a connection costs today in
 GrainWire, the owner decides whether own WebSocket framing is worth looking at (see the
 companion design).
 
-The benchmark comes with the end of step 3. Until it runs, the only measurement is a unit test
-over the in-memory link: there an idle connection costs MqttWire 668 bytes (in a Release build,
-measured on 2026-11-23; the smallest of 669, 668 and 668), held to 768, which leaves out the
-WebSocket link object and its parked read.
+**What the target is judged on** (the owner, 2026-11-23): MqttWire's own state for a
+connection, which is what goal 2 lists. The floor never sees traffic, so after activity it is
+not a like-for-like comparison: Kestrel's pool of transport buffers keeps blocks after a burst
+that reaches every connection at once, also under a bare endpoint, and unsteadily. So the first
+figure above, live managed bytes as a slope, decides for the idle state. After activity the
+evidence is the unit tests over the in-memory link, the server's heap by type, and a bare
+endpoint given the same traffic; the benchmark reports states 2 and 3 against the idle floor
+for information.
+
+**Measured on 2026-11-23** ([the report](../bench/2026-11-idle-memory.md)), at 3,000 and 12,000
+connections, on a floor of about 10,700 to 10,950 bytes per connection:
+
+- **Idle,** MqttWire adds 513 to 624 bytes to the floor, in ten runs. In a heap dump the types
+  that name MqttWire come to 591 bytes per connection.
+- **After activity** a connection is 501 to 2,587 bytes above the idle floor, over floor +
+  1,024 in four of the ten runs. What is kept is Kestrel's: in the heap dumps 618 of the 625
+  bytes that activity added per connection are the 4 KB blocks of its memory pool. The
+  benchmark's "traffic floor", a bare endpoint that is given the same traffic in the same
+  directions, moved with MqttWire in the same run: by 44, 777 and 2,077 bytes per connection
+  where MqttWire moved by -12, 199 and 2,006. Against it MqttWire is 509 to 549 bytes above
+  idle and -68 to 479 after activity.
+- **After churn,** which the benchmark runs in the server that has had the activity, the figure
+  is within 52 bytes of the one before it. Nothing piles up in one cycle. "Live managed bytes
+  coming back after churn" (section 8) is not shown by this: what the pool kept after the
+  activity was still there after the churn.
+- **Over the in-memory link,** where there is no Kestrel, a connection costs MqttWire 667 bytes
+  idle (in a Release build) and 595 to 632 after a burst that every connection held at the
+  same moment. Two unit tests hold both to 768, which leaves out the WebSocket link object and
+  its parked read. The server's own pools, at most 1,024 objects of each kind, keep a fixed 0.5
+  to 0.65 MB after such a burst, which a third test holds to 1 MiB.
+- **One sweep** over 12,000 connections takes 0.6 to 1.7 ms on a quiet machine. **With TLS**
+  the floor is about 13,500 bytes, and MqttWire adds 511 to 804 in all three states.
+
+So the target is met on MqttWire's own state, before and after activity. The second figure
+above did not come out as wished: what the buffer pools keep after activity does grow with
+connections when a burst reaches all of them at once, and by an amount that differs widely
+from run to run. The pool that grows is Kestrel's, and a two-point slope cannot pin down what a
+pool keeps; the report says what was not measured.
+
+The benchmark's connections ping before every measurement: the server gives a client that asks
+for no keep-alive 60 seconds and drops it after 90 of silence (6.6), so a connection that only
+sat there would be closed during the run.
 
 ### 6.15 Documentation, versions, maintenance
 
@@ -1433,6 +1474,9 @@ Each step ends with every test green.
   MQTT.js, the sample and the benchmark (2026-11-22).
 - The `GroupChat` sample is a server and a Blazor WebAssembly client (2026-11-22).
 - MQTT.js runs in its own Node job in CI (2026-11-22).
+- The memory target is judged on MqttWire's own state for a connection, not on what Kestrel's
+  pool keeps after a burst (2026-11-23, on the benchmark's first seven runs; confirmed the same
+  day on all ten, with the traffic floor and the corrected unit tests; 6.14).
 
 ## 10. Proposed by Claude (owner to check)
 
@@ -1567,6 +1611,25 @@ the owner there:
     longest array and the most bytes out at one moment, and the tests assert the table's
     numbers (6.6).
 
+Decided while the rest of step 3 was built (2026-11-23), not yet seen by the owner:
+
+49. The server records how long its last sweep took, for the benchmark to report: one more
+    reading of the clock per sweep, nothing public (6.14).
+50. The benchmark measures a third endpoint, the traffic floor: a bare endpoint with no MQTT
+    code that plays MqttWire's side of the activity from fixed bytes, so that it sees the same
+    traffic in the same directions. `run --dumps` takes heap dumps of the server. The sweep's
+    time is read before the first forced collection: a sweep that overlaps a blocking
+    collection looks ten times slower than it is. A run whose large count is under four times
+    its small one is refused, and one whose floor or idle state was measured while the heap
+    was still moving is inconclusive (6.14).
+51. The test host stops when it reads the line `STOP` on its standard input, so that the
+    MQTT.js tests can stop it as a host stops, on every platform; a killed host tells no client
+    `0x8B` (6.13 item 7).
+52. The browser run of 6.13 item 9 was made by Claude in the browser pane of the Claude desktop
+    app (Chromium 156), not by the owner. While the server is down, the browser itself logs
+    every failed attempt to reconnect, which a page cannot turn off; the application logs
+    nothing.
+
 ## 11. Left to the builder
 
 What was left here, and what step 3 decided:
@@ -1597,8 +1660,9 @@ What was left here, and what step 3 decided:
   6.6, "Sending" (the control buffer, written as one message; a pooled queue of deliveries;
   the copy up to 16 KB).
 
-Still left to the builder for the rest of step 3: the shape of the benchmark of 6.14, the
-`GroupChat` sample, and the MQTT.js interop with its CI job.
+- The shape of the benchmark of 6.14, the `GroupChat` sample, and the MQTT.js interop with its
+  CI job: as built in the rest of step 3 (`bench/MqttWire.Bench` and its report,
+  `samples/GroupChat/README.md`, `tests/interop-js/README.md`).
 
 ## 12. What was checked
 
@@ -1612,6 +1676,9 @@ is the starting point: today's idle cost per connection and the bare-WebSocket f
 
 The codec and the client were built and run in steps 1 and 2. The server has now been built and
 run: its unit tests over the in-memory link, and the interops with MQTTnet's client and
-MqttWire's client over Kestrel, at QoS 0, 1 and 2 in both directions. Not yet run: MQTT.js, the
-sample and the benchmark (the rest of step 3), so MqttWire's memory over a real WebSocket has
-not been measured yet.
+MqttWire's client over Kestrel, at QoS 0, 1 and 2 in both directions. The rest of step 3 was
+run on 2026-11-23: MQTT.js 5.16.1 against the server, at QoS 0, 1 and 2 in both directions (13
+tests, which a CI job of their own runs); the `GroupChat` sample in a browser, once (Chromium 156; its README records
+the run); and the benchmark, whose report is
+[docs/bench/2026-11-idle-memory.md](../bench/2026-11-idle-memory.md). Not run: the benchmark
+on Linux or on a machine that is not virtual, and the sample in any other browser.
