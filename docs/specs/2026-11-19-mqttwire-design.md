@@ -754,6 +754,7 @@ and the connection is closed with `0x95`.
 | What | Bound |
 |---|---|
 | Before CONNECT is complete | one read buffer of at most 16 KB, for at most 10 s; when packets came behind the CONNECT in it, the same buffer through Authenticating, for at most 10 s more |
+| The request given to `OnConnectAsync` | what a CONNECT of at most 16 KB decodes to: the client id, the user name, the password and the user properties as strings and objects of their own, about 150 KB when the CONNECT is nothing but short user properties; for the authentication deadline (10 s), longer only while a host that ignores its token keeps the request |
 | Read buffer while a packet is arriving | `MaxPublishPayloadBytes` + 5 KiB, for at most 10 s without a complete packet |
 | On the way out | `MaxOutgoingBytes` (1 MiB), plus one encoding buffer of at most 64 KB |
 | QoS exchange records | 256 for what the client sends, 256 for what the server sends, a few bytes each |
