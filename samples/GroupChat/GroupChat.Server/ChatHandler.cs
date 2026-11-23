@@ -20,6 +20,12 @@ internal sealed class ChatHandler(ILogger<ChatHandler> logger) : IMqttWireHandle
     private const string GroupPrefix = "groups/";
 
     /// <summary>
+    /// The longest group name, in characters. Without a bound a client could make the table hold topics of up to
+    /// 64 KB each, and one too long to send to.
+    /// </summary>
+    private const int MaxGroupNameLength = 64;
+
+    /// <summary>
     /// Who is in which group.
     /// </summary>
     private readonly GroupTable _groups = new();
@@ -134,18 +140,25 @@ internal sealed class ChatHandler(ILogger<ChatHandler> logger) : IMqttWireHandle
             return MqttPublishResult.Refuse(MqttReasonCode.NotAuthorized, "Join the group before you send to it.");
         }
 
-        // The members are copied out of the table and sent to with no lock held: a member that has fallen too far
-        // behind is disconnected by TrySend, and its OnClosed takes the table's lock on another thread.
-        (MqttWireConnection Connection, MqttQoS Granted)[] members = _groups.GetMembers(group);
+        // The group as it is now: an immutable snapshot of its members with its topic already encoded, which the
+        // table replaces when someone joins or leaves. So nothing is copied here but the payload, and the members
+        // are sent to with no lock held: a member that has fallen too far behind is disconnected by TrySend, and
+        // its OnClosed takes the table's lock on another thread.
+        Group? found = _groups.Find(group);
+        if (found is null)
+        {
+            // The sender is a member, so the group is there; a group is only ever gone once its last member is.
+            return MqttPublishResult.Accepted;
+        }
 
         // One copy, shared by every member: TrySend does not copy it again.
         byte[] payload = publish.Payload.ToArray();
-        MqttTopic topic = MqttTopic.Create(publish.Topic);
-        foreach ((MqttWireConnection recipient, MqttQoS granted) in members)
+        foreach (GroupMember member in found.Members)
         {
-            // TrySend returns at once, whatever the member's network does, so a slow member delays nobody.
-            MqttQoS qos = publish.QoS < granted ? publish.QoS : granted;
-            recipient.TrySend(topic, payload, qos);
+            // TrySend returns at once, whatever the member's network does, so a slow member delays nobody. It
+            // never gets a higher QoS than its subscription asked for.
+            MqttQoS qos = publish.QoS < member.QoS ? publish.QoS : member.QoS;
+            member.Connection.TrySend(found.Topic, payload, qos);
         }
 
         return MqttPublishResult.Accepted;
@@ -173,11 +186,12 @@ internal sealed class ChatHandler(ILogger<ChatHandler> logger) : IMqttWireHandle
     }
 
     /// <summary>
-    /// Tells whether a topic filter is a group's topic: <c>groups/</c> followed by a name that is not empty and
-    /// holds no further level and no wildcard.
+    /// Tells whether a topic filter is a group's topic: <c>groups/</c> followed by a name of 1 to
+    /// <see cref="MaxGroupNameLength"/> characters that holds no further level and no wildcard. Such a filter is
+    /// also a topic a message can be sent to, which <see cref="GroupTable.Join"/> relies on.
     /// </summary>
     /// <param name="topicFilter">
-    /// The filter.
+    /// The filter, which the server has already checked to be a valid MQTT topic filter.
     /// </param>
     /// <returns>
     /// <see langword="true"/> for a group's topic.
@@ -185,6 +199,7 @@ internal sealed class ChatHandler(ILogger<ChatHandler> logger) : IMqttWireHandle
     private static bool IsGroupTopic(string topicFilter) =>
         topicFilter.StartsWith(GroupPrefix, StringComparison.Ordinal)
         && topicFilter.Length > GroupPrefix.Length
+        && topicFilter.Length <= GroupPrefix.Length + MaxGroupNameLength
         && topicFilter.AsSpan(GroupPrefix.Length).IndexOfAny('/', '+', '#') < 0;
 
     /// <summary>

@@ -1,14 +1,18 @@
-﻿using MqttWire;
+﻿using System.Collections.Immutable;
+using MqttWire;
 using MqttWire.Server;
 
 namespace GroupChat.Server;
 
 /// <summary>
-/// The chat's own table of who is in which group: for each group's topic, the connections subscribed to it and
-/// the QoS each was granted. MqttWire keeps no such table; routing is the host's (design 6.10).
+/// The chat's own table of who is in which group. MqttWire keeps no such table; routing is the host's (design
+/// 6.10).
 /// </summary>
 /// <remarks>
-/// The server calls the handler for different connections at the same time, so every member takes one lock.
+/// The server calls the handler for different connections at the same time, so every member takes one lock. The
+/// lock is held only to read or replace one entry: a group's members are an immutable snapshot
+/// (<see cref="Group"/>), which a join or a leave replaces. Membership changes far less often than messages are
+/// sent, so a publish finds the snapshot ready and copies nothing.
 /// </remarks>
 internal sealed class GroupTable
 {
@@ -18,13 +22,12 @@ internal sealed class GroupTable
     private readonly Lock _gate = new();
 
     /// <summary>
-    /// The members of each group, by the group's topic. A group with no member has no entry.
+    /// Each group as it is now, by its topic. A group with no member has no entry.
     /// </summary>
-    private readonly Dictionary<string, List<(MqttWireConnection Connection, MqttQoS Granted)>> _groups =
-        new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Group> _groups = new(StringComparer.Ordinal);
 
     /// <summary>
-    /// Adds a connection to a group, or replaces the QoS it was granted when it is a member already.
+    /// Adds a connection to a group, or replaces the QoS it asked for when it is a member already.
     /// </summary>
     /// <param name="group">
     /// The group's topic.
@@ -32,28 +35,30 @@ internal sealed class GroupTable
     /// <param name="connection">
     /// The connection that subscribed.
     /// </param>
-    /// <param name="granted">
-    /// The QoS its subscription was granted.
+    /// <param name="qos">
+    /// The QoS its subscription asked for.
     /// </param>
-    public void Join(string group, MqttWireConnection connection, MqttQoS granted)
+    /// <exception cref="ArgumentException">
+    /// The topic is not one a message can be sent to: see <see cref="MqttTopic.Create(string)"/>. The handler
+    /// lets only topics through that are.
+    /// </exception>
+    public void Join(string group, MqttWireConnection connection, MqttQoS qos)
     {
+        GroupMember member = new(connection, qos);
         lock (_gate)
         {
-            if (!_groups.TryGetValue(group, out List<(MqttWireConnection Connection, MqttQoS Granted)>? members))
+            if (!_groups.TryGetValue(group, out Group? current))
             {
-                members = [];
-                _groups.Add(group, members);
+                // The topic is encoded here, once for the life of the group.
+                _groups.Add(group, new Group(MqttTopic.Create(group), [member]));
+                return;
             }
 
-            int index = members.FindIndex(member => member.Connection == connection);
-            if (index >= 0)
-            {
-                members[index] = (connection, granted);
-            }
-            else
-            {
-                members.Add((connection, granted));
-            }
+            int index = IndexOf(current.Members, connection);
+            ImmutableArray<GroupMember> members = index >= 0
+                ? current.Members.SetItem(index, member)
+                : current.Members.Add(member);
+            _groups[group] = new Group(current.Topic, members);
         }
     }
 
@@ -71,34 +76,68 @@ internal sealed class GroupTable
     {
         lock (_gate)
         {
-            if (_groups.TryGetValue(group, out List<(MqttWireConnection Connection, MqttQoS Granted)>? members)
-                && members.RemoveAll(member => member.Connection == connection) > 0
-                && members.Count == 0)
+            if (!_groups.TryGetValue(group, out Group? current))
+            {
+                return;
+            }
+
+            int index = IndexOf(current.Members, connection);
+            if (index < 0)
+            {
+                return;
+            }
+
+            if (current.Members.Length == 1)
             {
                 _groups.Remove(group);
+                return;
             }
+
+            _groups[group] = new Group(current.Topic, current.Members.RemoveAt(index));
         }
     }
 
     /// <summary>
-    /// Copies the members of a group out of the table, so that the caller can send to them after the lock is
-    /// released: <c>TrySend</c> can end a connection, and that connection's <c>OnClosed</c>, which runs on another
-    /// thread, takes this lock to leave its groups.
+    /// Finds a group as it is now.
     /// </summary>
     /// <param name="group">
     /// The group's topic.
     /// </param>
     /// <returns>
-    /// The members and the QoS each was granted; empty for a group with no member. One array per call, which a
-    /// sample can afford; a host with large groups would rent it.
+    /// The group's snapshot, which the caller sends to after this returns, with no lock held: <c>TrySend</c> can
+    /// end a connection, and that connection's <c>OnClosed</c>, which runs on another thread, takes the lock to
+    /// leave its groups. <see langword="null"/> for a group with no member.
     /// </returns>
-    public (MqttWireConnection Connection, MqttQoS Granted)[] GetMembers(string group)
+    public Group? Find(string group)
     {
         lock (_gate)
         {
-            return _groups.TryGetValue(group, out List<(MqttWireConnection Connection, MqttQoS Granted)>? members)
-                ? [.. members]
-                : [];
+            return _groups.GetValueOrDefault(group);
         }
+    }
+
+    /// <summary>
+    /// Finds a connection among a group's members.
+    /// </summary>
+    /// <param name="members">
+    /// The members.
+    /// </param>
+    /// <param name="connection">
+    /// The connection.
+    /// </param>
+    /// <returns>
+    /// Its index, or -1 when it is not a member.
+    /// </returns>
+    private static int IndexOf(ImmutableArray<GroupMember> members, MqttWireConnection connection)
+    {
+        for (int i = 0; i < members.Length; i++)
+        {
+            if (ReferenceEquals(members[i].Connection, connection))
+            {
+                return i;
+            }
+        }
+
+        return -1;
     }
 }

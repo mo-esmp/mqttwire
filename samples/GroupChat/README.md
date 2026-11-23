@@ -6,7 +6,7 @@ sample's own.
 
 | Project | What it is |
 |---|---|
-| `GroupChat.Server` | An ASP.NET Core host with MqttWire's server at `/mqtt`. `ChatHandler` is all of the chat's logic; `GroupTable` is its table of who is in which group. It also serves the client. |
+| `GroupChat.Server` | An ASP.NET Core host with MqttWire's server at `/mqtt`. `ChatHandler` is all of the chat's logic; `GroupTable` is its table of who is in which group, one `Group` snapshot for each. It also serves the client. |
 | `GroupChat.Client` | A Blazor WebAssembly page. `ChatSession` wraps one `MqttWireReconnectingClient`. |
 
 ## Running it
@@ -24,8 +24,8 @@ and send a message from each.
 
 - `OnConnectAsync` accepts a client that gives a name as its user name, and puts a `ChatMember`
   into the connection's state slot. A real host checks a password or a token here.
-- `OnSubscribe` is "join a group": it grants a filter of the form `groups/<name>` and refuses
-  every other, wildcards included.
+- `OnSubscribe` is "join a group": it grants a filter of the form `groups/<name>`, with a name
+  of at most 64 characters, and refuses every other, wildcards included.
 - `OnPublish` is "send to a group". It refuses a topic the sender has not joined. Otherwise it
   shows the two rules a host most easily gets wrong:
   - **the payload is copied, once.** `publish.Payload` is valid only during the call, and
@@ -33,9 +33,12 @@ and send a message from each.
   - **each member gets the message at no higher QoS than it was granted.** MqttWire keeps no
     record of subscriptions, so the handler remembers the QoS and uses the lower of it and the
     publish's.
-- The members are copied out of the table before anything is sent, and sent to with no lock
-  held: `TrySend` can disconnect a member that has fallen too far behind, and that member's
-  `OnClosed` takes the table's lock on another thread.
+- **A publish copies nothing but the payload.** `GroupTable` keeps each group as an immutable
+  snapshot, `Group`: its members and its topic, encoded once. A join or a leave puts a new
+  snapshot in its place; a publish takes the one that is there. Members change far less often
+  than messages are sent.
+- The members are sent to with no lock held: `TrySend` can disconnect a member that has fallen
+  too far behind, and that member's `OnClosed` takes the table's lock on another thread.
 - `OnUnsubscribe` and `OnClosed` take the connection out of the table.
 
 **`ChatSession`** (the client's side):

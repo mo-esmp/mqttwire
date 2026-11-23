@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Http;
 using MqttWire.Server;
+using MqttWire.Server.Internal;
 using MqttWire.Tests.Link;
 
 namespace MqttWire.Tests.Server;
@@ -44,6 +45,19 @@ public sealed class IdleCostTests
     private const int MaxAttempts = 3;
 
     /// <summary>
+    /// The number of connections that hold a burst at once in the test of what the pools keep: four times what a
+    /// pool retains, so that an amount that grew with connections would be four times an amount that is fixed.
+    /// </summary>
+    private const int PoolTestCount = 4 * ServerLimits.MaxPooledObjects;
+
+    /// <summary>
+    /// The most the server's pools may keep after a burst, in bytes: 1 MiB. The pools retain at most
+    /// <see cref="ServerLimits.MaxPooledObjects"/> objects of each kind, and a retained set of exchange records
+    /// is about 600 bytes.
+    /// </summary>
+    private const int MaxPoolBytes = 1_048_576;
+
+    /// <summary>
     /// The payload of the burst's messages, shared by all of them: 256 bytes, as in the benchmark.
     /// </summary>
     private static readonly byte[] s_burstPayload = new byte[256];
@@ -75,11 +89,13 @@ public sealed class IdleCostTests
 
     /// <summary>
     /// Proves that a connection costs MqttWire no more after activity than the bound for one that has done nothing
-    /// (design goal 2, "before and after activity alike"): 2,000 connections each publish at QoS 0 and at QoS 2 and
-    /// receive and acknowledge a burst of ten messages at QoS 1, and then keep at most 768 bytes each.
+    /// (design goal 2, "before and after activity alike"): 2,000 connections each publish at QoS 0 and at QoS 2,
+    /// all hold a burst of ten unacknowledged messages at QoS 1 at the same moment, acknowledge it, and then keep
+    /// at most 768 bytes each. The server's pools are at their cap before the first reading, so that what they
+    /// keep, which is fixed, is not counted as the connections'; the next test bounds it.
     /// </summary>
     [Fact]
-    public void Activity_TwoThousandConnectionsThenQuiet_KeepAtMost768BytesEach()
+    public void Activity_TwoThousandConnectionsHoldABurstAtOnceThenQuiet_KeepAtMost768BytesEach()
     {
         // Arrange
         List<long> figures = [];
@@ -100,12 +116,73 @@ public sealed class IdleCostTests
     }
 
     /// <summary>
+    /// Proves that what the server's pools keep after a burst is a fixed amount and not one per connection: after
+    /// 4,096 connections, four times what a pool retains, held a burst of ten unacknowledged messages at the same
+    /// moment and acknowledged it, the heap is at most 1 MiB larger than before the burst. An amount of 300 bytes
+    /// per connection, which is what the pools' share comes to at 2,000 connections, would be over that.
+    /// </summary>
+    [Fact]
+    public void Activity_FourThousandConnectionsHoldABurstAtOnce_ThePoolsKeepAtMostOneMebibyte()
+    {
+        // Arrange
+        List<long> figures = [];
+        long smallest = long.MaxValue;
+
+        // Act
+        for (int attempt = 0; attempt < MaxAttempts && smallest > MaxPoolBytes; attempt++)
+        {
+            long kept = MeasureBytesKeptAfterBurst();
+            figures.Add(kept);
+            smallest = Math.Min(smallest, kept);
+        }
+
+        // Assert
+        smallest.ShouldBeLessThanOrEqualTo(MaxPoolBytes,
+            $"After a burst that {PoolTestCount} connections held at once the heap was {smallest} bytes larger (the "
+            + $"smallest of {figures.Count} measurements: {string.Join(", ", figures)}); the bound is {MaxPoolBytes}.");
+    }
+
+    /// <summary>
+    /// Measures once, on a server of its own, how much larger the heap is after a burst that every connection held
+    /// at the same moment than it was with the same connections idle.
+    /// </summary>
+    /// <returns>
+    /// The bytes the burst left behind: what the server's pools keep, and anything a connection kept.
+    /// </returns>
+    private static long MeasureBytesKeptAfterBurst()
+    {
+        ServerHarness harness = ServerHarness.Create();
+        harness.Handler.Connect = static (_, _) => ValueTask.FromResult(MqttConnectResult.Accept(state: null));
+
+        // One connection goes through the activity first, so that what is created once is in both readings.
+        TestConnection warmUp = harness.Connect("warm-up");
+        RunActivity(harness, warmUp, "warm-up");
+        TestConnection[] connected = new TestConnection[PoolTestCount];
+        for (int i = 0; i < PoolTestCount; i++)
+        {
+            connected[i] = harness.Connect($"c{i}");
+        }
+
+        ForgetCalls(harness);
+        long idle = ReadHeap();
+        HoldBurstAtOnce(harness, connected, "c");
+        ForgetCalls(harness);
+        long afterBurst = ReadHeap();
+        harness.Server.ConnectionCount.ShouldBe(PoolTestCount + 1);
+        GC.KeepAlive(warmUp);
+        GC.KeepAlive(connected);
+        return afterBurst - idle;
+    }
+
+    /// <summary>
     /// Takes the measurement once, on a server of its own: a warm-up connection, then the heap with nothing more,
     /// with 2,000 sets of scaffolding, and with 2,000 connected, idle connections besides.
     /// </summary>
     /// <param name="afterActivity">
-    /// Whether every connection, the warm-up one first, goes through <see cref="RunActivity"/> before the last
-    /// reading, so that the figure is that of a connection that is quiet after activity.
+    /// Whether the figure is that of a connection that is quiet after activity. Then the warm-up connection goes
+    /// through <see cref="RunActivity"/>, as many connections as a pool retains hold a burst at once and stay
+    /// connected, so that the server's pools are at their cap in every reading, and the 2,000 connections hold a
+    /// burst at once before the last reading.
     /// </param>
     /// <returns>
     /// The bytes per connection beyond the scaffolding; at least the true cost, more when something else allocated
@@ -119,9 +196,19 @@ public sealed class IdleCostTests
         // One connection first, so that what is created once (the JIT's work, the pool's buffers, the statics) is in
         // every reading.
         TestConnection warmUp = harness.Connect("warm-up");
+        TestConnection[] poolFillers = [];
         if (afterActivity)
         {
             RunActivity(harness, warmUp, "warm-up");
+
+            // What the pools keep is fixed, at most this many objects of each kind, and is here from now on.
+            poolFillers = new TestConnection[ServerLimits.MaxPooledObjects];
+            for (int i = 0; i < poolFillers.Length; i++)
+            {
+                poolFillers[i] = harness.Connect($"w{i}");
+            }
+
+            HoldBurstAtOnce(harness, poolFillers, "w");
         }
 
         ForgetCalls(harness);
@@ -141,16 +228,14 @@ public sealed class IdleCostTests
 
         if (afterActivity)
         {
-            for (int i = 0; i < Count; i++)
-            {
-                RunActivity(harness, connected[i], $"c{i}");
-            }
+            HoldBurstAtOnce(harness, connected, "c");
         }
 
         ForgetCalls(harness);
         long withConnected = ReadHeap();
-        harness.Server.ConnectionCount.ShouldBe(Count + 1);
+        harness.Server.ConnectionCount.ShouldBe(Count + 1 + poolFillers.Length);
         GC.KeepAlive(warmUp);
+        GC.KeepAlive(poolFillers);
         GC.KeepAlive(baseline);
         GC.KeepAlive(connected);
         // The scaffolding is subtracted once, not twice: the 2,000 connections do not use the 2,000 sets created
@@ -177,12 +262,66 @@ public sealed class IdleCostTests
     /// </param>
     private static void RunActivity(ServerHarness harness, TestConnection connection, string clientId)
     {
+        ReceiveBurst(harness, connection, clientId);
+        AcknowledgeBurst(harness, connection, clientId);
+        harness.AssertBounds();
+    }
+
+    /// <summary>
+    /// The activity on many connections, as the benchmark runs it: every connection holds its burst
+    /// unacknowledged at the same moment, so each needs exchange records of its own, and only then do they
+    /// acknowledge. One connection after the other would be served by a single pooled object.
+    /// </summary>
+    /// <param name="harness">
+    /// The harness.
+    /// </param>
+    /// <param name="connections">
+    /// The connected test connections, whose client ids are <paramref name="clientIdPrefix"/> followed by their
+    /// index.
+    /// </param>
+    /// <param name="clientIdPrefix">
+    /// What the client ids start with.
+    /// </param>
+    private static void HoldBurstAtOnce(ServerHarness harness, TestConnection[] connections, string clientIdPrefix)
+    {
+        for (int i = 0; i < connections.Length; i++)
+        {
+            ReceiveBurst(harness, connections[i], $"{clientIdPrefix}{i}");
+        }
+
+        // The bounds are looked at once for each half, not after every packet: the harness walks every connection
+        // each time, which over thousands of connections and tens of packets each would take minutes.
+        harness.AssertBounds();
+        for (int i = 0; i < connections.Length; i++)
+        {
+            AcknowledgeBurst(harness, connections[i], $"{clientIdPrefix}{i}");
+        }
+
+        harness.AssertBounds();
+    }
+
+    /// <summary>
+    /// The first half of the activity on one connection: it publishes one message at QoS 0 and one at QoS 2, with
+    /// the full exchange, and is sent ten messages of 256 bytes at QoS 1, which it leaves unacknowledged. The
+    /// connection then holds exchange records for the ten deliveries.
+    /// </summary>
+    /// <param name="harness">
+    /// The harness.
+    /// </param>
+    /// <param name="connection">
+    /// The connected test connection.
+    /// </param>
+    /// <param name="clientId">
+    /// Its client id, by which the server finds it: the handler's own records may have been forgotten.
+    /// </param>
+    private static void ReceiveBurst(ServerHarness harness, TestConnection connection, string clientId)
+    {
         harness.Server.TryGetConnection(clientId, out MqttWireConnection? found).ShouldBeTrue();
         MqttWireConnection server = found.ShouldNotBeNull();
-        connection.Deliver(ServerPackets.BuildPublish(MqttQoS.AtMostOnce, "a/b"u8, packetIdentifier: 0, properties: [], "hi"u8));
-        connection.Deliver(ServerPackets.BuildPublish(MqttQoS.ExactlyOnce, "a/b"u8, packetIdentifier: 1, properties: [], "hi"u8));
+        connection.Link.Deliver(ServerPackets.BuildPublish(MqttQoS.AtMostOnce, "a/b"u8, packetIdentifier: 0, properties: [], "hi"u8));
+        connection.Link.Deliver(ServerPackets.BuildPublish(MqttQoS.ExactlyOnce, "a/b"u8, packetIdentifier: 1, properties: [], "hi"u8));
         connection.TakeWritten().ShouldBe(ServerPackets.PubRec(1));
-        connection.Deliver(ServerPackets.PubRel(1));
+        connection.Link.Deliver(ServerPackets.PubRel(1));
         connection.TakeWritten().ShouldBe(ServerPackets.PubComp(1));
         for (int message = 0; message < 10; message++)
         {
@@ -190,9 +329,29 @@ public sealed class IdleCostTests
         }
 
         connection.TakeWritten().Length.ShouldBeGreaterThan(10 * s_burstPayload.Length);
+        server.GetCounts().DeliveryRecords.ShouldBe(10);
+    }
+
+    /// <summary>
+    /// The second half of the activity on one connection: it acknowledges the ten messages of
+    /// <see cref="ReceiveBurst"/>, after which the connection is asserted to hold nothing.
+    /// </summary>
+    /// <param name="harness">
+    /// The harness.
+    /// </param>
+    /// <param name="connection">
+    /// The connected test connection.
+    /// </param>
+    /// <param name="clientId">
+    /// Its client id, by which the server finds it.
+    /// </param>
+    private static void AcknowledgeBurst(ServerHarness harness, TestConnection connection, string clientId)
+    {
+        harness.Server.TryGetConnection(clientId, out MqttWireConnection? found).ShouldBeTrue();
+        MqttWireConnection server = found.ShouldNotBeNull();
         for (ushort identifier = 1; identifier <= 10; identifier++)
         {
-            connection.Deliver(ServerPackets.PubAck(identifier));
+            connection.Link.Deliver(ServerPackets.PubAck(identifier));
         }
 
         connection.TakeWritten().ShouldBeEmpty();

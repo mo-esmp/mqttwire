@@ -221,9 +221,12 @@ test("two hundred QoS 2 publishes in a row all arrive once", { timeout }, async 
   assert.deepEqual(payloads, [...expected, "end"]);
 });
 
-test("the client is told 0x8B when the host stops", { timeout }, async () => {
-  // Arrange: a host of its own, because this test stops it.
+test("the client is told 0x8B when the host stops", { timeout }, async (t) => {
+  // Arrange: a host of its own, because this test stops it. It is stopped whatever happens next:
+  // a host left running would keep this process alive until the CI job's limit. `stop` runs once
+  // and hands every later caller the same promise.
   const stoppingHost = await startHost();
+  t.after(() => stoppingHost.stop());
   const { client } = await connect(stoppingHost.url);
   const disconnected = once(client, "disconnect");
 

@@ -51,6 +51,12 @@ internal sealed class ChatSession : IAsyncDisposable
     private readonly List<string> _groups = [];
 
     /// <summary>
+    /// The groups whose subscription has been sent and not yet answered. A second request to join one of them
+    /// sends nothing, so that a group can never be added twice.
+    /// </summary>
+    private readonly HashSet<string> _joining = new(StringComparer.Ordinal);
+
+    /// <summary>
     /// The messages received, oldest first, at most <see cref="MaxMessages"/>.
     /// </summary>
     private readonly List<string> _messages = [];
@@ -136,8 +142,10 @@ internal sealed class ChatSession : IAsyncDisposable
     /// The group's name, which must not hold <c>/</c>, <c>+</c> or <c>#</c>.
     /// </param>
     /// <returns>
-    /// <see langword="null"/> when the group was joined, or was joined already; otherwise why it was not: there is
-    /// no connection, the name is not one the server grants, or the connection was lost before the answer.
+    /// <see langword="null"/> when the group was joined, was joined already, or is being joined by an earlier
+    /// call that has not been answered yet, whose own result says how that went; otherwise why it was not: there
+    /// is no connection, the name is not one the server grants, or the connection was lost before the answer. A
+    /// join that failed can be tried again.
     /// </returns>
     public async Task<string?> JoinAsync(string group)
     {
@@ -146,20 +154,28 @@ internal sealed class ChatSession : IAsyncDisposable
             return "A group's name must not be empty or hold '/', '+' or '#'.";
         }
 
-        if (_groups.Contains(group, StringComparer.Ordinal))
+        if (_groups.Contains(group, StringComparer.Ordinal) || !_joining.Add(group))
         {
             return null;
         }
 
-        MqttRequestResult result = await _client.SubscribeAsync(GroupPrefix + group, MqttQoS.AtLeastOnce);
-        if (!result.IsSuccess)
+        try
         {
-            return Describe("Not joined", result);
-        }
+            MqttRequestResult result = await _client.SubscribeAsync(GroupPrefix + group, MqttQoS.AtLeastOnce);
+            if (!result.IsSuccess)
+            {
+                return Describe("Not joined", result);
+            }
 
-        _groups.Add(group);
-        Changed?.Invoke();
-        return null;
+            _groups.Add(group);
+            Changed?.Invoke();
+            return null;
+        }
+        finally
+        {
+            // Also when the subscription failed or threw, so that the group can be joined again.
+            _joining.Remove(group);
+        }
     }
 
     /// <summary>

@@ -56,9 +56,12 @@ public sealed class SharedTopicTests
     }
 
     /// <summary>
-    /// Proves that a member that stops reading delays nobody: with its link holding every write, each of 2,000
-    /// messages has reached the other nine members when its publish returns, with no step of the clock; the member
-    /// is evicted by the message that would make 1,001 wait for it, and the nine go on receiving after that.
+    /// Proves that a member that stops reading delays nobody and cuts nobody off: with its link holding every
+    /// write, each of 2,000 messages has reached the other nine members when its publish returns, with no step of
+    /// the clock; the member is evicted by the message that would make 1,001 wait for it, and the nine go on
+    /// receiving after that. The stalled member is the fifth to have subscribed, so the handler sends to four
+    /// members before it and to five after it: a fan-out that stopped at the member that cannot take a message
+    /// would leave those five without it.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -75,7 +78,10 @@ public sealed class SharedTopicTests
             members.Add(Join(harness, $"c{i}", MqttQoS.AtMostOnce));
         }
 
-        TestConnection stalled = members[9];
+        // Not the last one: the handler sends in the order of the subscriptions, and what happens to the members
+        // behind the stalled one is the point.
+        const int stalledIndex = 4;
+        TestConnection stalled = members[stalledIndex];
         stalled.Link.HoldWrites();
         byte[] payload = new byte[1_024];
         int evictedBy = 0;
@@ -89,9 +95,13 @@ public sealed class SharedTopicTests
             members[0].Deliver(publish);
 
             // Assert, after every publish: at QoS 0 and with no properties, a delivery is the bytes of the publish.
-            for (int m = 0; m < 9; m++)
+            // Every healthy member has it, those behind the stalled one included.
+            for (int m = 0; m < members.Count; m++)
             {
-                members[m].TakeWritten().AsSpan().SequenceEqual(publish).ShouldBeTrue($"publish {i}, member {m + 1}");
+                if (m != stalledIndex)
+                {
+                    members[m].TakeWritten().AsSpan().SequenceEqual(publish).ShouldBeTrue($"publish {i}, member {m + 1}");
+                }
             }
 
             if (evictedBy == 0 && stalled.Link.IsAborted)
@@ -106,7 +116,7 @@ public sealed class SharedTopicTests
         // Assert: the first message is the write the link holds, 1,000 more wait, and the next one evicts.
         evictedBy.ShouldBe(1_002);
         stalled.TakeWritten().ShouldBeEmpty();
-        harness.ClosedCalls().ShouldBe(["OnClosed c10 OutgoingLimitPassed"]);
+        harness.ClosedCalls().ShouldBe(["OnClosed c5 OutgoingLimitPassed"]);
         handler.CountSubscribers(GroupTopic).ShouldBe(9);
         harness.Pool.Outstanding.ShouldBe(0);
     }
