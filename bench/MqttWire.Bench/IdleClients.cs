@@ -15,9 +15,9 @@ internal enum EndpointKind
     Floor,
 
     /// <summary>
-    /// The echo floor: it sends every message back.
+    /// The traffic floor: it plays MqttWire's side of the activity from fixed bytes, with no MQTT code.
     /// </summary>
-    Echo,
+    Traffic,
 
     /// <summary>
     /// MqttWire's endpoint: every connection speaks MQTT 5.
@@ -36,7 +36,8 @@ internal enum EndpointKind
 /// </param>
 /// <param name="kind">
 /// What the endpoint does: on MqttWire's every connection sends a CONNECT; the floor's connections send
-/// nothing; the echo floor's send the same bytes as MqttWire's during the activity and get them back.
+/// nothing; the traffic floor's connect without a CONNECT and then send and receive, during the activity, the
+/// very bytes MqttWire's do.
 /// </param>
 internal sealed class IdleClients(Uri endpoint, EndpointKind kind) : IAsyncDisposable
 {
@@ -75,11 +76,6 @@ internal sealed class IdleClients(Uri endpoint, EndpointKind kind) : IAsyncDispo
     /// The PUBREL for the packet identifier 1.
     /// </summary>
     private static readonly byte[] s_pubRel = [0x62, 0x02, 0x00, 0x01];
-
-    /// <summary>
-    /// A message of the size of one PUBLISH of the burst, which the echo floor sends back: 269 bytes.
-    /// </summary>
-    private static readonly byte[] s_echoBurstMessage = new byte[269];
 
     /// <summary>
     /// The open connections.
@@ -156,8 +152,8 @@ internal sealed class IdleClients(Uri endpoint, EndpointKind kind) : IAsyncDispo
     /// idle again as soon as the answer is written.
     /// </summary>
     /// <returns>
-    /// A task that completes when every connection has its PINGRESP; at once on the floor and the echo floor,
-    /// which have no keep-alive.
+    /// A task that completes when every connection has its PINGRESP; at once on the floor and the traffic
+    /// floor, which have no keep-alive.
     /// </returns>
     public Task PingAsync() => kind != EndpointKind.Mqtt
         ? Task.CompletedTask
@@ -170,7 +166,8 @@ internal sealed class IdleClients(Uri endpoint, EndpointKind kind) : IAsyncDispo
     /// <summary>
     /// The activity of design 6.14 item 3: every connection publishes one message at QoS 0 and one at QoS 2,
     /// with the full exchange; then the server sends every connection a burst of ten messages at QoS 1, which
-    /// each connection acknowledges.
+    /// each connection acknowledges. The traffic floor's connections run the same code: they send the same bytes
+    /// and are sent the same bytes, so the two endpoints see the same traffic in the same directions.
     /// </summary>
     /// <param name="burst">
     /// Asks the server to send the burst to this many connections, and returns how many messages it took.
@@ -210,34 +207,6 @@ internal sealed class IdleClients(Uri endpoint, EndpointKind kind) : IAsyncDispo
         }
 
         await Task.WhenAll(receiving);
-    }
-
-    /// <summary>
-    /// The same traffic as <see cref="ActivityAsync"/>, on the echo floor: every connection sends the bytes of the
-    /// two publishes and of the PUBREL and gets each back; then every connection, all at the same time, sends ten
-    /// messages of the size of the burst's and gets each back. So the echo floor writes what MqttWire writes in
-    /// the burst, and reads at least as much.
-    /// </summary>
-    /// <returns>
-    /// A task that completes when every message has come back.
-    /// </returns>
-    public async Task EchoActivityAsync()
-    {
-        await ForEachAsync(static async (connection, cancellationToken) =>
-        {
-            await connection.EchoAsync(s_publishQoS0, cancellationToken);
-            await connection.EchoAsync(s_publishQoS2, cancellationToken);
-            await connection.EchoAsync(s_pubRel, cancellationToken);
-        });
-
-        using CancellationTokenSource limit = new(s_stepLimit + s_stepLimit);
-        Task[] echoing = new Task[_connections.Count];
-        for (int i = 0; i < echoing.Length; i++)
-        {
-            echoing[i] = _connections[i].EchoBurstAsync(ServerRole.BurstMessages, limit.Token);
-        }
-
-        await Task.WhenAll(echoing);
     }
 
     /// <summary>
@@ -452,67 +421,6 @@ internal sealed class IdleClients(Uri endpoint, EndpointKind kind) : IAsyncDispo
                 pubAck[2] = span[identifier];
                 pubAck[3] = span[identifier + 1];
                 await SendAsync(pubAck, cancellationToken);
-            }
-        }
-
-        /// <summary>
-        /// Sends one message to the echo floor and reads it back.
-        /// </summary>
-        /// <param name="message">
-        /// The message, smaller than the buffer.
-        /// </param>
-        /// <param name="cancellationToken">
-        /// Ends the wait.
-        /// </param>
-        /// <returns>
-        /// A task that completes when the whole message has come back.
-        /// </returns>
-        /// <exception cref="InvalidOperationException">
-        /// The server closed the connection, or sent back another number of bytes.
-        /// </exception>
-        public async Task EchoAsync(ReadOnlyMemory<byte> message, CancellationToken cancellationToken)
-        {
-            await SendAsync(message, cancellationToken);
-            int read = 0;
-            while (true)
-            {
-                ValueWebSocketReceiveResult received = await socket.ReceiveAsync(_buffer.AsMemory(read), cancellationToken);
-                if (received.MessageType == WebSocketMessageType.Close)
-                {
-                    throw new InvalidOperationException("The echo floor closed a connection.");
-                }
-
-                read += received.Count;
-                if (received.EndOfMessage)
-                {
-                    break;
-                }
-            }
-
-            if (read != message.Length)
-            {
-                throw new InvalidOperationException($"The echo floor sent {read} bytes back for {message.Length}.");
-            }
-        }
-
-        /// <summary>
-        /// Sends the echo floor as many messages as a burst has, each of the size of one of its publishes, and
-        /// reads each back.
-        /// </summary>
-        /// <param name="messages">
-        /// How many messages.
-        /// </param>
-        /// <param name="cancellationToken">
-        /// Ends the wait.
-        /// </param>
-        /// <returns>
-        /// A task that completes when the last message has come back.
-        /// </returns>
-        public async Task EchoBurstAsync(int messages, CancellationToken cancellationToken)
-        {
-            for (int i = 0; i < messages; i++)
-            {
-                await EchoAsync(s_echoBurstMessage, cancellationToken);
             }
         }
 

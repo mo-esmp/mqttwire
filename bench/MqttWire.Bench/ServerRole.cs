@@ -1,4 +1,5 @@
 ﻿using System.Buffers;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
@@ -24,10 +25,11 @@ internal static class ServerRole
     public const string FloorPath = "/floor";
 
     /// <summary>
-    /// The path of the echo floor: a bare WebSocket endpoint like the floor that sends every message it receives
-    /// back, so that it can be measured after the same traffic as MqttWire.
+    /// The path of the traffic floor: a bare WebSocket endpoint like the floor that plays MqttWire's side of the
+    /// benchmark's activity from fixed bytes, so that it can be measured after the same traffic in the same
+    /// directions.
     /// </summary>
-    public const string EchoPath = "/echo";
+    public const string TrafficPath = "/traffic";
 
     /// <summary>
     /// The path of MqttWire's endpoint, with <see cref="NothingHandler"/> behind it.
@@ -51,13 +53,37 @@ internal static class ServerRole
     private const int FloorBufferBytes = 256;
 
     /// <summary>
-    /// The size of the buffer the echo floor reads a message into, which holds every message of the benchmark
-    /// whole.
+    /// The size of the buffer the traffic floor reads a message into, which holds every message the benchmark's
+    /// clients send whole.
     /// </summary>
-    private const int EchoBufferBytes = 512;
+    private const int TrafficBufferBytes = 256;
 
     /// <summary>
-    /// The number of WebSockets open on the floor and echo endpoints.
+    /// The four bytes of a PUBREC for the packet identifier 1, which the traffic floor answers a publish at QoS 2
+    /// with, as MqttWire does.
+    /// </summary>
+    private static readonly byte[] s_pubRec = [0x50, 0x02, 0x00, 0x01];
+
+    /// <summary>
+    /// The four bytes of a PUBCOMP for the packet identifier 1, which the traffic floor answers a PUBREL with.
+    /// </summary>
+    private static readonly byte[] s_pubComp = [0x70, 0x02, 0x00, 0x01];
+
+    /// <summary>
+    /// The packets of a burst as MqttWire writes them, byte for byte: ten publishes at QoS 1 to the topic
+    /// <c>burst</c>, with the packet identifiers 1 to 10 and <see cref="BurstPayloadBytes"/> bytes of payload, 269
+    /// bytes each. Shared by every connection of the traffic floor.
+    /// </summary>
+    private static readonly byte[][] s_burstPackets = CreateBurstPackets();
+
+    /// <summary>
+    /// The WebSockets open on the traffic floor, so that a burst can be sent to each. The floor keeps no such
+    /// table; what it costs shows in the traffic floor's idle figure.
+    /// </summary>
+    private static readonly ConcurrentDictionary<WebSocket, bool> s_trafficSockets = new();
+
+    /// <summary>
+    /// The number of WebSockets open on the floor and the traffic floor.
     /// </summary>
     private static int s_floorConnections;
 
@@ -91,12 +117,13 @@ internal static class ServerRole
         WebApplication app = builder.Build();
         app.UseWebSockets();
         app.Map(FloorPath, HoldFloorConnectionAsync);
-        app.Map(EchoPath, HoldEchoConnectionAsync);
+        app.Map(TrafficPath, HoldTrafficConnectionAsync);
         app.MapMqttWire(MqttPath);
         app.MapGet("/connections", (MqttWireServer server) => CountConnections(server));
         app.MapGet("/sweep", (MqttWireServer server) => GetLastSweepMicroseconds(server));
         app.MapGet("/measure", (MqttWireServer server) => Measure(server));
         app.MapPost("/burst", (int count, MqttWireServer server) => Burst(count, server));
+        app.MapPost("/traffic-burst", TrafficBurstAsync);
 
         await app.StartAsync();
         IServerAddressesFeature? addresses = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>();
@@ -170,11 +197,19 @@ internal static class ServerRole
     }
 
     /// <summary>
-    /// The echo floor: a bare WebSocket endpoint, accepted and parked as the floor is, that sends every message
-    /// it receives back. A message is read into a rented buffer, which goes back before the next wait, so an
+    /// The traffic floor: a bare WebSocket endpoint, accepted and parked as the floor is, that plays MqttWire's
+    /// side of the benchmark's activity without any MQTT code. It answers a message that starts with the first
+    /// byte of a publish at QoS 2 with the four bytes of a PUBREC, and one that starts with the first byte of a
+    /// PUBREL with the four bytes of a PUBCOMP; everything else it reads and drops, as MqttWire reads a publish
+    /// at QoS 0 and a PUBACK. A message is read into a rented buffer, which goes back before the next wait, so an
     /// idle connection holds no buffer here either. What this endpoint keeps after traffic is what ASP.NET Core
-    /// and .NET's WebSocket keep, with no MQTT code involved.
+    /// and .NET's WebSocket keep.
     /// </summary>
+    /// <remarks>
+    /// The answers are written from here and the burst from <see cref="TrafficBurstAsync"/>, and a WebSocket
+    /// takes one write at a time. The benchmark never has both at once: its clients have their answers before the
+    /// burst is asked for, and a PUBACK gets no answer.
+    /// </remarks>
     /// <param name="context">
     /// The request.
     /// </param>
@@ -182,7 +217,7 @@ internal static class ServerRole
     /// A task that completes when the WebSocket has ended; a request that is not a WebSocket asking for
     /// <c>mqtt</c> is answered with 400 at once.
     /// </returns>
-    private static async Task HoldEchoConnectionAsync(HttpContext context)
+    private static async Task HoldTrafficConnectionAsync(HttpContext context)
     {
         if (!context.WebSockets.IsWebSocketRequest || !context.WebSockets.WebSocketRequestedProtocols.Contains("mqtt"))
         {
@@ -196,6 +231,7 @@ internal static class ServerRole
             KeepAliveInterval = TimeSpan.Zero,
         });
         Interlocked.Increment(ref s_floorConnections);
+        s_trafficSockets.TryAdd(socket, value: true);
         try
         {
             while (true)
@@ -207,23 +243,27 @@ internal static class ServerRole
                     return;
                 }
 
-                byte[] buffer = ArrayPool<byte>.Shared.Rent(EchoBufferBytes);
+                byte[] buffer = ArrayPool<byte>.Shared.Rent(TrafficBufferBytes);
                 try
                 {
-                    ValueWebSocketReceiveResult received;
-                    do
+                    ValueWebSocketReceiveResult received = await socket.ReceiveAsync(buffer.AsMemory(0, TrafficBufferBytes), context.RequestAborted);
+                    if (received.MessageType == WebSocketMessageType.Close)
                     {
-                        received = await socket.ReceiveAsync(buffer.AsMemory(0, EchoBufferBytes), context.RequestAborted);
-                        if (received.MessageType == WebSocketMessageType.Close)
-                        {
-                            await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, statusDescription: null, context.RequestAborted);
-                            return;
-                        }
-
-                        await socket.SendAsync(buffer.AsMemory(0, received.Count), WebSocketMessageType.Binary,
-                            received.EndOfMessage, context.RequestAborted);
+                        await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, statusDescription: null, context.RequestAborted);
+                        return;
                     }
-                    while (!received.EndOfMessage);
+
+                    // The first byte is all that is looked at: 0x34 is a publish at QoS 2, 0x62 a PUBREL.
+                    byte[]? answer = received.Count == 0 ? null : buffer[0] switch
+                    {
+                        0x34 => s_pubRec,
+                        0x62 => s_pubComp,
+                        _ => null,
+                    };
+                    if (answer is not null)
+                    {
+                        await socket.SendAsync(answer, WebSocketMessageType.Binary, endOfMessage: true, context.RequestAborted);
+                    }
                 }
                 finally
                 {
@@ -237,8 +277,74 @@ internal static class ServerRole
         }
         finally
         {
+            s_trafficSockets.TryRemove(socket, out _);
             Interlocked.Decrement(ref s_floorConnections);
         }
+    }
+
+    /// <summary>
+    /// Sends every connection of the traffic floor a burst, as MqttWire's <c>/burst</c> does for its connections:
+    /// the same ten packets, started for every connection before any is awaited, one write at a time on each
+    /// connection.
+    /// </summary>
+    /// <returns>
+    /// How many messages were sent: ten for every connection.
+    /// </returns>
+    private static async Task<int> TrafficBurstAsync()
+    {
+        WebSocket[] sockets = [.. s_trafficSockets.Keys];
+        Task[] sending = new Task[sockets.Length];
+        for (int i = 0; i < sockets.Length; i++)
+        {
+            sending[i] = SendBurstAsync(sockets[i]);
+        }
+
+        await Task.WhenAll(sending);
+        return sockets.Length * BurstMessages;
+    }
+
+    /// <summary>
+    /// Sends one connection of the traffic floor the packets of a burst, one after the other.
+    /// </summary>
+    /// <param name="socket">
+    /// The connection's WebSocket.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the last packet is written.
+    /// </returns>
+    private static async Task SendBurstAsync(WebSocket socket)
+    {
+        foreach (byte[] packet in s_burstPackets)
+        {
+            await socket.SendAsync(packet, WebSocketMessageType.Binary, endOfMessage: true, CancellationToken.None);
+        }
+    }
+
+    /// <summary>
+    /// Builds the packets of a burst: for each identifier from 1 to <see cref="BurstMessages"/>, a PUBLISH at QoS 1
+    /// to the topic <c>burst</c> with no properties and <see cref="BurstPayloadBytes"/> bytes of payload.
+    /// </summary>
+    /// <returns>
+    /// The packets, 269 bytes each: the first byte, a remaining length of 266 in two bytes, the topic with its
+    /// length (7), the identifier (2), the properties' length (1) and the payload (256).
+    /// </returns>
+    private static byte[][] CreateBurstPackets()
+    {
+        byte[][] packets = new byte[BurstMessages][];
+        for (int i = 0; i < BurstMessages; i++)
+        {
+            int identifier = i + 1;
+            packets[i] =
+            [
+                0x32, 0x8A, 0x02,
+                0x00, 0x05, (byte)'b', (byte)'u', (byte)'r', (byte)'s', (byte)'t',
+                (byte)(identifier >> 8), (byte)identifier,
+                0x00,
+                .. new byte[BurstPayloadBytes],
+            ];
+        }
+
+        return packets;
     }
 
     /// <summary>
@@ -248,7 +354,7 @@ internal static class ServerRole
     /// MqttWire's server.
     /// </param>
     /// <returns>
-    /// The WebSockets open on the floor and the echo floor plus the connections MqttWire counts.
+    /// The WebSockets open on the floor and the traffic floor plus the connections MqttWire counts.
     /// </returns>
     private static int CountConnections(MqttWireServer server) =>
         Volatile.Read(ref s_floorConnections) + server.ConnectionCount;

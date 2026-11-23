@@ -6,7 +6,7 @@ using System.Net.NetworkInformation;
 namespace MqttWire.Bench;
 
 /// <summary>
-/// The <c>run</c> role: for the floor, the echo floor and MqttWire, at a small and a large connection count, it starts a
+/// The <c>run</c> role: for the floor, the traffic floor and MqttWire, at a small and a large connection count, it starts a
 /// fresh <c>server</c> process, opens the connections from this process, and reads the server's own measurement
 /// in each state. Then it prints the report of <see cref="Figures"/>.
 /// </summary>
@@ -44,7 +44,7 @@ internal static class RunRole
     /// The small connection count.
     /// </param>
     /// <param name="largeCount">
-    /// The large connection count, which design 6.14 wants at least four times the small one.
+    /// The large connection count, at least four times the small one (design 6.14); a run with less is refused.
     /// </param>
     /// <param name="tls">
     /// Whether the servers serve TLS.
@@ -56,13 +56,18 @@ internal static class RunRole
     /// figures of the later ones.
     /// </param>
     /// <returns>
-    /// 0 when the run ended; 1 when the counts give no slope.
+    /// 0 when the run ended with a verdict, met or not; 1 when the counts are not ones a verdict can rest on, or
+    /// the run is inconclusive because the floor or MqttWire's idle state was measured while its heap was still
+    /// moving.
     /// </returns>
     public static async Task<int> RunAsync(int smallCount, int largeCount, bool tls, string? dumps)
     {
-        if (smallCount <= 0 || largeCount <= smallCount)
+        // 64-bit, so that four times a large small count cannot wrap around.
+        if (smallCount <= 0 || largeCount < 4L * smallCount)
         {
-            Console.Error.WriteLine("The large count must be above the small count, and both above 0.");
+            Console.Error.WriteLine(
+                "The small count must be above 0 and the large count at least four times the small one (design 6.14): "
+                + "a slope between two counts that are close divides the difference of two separate heaps by too little.");
             return 1;
         }
 
@@ -76,30 +81,36 @@ internal static class RunRole
 
         Measurement floorSmall = (await MeasureTargetAsync(ServerRole.FloorPath, smallCount, tls, dumps: null))[0];
         Measurement floorLarge = (await MeasureTargetAsync(ServerRole.FloorPath, largeCount, tls, dumps: null))[0];
-        Measurement[] echoSmall = await MeasureTargetAsync(ServerRole.EchoPath, smallCount, tls, dumps: null);
-        Measurement[] echoLarge = await MeasureTargetAsync(ServerRole.EchoPath, largeCount, tls, dumps: null);
+        Measurement[] trafficSmall = await MeasureTargetAsync(ServerRole.TrafficPath, smallCount, tls, dumps: null);
+        Measurement[] trafficLarge = await MeasureTargetAsync(ServerRole.TrafficPath, largeCount, tls, dumps: null);
         Measurement[] small = await MeasureTargetAsync(ServerRole.MqttPath, smallCount, tls, dumps);
         Measurement[] large = await MeasureTargetAsync(ServerRole.MqttPath, largeCount, tls, dumps);
 
         string report = Figures.Report(smallCount, largeCount,
             new State("Floor, idle", floorSmall, floorLarge),
-            new State("Echo floor, idle", echoSmall[0], echoLarge[0]),
-            new State("Echo floor, after activity", echoSmall[1], echoLarge[1]),
+            new State("Traffic floor, idle", trafficSmall[0], trafficLarge[0]),
+            new State("Traffic floor, after activity", trafficSmall[1], trafficLarge[1]),
             new State("1. MqttWire, idle", small[0], large[0]),
             new State("2. MqttWire, after activity", small[1], large[1]),
             new State("3. MqttWire, after churn", small[2], large[2]),
-            out bool met);
+            out Verdict verdict);
         Console.WriteLine();
         Console.WriteLine(report);
-        Log($"Done in {watch.Elapsed.TotalSeconds:N0} s. For an idle connection the target is {(met ? "met" : "NOT met")} in this run.");
-        return 0;
+        string outcome = verdict switch
+        {
+            Verdict.Met => "the target is met",
+            Verdict.NotMet => "the target is NOT met",
+            _ => "this run is INCONCLUSIVE: a heap was still moving when it was measured",
+        };
+        Log($"Done in {watch.Elapsed.TotalSeconds:N0} s. For an idle connection {outcome}.");
+        return verdict == Verdict.Inconclusive ? 1 : 0;
     }
 
     /// <summary>
     /// Measures one endpoint at one connection count, against a server process of its own.
     /// </summary>
     /// <param name="path">
-    /// The endpoint's path: the floor's, the echo floor's or MqttWire's.
+    /// The endpoint's path: the floor's, the traffic floor's or MqttWire's.
     /// </param>
     /// <param name="count">
     /// How many connections to hold.
@@ -112,7 +123,7 @@ internal static class RunRole
     /// <see langword="null"/> for none.
     /// </param>
     /// <returns>
-    /// For the floor, one measurement: idle. For the echo floor, two: idle and after activity. For MqttWire,
+    /// For the floor, one measurement: idle. For the traffic floor, two: idle and after activity. For MqttWire,
     /// three: idle, after activity, and after churn.
     /// </returns>
     /// <exception cref="InvalidOperationException">
@@ -124,13 +135,13 @@ internal static class RunRole
         EndpointKind kind = path switch
         {
             ServerRole.MqttPath => EndpointKind.Mqtt,
-            ServerRole.EchoPath => EndpointKind.Echo,
+            ServerRole.TrafficPath => EndpointKind.Traffic,
             _ => EndpointKind.Floor,
         };
         string target = kind switch
         {
             EndpointKind.Mqtt => "MqttWire",
-            EndpointKind.Echo => "the echo floor",
+            EndpointKind.Traffic => "the traffic floor",
             _ => "the floor",
         };
         await WaitForPortsAsync(count);
@@ -147,9 +158,14 @@ internal static class RunRole
             Log($"{target}, {count:N0}: connected.");
             List<Measurement> measurements = [await MeasureAsync(http, clients, count, $"{target}, {count:N0}, idle")];
             await DumpAsync(server, dumps, string.Create(CultureInfo.InvariantCulture, $"idle-{count}"));
-            if (kind == EndpointKind.Echo)
+            if (kind == EndpointKind.Traffic)
             {
-                await clients.EchoActivityAsync();
+                await clients.ActivityAsync(async _ =>
+                {
+                    using HttpResponseMessage response = await http.PostAsync("/traffic-burst", content: null);
+                    response.EnsureSuccessStatusCode();
+                    return await response.Content.ReadFromJsonAsync<int>();
+                });
                 measurements.Add(await MeasureAsync(http, clients, count, $"{target}, {count:N0}, after activity"));
             }
 
@@ -236,7 +252,7 @@ internal static class RunRole
             }
         }
 
-        previous = previous with { LastSweepMicroseconds = sweepMicroseconds };
+        previous = previous with { LastSweepMicroseconds = sweepMicroseconds, Settled = settled };
         if (previous.Connections != count)
         {
             throw new InvalidOperationException($"{what}: the server holds {previous.Connections} connections, not {count}.");
