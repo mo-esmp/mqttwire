@@ -17,7 +17,8 @@ internal interface IPoolCounts
     int FaultyReturns { get; }
 
     /// <summary>
-    /// Gets the largest minimum length any rent asked for; 0 before the first rent.
+    /// Gets the largest minimum length any rent asked for; 0 before the first rent. It is what the renter asked
+    /// for, not the length of the array it was handed, which a pool may round up.
     /// </summary>
     int LargestRent { get; }
 }

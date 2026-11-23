@@ -811,17 +811,27 @@ A message for a connection that is larger than what that connection announced ca
 it; dropping it silently could leave the client waiting for ever, so `TrySend` says "too large"
 and the connection is closed with `0x95`.
 
-**Worst case held for one connection** (with the defaults):
+**Worst case held for one connection** (with the defaults).
 
-| What | Bound |
-|---|---|
-| Before CONNECT is complete | one read buffer of at most 16 KB, for at most 10 s; when packets came behind the CONNECT in it, the same buffer through Authenticating, for at most 10 s more |
-| The request given to `OnConnectAsync` | what a CONNECT of at most 16 KB decodes to: the client id, the user name, the password and the user properties as strings and objects of their own, about 150 KB when the CONNECT is nothing but short user properties; for the authentication deadline (10 s), longer only while a host that ignores its token keeps the request |
-| Read buffer while a packet is arriving | `MaxPublishPayloadBytes` + 5 KiB, for at most 10 s without a complete packet |
-| On the way out | `MaxOutgoingBytes` (1 MiB) of topics, payloads and waiting control packets, plus one encoding buffer of at most 64 KB |
-| QoS exchange records | 256 for what the client sends, 256 for what the server sends, a few bytes each |
-| Waiting control packets | 1,024 and 64 KB, counted in `MaxOutgoingBytes` |
-| How long a stalled connection holds any of it | the write deadline (15 s) |
+**A limit and the memory held for it are two numbers.** The limits of this section are sizes
+the server asks for or counts. A buffer comes from the shared array pool, and that pool hands
+out an array of the next power of two: asked for 70,660 bytes, it hands out 131,072 (.NET 10).
+So what is held for a pooled buffer is up to twice the size asked for, and exactly that size
+only where it is a power of two already (4 KiB, 16 KiB, 64 KiB). And a buffer that grows rents
+its new array before it returns the old one, so for the moment of the copy both are held. The
+table states the two apart. The tests assert both: the test pool's `LargestRent` is the size
+asked of the pool, not the length of the array; `LargestArray` is that length, and
+`PeakBytesOutstanding` the most that was held at one moment, a growth included.
+
+| What | Logical limit: what is asked for or counted | Held in memory |
+|---|---|---|
+| Before CONNECT is complete | one read buffer: 4,096 bytes for the first read, then the CONNECT's own length, at most 16,384; for at most 10 s; when packets came behind the CONNECT in it, the same buffer through Authenticating, for at most 10 s more | an array of 4,096 bytes, then one of the next power of two of the CONNECT's length, 8,192 or 16,384. The buffer grows once, and while it does both arrays are held: at most 4,096 + 16,384 = 20,480 bytes |
+| The request given to `OnConnectAsync` | what a CONNECT of at most 16,384 bytes decodes to: the client id, the user name, the password and the user properties; for the authentication deadline (10 s), longer only while a host that ignores its token keeps the request | strings and objects of their own on the heap, not pooled: about 150 KB when the CONNECT is nothing but short user properties |
+| Read buffer while a packet is arriving | 4,096 bytes for the first read, then the packet's own length: for a PUBLISH at most `MaxPublishPayloadBytes` + 5 KiB and its fixed header (70,660 bytes), for any other packet at most 16,384; for at most 10 s without a complete packet. A PUBLISH that is skipped passes through the buffer as it is, which does not grow for it | the next power of two: an array of 131,072 bytes for the largest PUBLISH, and in general up to twice the size asked for (a payload limit of 16 MiB reads into an array of 32 MiB). While the buffer grows, its old array is held too: 4,096 + 131,072 bytes, and at the very most 65,536 + 131,072 = 196,608, when a packet of more than 32,768 bytes was read just before the largest in the same read |
+| On the way out | `MaxOutgoingBytes` (1 MiB): the topic and the payload of every delivery taken and not yet written, and the waiting control packets; plus one encoding buffer, asked for at the size of what it carries: a whole PUBLISH of at most 16,384 bytes, or the header of a larger one, at most 65,536 | the topics and payloads are the host's memory, referenced and never copied into a pool: held as the host allocated them, once however many deliveries share them, though counted for each. The encoding buffer: the next power of two, at most 65,536 bytes, which is one. Not counted: the slots of the queue of waiting deliveries, 32 bytes each, in a ring that doubles to the next power of two of what waits: 1,024 slots, 32 KiB, for 1,000 messages |
+| QoS exchange records | 256 for what the client sends, 256 for what the server sends | 16 bytes each, in two arrays that double up to 256 records: at most 2 times 4,096 bytes, in an object pooled per server |
+| Waiting control packets | 1,024 packets and 65,536 bytes, counted in `MaxOutgoingBytes` | one control buffer: an array of the next power of two of what first waits, doubled as more waits, at most 65,536 bytes; while it grows, the old array too, at most 32,768 + 65,536. The buffer an answer is encoded into before it is added (at most 5,465 bytes, an UNSUBACK for as many filters as an UNSUBSCRIBE of 16,384 bytes holds, in an array of 8,192) and the one for the reason codes of a SUBSCRIBE of more than 256 filters (an array of 4,096 at most) are held for that step only |
+| How long a stalled connection holds any of it | the write deadline (15 s) | |
 
 What the host holds for a connection (its state, anything it queued from `OnPublish`) is the
 host's to bound.
@@ -1544,6 +1554,12 @@ the owner there:
     1,024 retained, not by an `async` method: a pending write, and each pending piece of a
     large PUBLISH, used to allocate a state machine and a task. Its continuation runs without
     the execution context of the caller that started the write (6.6).
+48. The table of the worst case held for one connection states, for each pooled buffer, the
+    size asked for and the capacity held apart: the shared pool hands out the next power of
+    two, and a buffer that grows holds two arrays while it copies. The rows used to give the
+    logical limits only. Nothing in the server changed for it; the test pool records the
+    longest array and the most bytes out at one moment, and the tests assert the table's
+    numbers (6.6).
 
 ## 11. Left to the builder
 

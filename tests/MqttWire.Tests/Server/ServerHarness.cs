@@ -1,5 +1,6 @@
 ﻿using System.Buffers;
 using System.Net;
+using System.Numerics;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Time.Testing;
 using MqttWire.Codec;
@@ -307,7 +308,10 @@ internal sealed class ServerHarness
     /// <summary>
     /// Asserts what must hold between any two steps of a test (design 6.13 item 5): no buffer was returned twice or
     /// returned that was not rented, no rent was larger than the largest buffer the server needs (64 KiB, or a whole
-    /// PUBLISH of the first band: the payload limit, its 5 KiB of room and a fixed header of at most 5 bytes), every
+    /// PUBLISH of the first band: the payload limit, its 5 KiB of room and a fixed header of at most 5 bytes), and,
+    /// when the server rents through a <see cref="CountingPool"/>, which hands out what the shared pool does, no
+    /// array was longer than the next power of two of that size, the capacity the design's table of the worst case
+    /// states beside each logical limit (131,072 bytes with the default payload limit), every
     /// connection's counts are within the limits of <see cref="ServerLimits"/> and the options (the exchange records,
     /// the count against the receive maximum, the deliveries in the client's window, at most the window the test
     /// computed from the CONNECT it sent, the waiting deliveries, the waiting control packets and the bytes on the way
@@ -326,8 +330,14 @@ internal sealed class ServerHarness
         _linkChecks.OverlappingWrites.ShouldBe(0);
         _linkChecks.FurtherWritesAfterAbort.ShouldBe(0);
         MqttWireServerOptions options = Server.Options;
-        Counts.LargestRent.ShouldBeLessThanOrEqualTo(Math.Max(ServerLimits.MaxEncodingBufferBytes,
-            options.MaxPublishPayloadBytes + ServerLimits.PublishOverheadBytes + 5));
+        int largestRent = Math.Max(ServerLimits.MaxEncodingBufferBytes,
+            options.MaxPublishPayloadBytes + ServerLimits.PublishOverheadBytes + 5);
+        Counts.LargestRent.ShouldBeLessThanOrEqualTo(largestRent);
+        if (Counts is CountingPool shared)
+        {
+            // What was asked for is not what is held: the shared pool hands out the next power of two.
+            shared.LargestArray.ShouldBeLessThanOrEqualTo((int)BitOperations.RoundUpToPowerOf2((uint)largestRent));
+        }
         int connections = 0;
         foreach (MqttWireConnection? connection in Server.Registry.Slots)
         {

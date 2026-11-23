@@ -25,6 +25,21 @@ internal sealed class CountingPool : ArrayPool<byte>, IPoolCounts
     private int _peakOutstanding;
 
     /// <summary>
+    /// The length of the longest array handed out; under <see cref="_gate"/>.
+    /// </summary>
+    private int _largestArray;
+
+    /// <summary>
+    /// The lengths of the arrays that are out now, added up; under <see cref="_gate"/>.
+    /// </summary>
+    private long _bytesOutstanding;
+
+    /// <summary>
+    /// The most <see cref="_bytesOutstanding"/> has been; under <see cref="_gate"/>.
+    /// </summary>
+    private long _peakBytesOutstanding;
+
+    /// <summary>
     /// Completes when no buffer is out, or <see langword="null"/> when no one waits; under <see cref="_gate"/>.
     /// </summary>
     private TaskCompletionSource? _noneOutstanding;
@@ -87,7 +102,9 @@ internal sealed class CountingPool : ArrayPool<byte>, IPoolCounts
     }
 
     /// <summary>
-    /// Gets the largest minimum length any rent asked for; 0 before the first rent.
+    /// Gets the largest minimum length any rent asked for; 0 before the first rent. It is the size the renter asked
+    /// for, a logical limit, not the length of the array it was handed, which the shared pool rounds up to the next
+    /// power of two: see <see cref="LargestArray"/>.
     /// </summary>
     public int LargestRent
     {
@@ -96,6 +113,37 @@ internal sealed class CountingPool : ArrayPool<byte>, IPoolCounts
             lock (_gate)
             {
                 return _largestRent;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the length of the longest array any rent was handed; 0 before the first rent. It is the memory really
+    /// held for the rent: the shared pool hands out the next power of two, so a rent of 70,660 bytes holds 131,072.
+    /// </summary>
+    public int LargestArray
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _largestArray;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the most bytes of arrays, by their lengths, that were rented and not yet returned at one moment since
+    /// the pool was created. It is counted at every rent, so it includes the moment at which a buffer that grows
+    /// holds its old array and its new one.
+    /// </summary>
+    public long PeakBytesOutstanding
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _peakBytesOutstanding;
             }
         }
     }
@@ -198,6 +246,9 @@ internal sealed class CountingPool : ArrayPool<byte>, IPoolCounts
             _rented.Add(array);
             _peakOutstanding = Math.Max(_peakOutstanding, _rented.Count);
             _largestRent = Math.Max(_largestRent, minimumLength);
+            _largestArray = Math.Max(_largestArray, array.Length);
+            _bytesOutstanding += array.Length;
+            _peakBytesOutstanding = Math.Max(_peakBytesOutstanding, _bytesOutstanding);
         }
 
         return array;
@@ -226,6 +277,7 @@ internal sealed class CountingPool : ArrayPool<byte>, IPoolCounts
                 throw new InvalidOperationException("The buffer was not rented from this pool, or was returned twice.");
             }
 
+            _bytesOutstanding -= array.Length;
             if (_rented.Count == 0 && _noneOutstanding is not null)
             {
                 _noneOutstanding.TrySetResult();
