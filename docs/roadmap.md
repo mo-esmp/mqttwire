@@ -10,7 +10,8 @@ first preview are proposals. The designs behind it:
 - [GrainWire on MqttWire](specs/2026-11-19-grainwire-on-mqttwire-design.md)
 
 Both designs were approved by the owner on 2026-11-19. Of the work below, GrainWire 0.1.0-preview.1
-exists, and steps 0 to 3 of the order of work are done. Step 4 is next. On 2026-11-21 the
+exists, and steps 0 to 4 of the order of work are done: MqttWire is finished for its first
+preview. Step 5, the first of GrainWire's, is next. On 2026-11-21 the
 owner decided that MqttWire is finished first, and GrainWire moves to it afterwards.
 
 ## MqttWire
@@ -19,7 +20,7 @@ MqttWire lives in this repository; its design moved here from GrainWire on 2026-
 
 | Release | What it delivers |
 |---|---|
-| **0.1.0-preview.1** | The codec (internal). The client: one connection per instance, any QoS. The opt-in reconnecting client. The connection server, driven by the host through a six-method handler and a state slot per connection. QoS 0, 1 and 2 inside a connection, in both directions. The two outgoing limits, the deadlines, and a bounded shutdown. Shared topics through the host, with the `GroupChat` sample. Interop tests with MQTTnet and MQTT.js. The benchmark, and the document that lists the part of MQTT 5 that is implemented. .NET 10 only. |
+| **0.1.0-preview.1** (delivered on 2026-11-23, published on nuget.org from the tag `v0.1.0-preview.1`; [what changed](../CHANGELOG.md)) | The codec (internal). The client: one connection per instance, any QoS. The opt-in reconnecting client. The connection server, driven by the host through a six-method handler and a state slot per connection. QoS 0, 1 and 2 inside a connection, in both directions. The two outgoing limits, the deadlines, and a bounded shutdown. Shared topics through the host, with the `GroupChat` sample. Interop tests with MQTTnet and MQTT.js. The benchmark, and the document that lists the part of MQTT 5 that is implemented. .NET 10 only. |
 | **Later, each needing its own design** | A routing helper: a topic table and fan-out on top of the handler. Retained messages, through the host or that helper. Metrics. Limits across connections. |
 | **Only if a measurement asks for it** | Own WebSocket framing, if what Kestrel and .NET's WebSocket cost per connection turns out to be most of the total. |
 | **After Unity 7** | A .NET Standard 2.1 build of the client. |
@@ -61,7 +62,7 @@ design.
 | 1 | MqttWire | The repository, the codec and its tests. Planned in [docs/plans/2026-11-20-step-1-codec-plan.md](plans/2026-11-20-step-1-codec-plan.md), tracked in #1. **Done**: merged in #2. |
 | 2 | MqttWire | The client and the reconnecting client. Planned in [docs/plans/2026-11-20-step-2-client-plan.md](plans/2026-11-20-step-2-client-plan.md), tracked in #3; the local package `0.1.0-dev.2` was the hand-over to GrainWire's move, now step 5. **Done**: merged in #4. |
 | 3 | MqttWire | The server, its tests, the interops with MQTTnet and MQTT.js, the `GroupChat` sample and the benchmark. Planned in [docs/plans/2026-11-22-step-3-server-plan.md](plans/2026-11-22-step-3-server-plan.md), tracked in #6. **Done** in two pull requests: the server, its tests and the .NET interops in #9; MQTT.js, the sample and the benchmark in #10. The benchmark measured 519 to 624 bytes above the floor for an idle connection; on 2026-11-23 the owner decided that the target of floor + 1 KB is judged on MqttWire's own state, which meets it before and after activity ([the report](bench/2026-11-idle-memory.md)). |
-| 4 | MqttWire | The preview package `0.1.0-preview.1` of both packages, with `docs/mqtt-support.md`. Tracked in #7. **Next.** |
-| 5 | GrainWire | `GrainWire.Client` moves to MqttWire's client. Tracked in [mo-esmp/grainwire#8](https://github.com/mo-esmp/grainwire/issues/8). |
+| 4 | MqttWire | The preview package `0.1.0-preview.1` of both packages, with [docs/mqtt-support.md](mqtt-support.md). Tracked in #7, which was its plan. **Done** in the pull request of the branch `feature/7-preview-package`: both packages packed, restored from a clean feed into a project outside the repository, and the `GroupChat` sample run on them. They are published on nuget.org from the tag `v0.1.0-preview.1`. |
+| 5 | GrainWire | `GrainWire.Client` moves to MqttWire's client, restored as the package `MqttWire` `0.1.0-preview.1` from nuget.org. Tracked in [mo-esmp/grainwire#8](https://github.com/mo-esmp/grainwire/issues/8). **Next.** |
 | 6 | GrainWire | The gateway becomes MqttWire's host, `ScriptedGateway` is rebuilt on MqttWire's server, and MQTTnet's server packages leave GrainWire. |
 | 7 | GrainWire | Measure again and write up. |
