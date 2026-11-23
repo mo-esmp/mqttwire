@@ -346,7 +346,10 @@ public sealed partial class MqttWireConnection
     /// <see cref="_remainingPayload"/>, to be written from the host's memory in pieces (plan decision 10).
     /// </summary>
     /// <param name="delivery">
-    /// The delivery, which <see cref="TakeDelivery"/> found small enough to send.
+    /// The delivery, which <see cref="TakeDelivery"/> found small enough to send. Its topic was validated when the
+    /// host created it (<see cref="MqttTopic.Create(string)"/>) and is the topic's own array, so the codec is told
+    /// not to scan it again (<see cref="PublishFields.IsTopicValidated"/>): the size and the encoding of a delivery
+    /// cost the same whatever the topic's length, apart from the copy of the topic itself.
     /// </param>
     /// <param name="packetIdentifier">
     /// The packet identifier its exchange record took, at QoS 1 and 2; 0 at QoS 0. DUP is never set: nothing is sent
@@ -367,7 +370,10 @@ public sealed partial class MqttWireConnection
     {
         PublishFields fields = new()
         {
-            Topic = delivery.Topic.Utf8, QoS = delivery.QoS, PacketIdentifier = packetIdentifier,
+            Topic = delivery.Topic.Utf8,
+            QoS = delivery.QoS,
+            PacketIdentifier = packetIdentifier,
+            IsTopicValidated = true,
         };
         int payloadLength = delivery.Payload.Length;
         int size = PublishCodec.GetSize(fields, payloadLength);

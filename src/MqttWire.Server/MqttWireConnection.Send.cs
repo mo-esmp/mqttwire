@@ -26,13 +26,6 @@ public sealed partial class MqttWireConnection
     private const int InlineWrites = 16;
 
     /// <summary>
-    /// The largest payload whose PUBLISH can be encoded whatever its topic: the header of every PUBLISH fits one
-    /// buffer of <see cref="ServerLimits.MaxEncodingBufferBytes"/> (plan decision 10), so the Remaining Length of a
-    /// payload up to this stays within what MQTT can carry.
-    /// </summary>
-    private const int MaxDeliveryPayloadBytes = VariableByteInteger.MaxValue - ServerLimits.MaxEncodingBufferBytes;
-
-    /// <summary>
     /// What the holder of the send path does next, decided in one hold of the lock by <see cref="TakeNextStep"/>.
     /// </summary>
     private enum SendStep : byte
@@ -66,11 +59,12 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Takes a message for the client or refuses it, and returns at once (design 6.6): a connection that is not
-    /// Active refuses it; a message too large for the client or for <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>
-    /// is refused and closes the connection with 0x95; with nothing in progress, nothing waiting and, at QoS 1 or 2,
-    /// room in the client's window, the message is written now, by this caller, a QoS 1 or 2 one with its packet
-    /// identifier and exchange record taken in the same hold; otherwise it waits behind the write in progress or for
-    /// the window, unless one more would pass <see cref="MqttWireServerOptions.MaxOutgoingMessages"/> or
+    /// Active refuses it; a message too large for the client, for <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>
+    /// or for MQTT itself (<see cref="IsTooLargeToSend"/>) is refused and closes the connection with 0x95; with
+    /// nothing in progress, nothing waiting and, at QoS 1 or 2, room in the client's window, the message is written
+    /// now, by this caller, a QoS 1 or 2 one with its packet identifier and exchange record taken in the same hold;
+    /// otherwise it waits behind the write in progress or for the window, unless one more would pass
+    /// <see cref="MqttWireServerOptions.MaxOutgoingMessages"/> or
     /// <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>, which evicts the connection with 0x97. Allocates nothing
     /// unless a write does not complete at once.
     /// </summary>
@@ -93,9 +87,8 @@ public sealed partial class MqttWireConnection
     {
         MqttWireServerOptions options = _server.Options;
         int payloadLength = payload.Length;
-        bool tooLarge = payloadLength > options.MaxOutgoingBytes || payloadLength > MaxDeliveryPayloadBytes
-                                                                 || GetDeliverySize(topic, payloadLength, qos) >
-                                                                 _clientMaxPacketSize;
+        bool tooLarge = IsTooLargeToSend(topic.Utf8.Length, payloadLength, qos, options.MaxOutgoingBytes,
+            _clientMaxPacketSize);
         long now = qos == MqttQoS.AtMostOnce ? 0 : _server.Time.GetTimestamp();
         PendingDelivery delivery = new(topic, payload, qos);
         MqttSendResult result;
@@ -244,29 +237,50 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Gets the size of the PUBLISH that carries a message at its QoS, the packet identifier of QoS 1 and 2
-    /// included. The caller has made sure the payload is not over <see cref="MaxDeliveryPayloadBytes"/>.
+    /// Tells whether a message is too large to send to a client, from its lengths alone and from the packet it
+    /// would really be: a payload over <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>; or a PUBLISH whose
+    /// Remaining Length, measured from the real length of its topic, its packet identifier at QoS 1 and 2 and its
+    /// property length (<see cref="PublishCodec.MeasureRemainingLength"/>), is over the 268,435,455 that MQTT can
+    /// carry; or whose whole packet, fixed header included, is over the Maximum Packet Size the client announced.
+    /// Nothing is assumed about the topic: a short one leaves the payload all the room MQTT has. It reads no byte of
+    /// the topic or the payload, costs the same whatever their lengths, and cannot overflow: the lengths are added
+    /// in 64 bits and compared before anything is narrowed.
     /// </summary>
-    /// <param name="topic">
-    /// The topic, not the default value.
+    /// <param name="topicLength">
+    /// The topic's length in UTF-8 bytes.
     /// </param>
     /// <param name="payloadLength">
     /// The payload's length.
     /// </param>
     /// <param name="qos">
-    /// The QoS, 0, 1 or 2.
+    /// The QoS to deliver with, 0, 1 or 2.
+    /// </param>
+    /// <param name="maxOutgoingBytes">
+    /// The server's <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>.
+    /// </param>
+    /// <param name="clientMaxPacketSize">
+    /// The Maximum Packet Size the client announced; <see cref="int.MaxValue"/> when it announced none.
     /// </param>
     /// <returns>
-    /// The size of the whole packet in bytes.
+    /// <see langword="true"/> when the message can never be sent to this client; <see langword="false"/> when its
+    /// PUBLISH can be encoded and the client accepts it.
     /// </returns>
-    private static int GetDeliverySize(MqttTopic topic, int payloadLength, MqttQoS qos)
+    internal static bool IsTooLargeToSend(int topicLength, int payloadLength, MqttQoS qos, int maxOutgoingBytes,
+        int clientMaxPacketSize)
     {
-        // Any identifier stands for the one the delivery will get: it has the same size.
-        PublishFields fields = new()
+        if (payloadLength > maxOutgoingBytes)
         {
-            Topic = topic.Utf8, QoS = qos, PacketIdentifier = qos == MqttQoS.AtMostOnce ? (ushort)0 : (ushort)1,
-        };
-        return PublishCodec.GetSize(fields, payloadLength);
+            return true;
+        }
+
+        long remainingLength = PublishCodec.MeasureRemainingLength(topicLength, qos, payloadLength);
+        if (remainingLength > VariableByteInteger.MaxValue)
+        {
+            return true;
+        }
+
+        // Within what MQTT carries, so it fits an int: the fixed header is the first byte and the length's own.
+        return PacketHeader.GetLength((int)remainingLength) + remainingLength > clientMaxPacketSize;
     }
 
     /// <summary>

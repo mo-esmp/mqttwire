@@ -85,13 +85,16 @@ public readonly struct MqttTopic
                 message: $"The topic is over {ServerLimits.MaxTopicBytes} UTF-8 bytes.", paramName: nameof(utf8Topic));
         }
 
-        if (!System.Text.Unicode.Utf8.IsValid(value: utf8Topic))
+        // The copy is what is checked, not the source: the caller may change the source at any moment, and the
+        // server tells the codec that the bytes it keeps need no second look (PublishFields.IsTopicValidated).
+        byte[] utf8 = utf8Topic.ToArray();
+        if (!System.Text.Unicode.Utf8.IsValid(value: utf8))
         {
             throw new ArgumentException(message: "The topic is not valid UTF-8.", paramName: nameof(utf8Topic));
         }
 
-        TopicChecks.CheckTopicName(topic: utf8Topic);
+        TopicChecks.CheckTopicName(topic: utf8);
 
-        return new MqttTopic(utf8: utf8Topic.ToArray());
+        return new MqttTopic(utf8: utf8);
     }
 }

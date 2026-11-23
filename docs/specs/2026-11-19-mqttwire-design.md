@@ -423,6 +423,16 @@ Internal to `MqttWire`. Reads and writes MQTT 5 packets; pure functions over spa
   buffer, and how long is it?" is a separate, cheap question from "decode it".
 - **Every property is validated, then honoured, ignored or refused as 6.7 says.**
 - **Malformed input is an error result, not an exception** (6.7 lists the cases).
+- **Encoding checks what it is given on every call, with one exception.** A field that cannot be
+  encoded is the caller's bug and throws. All of these checks cost the same whatever the input,
+  but one: a PUBLISH's topic is scanned for a wildcard and U+0000, which reads every byte of it,
+  on every sizing and every writing call. A caller may vouch for a topic it has validated once
+  and owns (a flag on the fields of the PUBLISH); the encoder then leaves that one scan out and
+  keeps every other check, an empty topic included. Only the server's deliveries do, for the
+  topic of an `MqttTopic` (6.6): a host that sends one message to a thousand connections would
+  otherwise pay for the scan three thousand times. The Remaining Length of a PUBLISH can also be
+  measured from the lengths alone, in 64 bits, so that a caller can refuse a packet too large to
+  exist without asking for a size, which throws.
 
 | Packet | Server reads | Server writes | Client reads | Client writes |
 |---|---|---|---|---|
@@ -743,6 +753,13 @@ window is stuck behind the delivery that waits for the window. So what waits is 
 - **A single message larger than `MaxOutgoingBytes` is never sent.** `TrySend` says "too
   large", and the connection is closed with `0x95`. What to log about it is the host's (it
   knows what the message was).
+- **Nor is one that MQTT cannot carry, and that is judged from the packet the message would
+  really be:** its Remaining Length, computed in 64 bits from the real length of the topic, the
+  packet identifier (at QoS 1 and 2), the one byte of the property length and the payload, must
+  be at most 268,435,455. No topic length is assumed: behind a one-byte topic at QoS 0 a payload
+  of 268,435,451 bytes is sendable, where `MaxOutgoingBytes` allows it. The same measurement,
+  with the fixed header, is what is held to the client's "maximum packet size" (below); it reads
+  neither the topic nor the payload.
 - A connection that would pass a limit is **evicted**: closed with `0x97` (quota exceeded).
 
 **What the limits promise, exactly.** A connection has waiting deliveries only while a write is
@@ -1477,6 +1494,13 @@ the owner there:
     growth returns, at the start of the buffer once the CONNECT is decoded, and in the whole
     array when the phase ends without an Active connection. The password used to stay in the
     array the pool handed to its next renter (6.8, rule 7).
+44. The codec does not scan the topic of a PUBLISH whose caller vouches for it, which only the
+    server's deliveries do, for the topic an `MqttTopic` validated; every other check, and every
+    other caller, is as before. It used to scan the topic three times per recipient (6.4).
+45. Whether a message is too large to send is decided from its real packet: the Remaining Length
+    from the real topic length, the identifier and the property length, at most 268,435,455. The
+    ceiling used to be 65,536 bytes below that whatever the topic, which refused payloads MQTT
+    can carry when `MaxOutgoingBytes` is 256 MiB (6.6).
 
 ## 11. Left to the builder
 

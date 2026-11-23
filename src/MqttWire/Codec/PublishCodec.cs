@@ -175,6 +175,29 @@ internal static class PublishCodec
     }
 
     /// <summary>
+    /// Measures the Remaining Length of the PUBLISH the encoder writes, from the lengths alone: the topic with its
+    /// two-byte length, the packet identifier at QoS 1 and 2, the one byte of the property length, and the payload.
+    /// It reads no byte and checks nothing, and it adds in 64 bits, so a caller can judge a packet that may be too
+    /// large to exist (over <see cref="VariableByteInteger.MaxValue"/>) before it asks for a size, which would
+    /// throw.
+    /// </summary>
+    /// <param name="topicLength">
+    /// The topic's length in UTF-8 bytes.
+    /// </param>
+    /// <param name="qos">
+    /// The QoS, which decides whether a packet identifier is carried.
+    /// </param>
+    /// <param name="payloadLength">
+    /// The payload size.
+    /// </param>
+    /// <returns>
+    /// The Remaining Length, which may be more than a packet can carry.
+    /// </returns>
+    public static long MeasureRemainingLength(int topicLength, MqttQoS qos, int payloadLength) =>
+        FieldSize.LengthPrefix + (long)topicLength + (qos == MqttQoS.AtMostOnce ? 0 : IdentifierSize)
+        + NoPropertiesSize + payloadLength;
+
+    /// <summary>
     /// Gets the size of everything before the payload: the fixed header, the topic, the packet identifier at QoS 1
     /// and 2, and the property length. The topic must be well-formed UTF-8, which is not checked (see
     /// <see cref="PublishFields.Topic"/>).
@@ -240,7 +263,9 @@ internal static class PublishCodec
     /// A caller bug, checked before the first byte is written so nothing is written: the destination is too small,
     /// the QoS is not 0, 1 or 2, the identifier is not 0 at QoS 0 and from 1 to 65,535 at QoS 1 and 2, DUP is set at
     /// QoS 0, the topic is empty, holds <c>+</c>, <c>#</c> or U+0000 or is over 65,535 bytes, the payload length is
-    /// negative, or the remaining length would pass <see cref="VariableByteInteger.MaxValue"/>.
+    /// negative, or the remaining length would pass <see cref="VariableByteInteger.MaxValue"/>. A topic the caller
+    /// vouches for (<see cref="PublishFields.IsTopicValidated"/>) is not scanned for <c>+</c>, <c>#</c> and U+0000;
+    /// everything else is checked all the same.
     /// </exception>
     public static int WriteHeader(Span<byte> destination, in PublishFields fields, int payloadLength)
     {
@@ -317,7 +342,10 @@ internal static class PublishCodec
     }
 
     /// <summary>
-    /// Checks the fields and measures the packet once, for the sizes and the writers to share.
+    /// Checks the fields and measures the packet once, for the sizes and the writers to share. Every check but one
+    /// costs the same whatever the topic: the scan for a wildcard and U+0000 reads every byte of it, and is left
+    /// out for a topic the caller vouches for (<see cref="PublishFields.IsTopicValidated"/>), which a server that
+    /// sizes and writes the same validated topic for every recipient would otherwise pay for on every call.
     /// </summary>
     /// <param name="fields">
     /// The fields to check.
@@ -365,12 +393,14 @@ internal static class PublishCodec
             length += IdentifierSize;
         }
 
-        // One scan for the wildcards and U+0000; well-formed UTF-8 is the caller's duty, asserted in debug builds.
-        if (!Topics.IsValidName(fields.Topic))
+        // One scan for the wildcards and U+0000, unless the caller vouches for the topic; an empty one is refused
+        // either way. Well-formed UTF-8 is the caller's duty, asserted in debug builds, as is what it vouched for.
+        if (fields.Topic.IsEmpty || (!fields.IsTopicValidated && !Topics.IsValidName(fields.Topic)))
         {
             CodecThrow.Invalid("The topic is empty or holds a wildcard or U+0000.", "Topic");
         }
 
+        Debug.Assert(Topics.IsValidName(fields.Topic), "The topic the caller vouched for holds a wildcard or U+0000.");
         Debug.Assert(Utf8.IsValid(fields.Topic), "The topic is not well-formed UTF-8.");
 
         // Summed in a long: the payload alone may be as large as int.MaxValue.

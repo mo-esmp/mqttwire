@@ -1,4 +1,5 @@
-﻿using System.Buffers.Binary;
+﻿using System.Buffers;
+using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using MqttWire.Server;
@@ -638,6 +639,138 @@ public sealed class SendTests
     }
 
     /// <summary>
+    /// Proves that "too large" is decided from the packet the message would really be: a PUBLISH whose Remaining
+    /// Length, computed from the real topic length, the packet identifier and the property length, is exactly the
+    /// 268,435,455 MQTT can carry is sendable, and one byte more is not. Decided on the sizing function itself, so
+    /// that no payload of 256 MiB is allocated.
+    /// </summary>
+    /// <param name="topicLength">
+    /// The topic's length in UTF-8 bytes.
+    /// </param>
+    /// <param name="qos">
+    /// The QoS, which decides whether the packet carries an identifier.
+    /// </param>
+    /// <param name="payloadLength">
+    /// The payload's length.
+    /// </param>
+    /// <param name="tooLarge">
+    /// Whether the message is too large to send.
+    /// </param>
+    [Theory]
+    [InlineData(1, MqttQoS.AtMostOnce, 268_435_451, false)]
+    [InlineData(1, MqttQoS.AtMostOnce, 268_435_452, true)]
+    [InlineData(1, MqttQoS.AtLeastOnce, 268_435_449, false)]
+    [InlineData(1, MqttQoS.AtLeastOnce, 268_435_450, true)]
+    [InlineData(65_526, MqttQoS.ExactlyOnce, 268_369_924, false)]
+    [InlineData(65_526, MqttQoS.ExactlyOnce, 268_369_925, true)]
+    [InlineData(65_526, MqttQoS.AtMostOnce, 268_369_926, false)]
+    [InlineData(65_526, MqttQoS.AtMostOnce, 268_369_927, true)]
+    [InlineData(1, MqttQoS.AtMostOnce, int.MaxValue, true)]
+    public void IsTooLargeToSend_RemainingLengthAtTheLargestMqttCarries_IsSendableAndOneMoreIsNot(int topicLength,
+        MqttQoS qos, int payloadLength, bool tooLarge)
+    {
+        // Arrange
+        const int NoLimit = int.MaxValue;
+
+        // Act
+        bool result = MqttWireConnection.IsTooLargeToSend(topicLength, payloadLength, qos,
+            maxOutgoingBytes: NoLimit, clientMaxPacketSize: NoLimit);
+
+        // Assert
+        result.ShouldBe(tooLarge);
+    }
+
+    /// <summary>
+    /// Proves the case of the review: with <see cref="MqttWireServerOptions.MaxOutgoingBytes"/> at 256 MiB, a
+    /// payload of 268,369,920 bytes behind the topic "t" at QoS 0, whose Remaining Length of 268,369,924 is within
+    /// what MQTT carries, is not too large; it used to be refused by a ceiling that assumed the longest topic.
+    /// </summary>
+    [Fact]
+    public void IsTooLargeToSend_PayloadOf268369920BytesBehindAOneByteTopic_IsSendable()
+    {
+        // Arrange
+        const int MaxOutgoingBytes = 256 * 1024 * 1024;
+        const int PayloadLength = 268_369_920;
+
+        // Act
+        bool result = MqttWireConnection.IsTooLargeToSend(topicLength: 1, PayloadLength, MqttQoS.AtMostOnce,
+            MaxOutgoingBytes, clientMaxPacketSize: int.MaxValue);
+
+        // Assert
+        result.ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// Proves that the sizing function holds a message to the client's Maximum Packet Size by the whole packet, its
+    /// fixed header included, and to <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>.
+    /// </summary>
+    /// <param name="payloadLength">
+    /// The payload's length, behind the topic "a/b" at QoS 0.
+    /// </param>
+    /// <param name="maxOutgoingBytes">
+    /// The limit of the options.
+    /// </param>
+    /// <param name="clientMaxPacketSize">
+    /// The Maximum Packet Size the client announced.
+    /// </param>
+    /// <param name="tooLarge">
+    /// Whether the message is too large to send.
+    /// </param>
+    [Theory]
+    [InlineData(4_087, 1_048_576, 4_096, false)]
+    [InlineData(4_088, 1_048_576, 4_096, true)]
+    [InlineData(121, 1_048_576, 129, false)]
+    [InlineData(122, 1_048_576, 129, true)]
+    [InlineData(65_536, 65_536, int.MaxValue, false)]
+    [InlineData(65_537, 65_536, int.MaxValue, true)]
+    public void IsTooLargeToSend_ClientsMaximumPacketSizeAndMaxOutgoingBytes_AreBothHeld(int payloadLength,
+        int maxOutgoingBytes, int clientMaxPacketSize, bool tooLarge)
+    {
+        // Arrange
+        const int TopicLength = 3;
+
+        // Act
+        bool result = MqttWireConnection.IsTooLargeToSend(TopicLength, payloadLength, MqttQoS.AtMostOnce,
+            maxOutgoingBytes, clientMaxPacketSize);
+
+        // Assert
+        result.ShouldBe(tooLarge);
+    }
+
+    /// <summary>
+    /// Proves the case of the review end to end, without the 256 MiB: a payload of 268,369,920 bytes, of which only
+    /// the length exists, behind the topic "t" at QoS 0 with <see cref="MqttWireServerOptions.MaxOutgoingBytes"/> at
+    /// 256 MiB is taken, and the header handed to the link carries the Remaining Length 268,369,924.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task TrySend_PayloadOf268369920BytesWithMaxOutgoingBytesOf256MiB_IsTaken()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create(static options => options.MaxOutgoingBytes = 256 * 1024 * 1024);
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        using LengthOnlyMemory payload = new();
+        connection.Link.HoldWrites();
+
+        // Act
+        MqttSendResult result = server.TrySend(MqttTopic.Create("t"), payload.Claim(268_369_920), MqttQoS.AtMostOnce);
+        byte[] header = connection.Link.HeldWriteBuffer.ToArray();
+        harness.AssertBounds();
+        connection.CompleteHeldWrites(new IOException("The socket was aborted."));
+        await connection.RunEnded();
+
+        // Assert: the Remaining Length 268,369,924 is 84 80 FC 7F as a variable byte integer.
+        result.ShouldBe(MqttSendResult.Taken);
+        header.ShouldBe(Hex.Parse("30 84 80 FC 7F 00 01 74 00"));
+        payload.Reads.ShouldBe(0);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves that <c>TrySend</c> says "not open" for a connection that is closing and for one that is closed, and
     /// that nothing is written.
     /// </summary>
@@ -1048,5 +1181,78 @@ public sealed class SendTests
         byte[] payload = new byte[200_000];
         server.TrySend(ServerHarness.Topic, payload, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
         return new WeakReference(payload);
+    }
+
+    /// <summary>
+    /// Memory of which only the length exists, for a test that sends a payload too large to allocate: the server may
+    /// measure and slice it, and hand it to a link that holds the write, but nothing may read it.
+    /// </summary>
+    private sealed class LengthOnlyMemory : MemoryManager<byte>
+    {
+        /// <summary>
+        /// Gets the number of times the bytes were asked for; every one of them threw.
+        /// </summary>
+        public int Reads { get; private set; }
+
+        /// <summary>
+        /// Gets memory of a length, with no bytes behind it.
+        /// </summary>
+        /// <param name="length">
+        /// The length the memory reports.
+        /// </param>
+        /// <returns>
+        /// The memory.
+        /// </returns>
+        public Memory<byte> Claim(int length) => CreateMemory(length);
+
+        /// <summary>
+        /// Counts the read and refuses it: there are no bytes.
+        /// </summary>
+        /// <returns>
+        /// Nothing.
+        /// </returns>
+        /// <exception cref="InvalidOperationException">
+        /// Always.
+        /// </exception>
+        public override Span<byte> GetSpan()
+        {
+            Reads++;
+            throw new InvalidOperationException("The memory has a length and no bytes.");
+        }
+
+        /// <summary>
+        /// Counts the read and refuses it, as <see cref="GetSpan"/> does.
+        /// </summary>
+        /// <param name="elementIndex">
+        /// Not used.
+        /// </param>
+        /// <returns>
+        /// Nothing.
+        /// </returns>
+        /// <exception cref="InvalidOperationException">
+        /// Always.
+        /// </exception>
+        public override MemoryHandle Pin(int elementIndex = 0)
+        {
+            Reads++;
+            throw new InvalidOperationException("The memory has a length and no bytes.");
+        }
+
+        /// <summary>
+        /// Does nothing: nothing was pinned.
+        /// </summary>
+        public override void Unpin()
+        {
+        }
+
+        /// <summary>
+        /// Does nothing: there is nothing to release.
+        /// </summary>
+        /// <param name="disposing">
+        /// Not used.
+        /// </param>
+        protected override void Dispose(bool disposing)
+        {
+        }
     }
 }

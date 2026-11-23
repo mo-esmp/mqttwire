@@ -106,6 +106,185 @@ public sealed class PublishCodecTests
     }
 
     /// <summary>
+    /// Proves that a topic the caller vouches for (<see cref="PublishFields.IsTopicValidated"/>), which the encoder
+    /// then does not scan, is sized and written exactly as the same topic checked on every call.
+    /// </summary>
+    /// <param name="qos">
+    /// The QoS of the packet.
+    /// </param>
+    /// <param name="topicLength">
+    /// The topic's length in bytes.
+    /// </param>
+    /// <param name="payloadLength">
+    /// The payload size.
+    /// </param>
+    [Theory]
+    [InlineData(MqttQoS.AtMostOnce, 1, 0)]
+    [InlineData(MqttQoS.AtMostOnce, 20, 64)]
+    [InlineData(MqttQoS.AtLeastOnce, 20, 64)]
+    [InlineData(MqttQoS.ExactlyOnce, 3, 121)]
+    [InlineData(MqttQoS.AtLeastOnce, 60_000, 64)]
+    [InlineData(MqttQoS.ExactlyOnce, 65_535, 70_000)]
+    public void Write_TopicTheCallerVouchesFor_GivesTheSameSizesAndBytesAsTheCheckedTopic(MqttQoS qos,
+        int topicLength, int payloadLength)
+    {
+        // Arrange
+        byte[] topic = TopicOf(topicLength);
+        byte[] payload = new byte[payloadLength];
+        new Random(11).NextBytes(payload);
+        ushort identifier = qos == MqttQoS.AtMostOnce ? (ushort)0 : (ushort)9;
+        PublishFields scanned = new() { Topic = topic, QoS = qos, PacketIdentifier = identifier };
+        PublishFields vouched = new()
+        {
+            Topic = topic, QoS = qos, PacketIdentifier = identifier, IsTopicValidated = true,
+        };
+        byte[] wholeScanned = new byte[PublishCodec.GetSize(scanned, payloadLength)];
+        byte[] headerScanned = new byte[PublishCodec.GetHeaderSize(scanned, payloadLength)];
+        PublishCodec.Write(wholeScanned, scanned, payload);
+        PublishCodec.WriteHeader(headerScanned, scanned, payloadLength);
+
+        // Act
+        int size = PublishCodec.GetSize(vouched, payloadLength);
+        int headerSize = PublishCodec.GetHeaderSize(vouched, payloadLength);
+        byte[] whole = new byte[size];
+        byte[] header = new byte[headerSize];
+        int wholeWritten = PublishCodec.Write(whole, vouched, payload);
+        int headerWritten = PublishCodec.WriteHeader(header, vouched, payloadLength);
+
+        // Assert
+        size.ShouldBe(wholeScanned.Length);
+        headerSize.ShouldBe(headerScanned.Length);
+        wholeWritten.ShouldBe(size);
+        headerWritten.ShouldBe(headerSize);
+        whole.AsSpan().SequenceEqual(wholeScanned).ShouldBeTrue();
+        header.AsSpan().SequenceEqual(headerScanned).ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// Proves that vouching for the topic leaves out the scan of the topic and nothing else: every fault that is
+    /// found without reading the topic's bytes still throws from every sizing and writing method, and nothing is
+    /// written.
+    /// </summary>
+    /// <param name="fault">
+    /// The fault: <c>"qos"</c>, <c>"identifier at QoS 0"</c>, <c>"no identifier"</c>, <c>"dup"</c>,
+    /// <c>"empty topic"</c>, <c>"long topic"</c>, <c>"negative payload"</c> or <c>"remaining length"</c>.
+    /// </param>
+    [Theory]
+    [InlineData("qos")]
+    [InlineData("identifier at QoS 0")]
+    [InlineData("no identifier")]
+    [InlineData("dup")]
+    [InlineData("empty topic")]
+    [InlineData("long topic")]
+    [InlineData("negative payload")]
+    [InlineData("remaining length")]
+    public void Write_TopicTheCallerVouchesForWithAnotherFault_StillThrowsWithoutWriting(string fault)
+    {
+        // Arrange
+        byte[] topic = fault switch
+        {
+            "empty topic" => [],
+            "long topic" => TopicOf(65_536),
+            _ => "t"u8.ToArray(),
+        };
+        MqttQoS qos = fault switch
+        {
+            "qos" => (MqttQoS)3,
+            "no identifier" => MqttQoS.AtLeastOnce,
+            _ => MqttQoS.AtMostOnce,
+        };
+        ushort identifier = fault is "identifier at QoS 0" or "qos" ? (ushort)7 : (ushort)0;
+        bool dup = fault == "dup";
+        int payloadLength = fault switch
+        {
+            "negative payload" => -1,
+            "remaining length" => 268_435_452,
+            _ => 0,
+        };
+        byte[] destination = new byte[70_000];
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() => PublishCodec.GetSize(Vouched(), payloadLength));
+        Should.Throw<ArgumentException>(() => PublishCodec.GetHeaderSize(Vouched(), payloadLength));
+        Should.Throw<ArgumentException>(() => PublishCodec.WriteHeader(destination, Vouched(), payloadLength));
+        if (payloadLength == 0)
+        {
+            Should.Throw<ArgumentException>(() => PublishCodec.Write(destination, Vouched(), []));
+        }
+
+        destination.AsSpan().IndexOfAnyExcept((byte)0).ShouldBe(-1);
+
+        PublishFields Vouched() => new()
+        {
+            Topic = topic, QoS = qos, PacketIdentifier = identifier, Dup = dup, IsTopicValidated = true,
+        };
+    }
+
+    /// <summary>
+    /// Proves that a destination too small for a vouched-for topic still throws and nothing is written.
+    /// </summary>
+    [Fact]
+    public void Write_TopicTheCallerVouchesForIntoADestinationTooSmall_ThrowsWithoutWriting()
+    {
+        // Arrange
+        byte[] topic = "t"u8.ToArray();
+        byte[] whole = new byte[5];
+        byte[] header = new byte[4];
+
+        // Act & Assert
+        Should.Throw<ArgumentException>(() =>
+            PublishCodec.Write(whole, new PublishFields { Topic = topic, IsTopicValidated = true }, "x"u8));
+        Should.Throw<ArgumentException>(() =>
+            PublishCodec.WriteHeader(header, new PublishFields { Topic = topic, IsTopicValidated = true }, 1));
+        whole.ShouldAllBe(b => b == 0);
+        header.ShouldAllBe(b => b == 0);
+    }
+
+    /// <summary>
+    /// Proves that the Remaining Length measured from the lengths alone is the one the sizes are built on, for a
+    /// packet that can exist, and that it is computed in 64 bits, so that lengths no packet can have do not wrap.
+    /// </summary>
+    /// <param name="qos">
+    /// The QoS of the packet.
+    /// </param>
+    /// <param name="topicLength">
+    /// The topic's length in bytes.
+    /// </param>
+    /// <param name="payloadLength">
+    /// The payload size.
+    /// </param>
+    /// <param name="expected">
+    /// The Remaining Length: two bytes of length and the topic, two of identifier at QoS 1 and 2, one of property
+    /// length, and the payload.
+    /// </param>
+    [Theory]
+    [InlineData(MqttQoS.AtMostOnce, 1, 0, 4L)]
+    [InlineData(MqttQoS.AtLeastOnce, 3, 121, 129L)]
+    [InlineData(MqttQoS.ExactlyOnce, 65_526, 10, 65_541L)]
+    [InlineData(MqttQoS.AtMostOnce, 1, 268_435_451, 268_435_455L)]
+    [InlineData(MqttQoS.AtMostOnce, 1, 268_435_452, 268_435_456L)]
+    [InlineData(MqttQoS.ExactlyOnce, 65_535, int.MaxValue, 2_147_549_187L)]
+    public void MeasureRemainingLength_FromTheLengthsAlone_IsWhatTheSizesAreBuiltOn(MqttQoS qos, int topicLength,
+        int payloadLength, long expected)
+    {
+        // Arrange
+        byte[] topic = TopicOf(topicLength);
+        ushort identifier = qos == MqttQoS.AtMostOnce ? (ushort)0 : (ushort)9;
+
+        // Act
+        long measured = PublishCodec.MeasureRemainingLength(topicLength, qos, payloadLength);
+
+        // Assert
+        measured.ShouldBe(expected);
+        if (measured <= VariableByteInteger.MaxValue)
+        {
+            PublishFields fields = new() { Topic = topic, QoS = qos, PacketIdentifier = identifier };
+            PublishCodec.GetSize(fields, payloadLength)
+                .ShouldBe(PacketHeader.GetLength((int)measured) + (int)measured);
+        }
+    }
+
+    /// <summary>
     /// Proves the fixed header grows from two to three bytes as the remaining length passes 127, and decoding
     /// still returns the payload.
     /// </summary>
@@ -680,5 +859,25 @@ public sealed class PublishCodecTests
         decoded.Retain.ShouldBeTrue();
         decoded.PacketIdentifier.ShouldBe((ushort)1);
         decoded.Payload.ToArray().ShouldBe("x"u8.ToArray());
+    }
+
+    /// <summary>
+    /// Builds a valid topic name of a length: levels of seven letters.
+    /// </summary>
+    /// <param name="length">
+    /// The topic's length in bytes, at least 1.
+    /// </param>
+    /// <returns>
+    /// The topic as UTF-8.
+    /// </returns>
+    private static byte[] TopicOf(int length)
+    {
+        byte[] topic = new byte[length];
+        for (int i = 0; i < topic.Length; i++)
+        {
+            topic[i] = i % 8 == 7 && i != topic.Length - 1 ? (byte)'/' : (byte)('a' + (i % 8));
+        }
+
+        return topic;
     }
 }

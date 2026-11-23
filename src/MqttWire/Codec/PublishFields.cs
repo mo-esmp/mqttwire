@@ -16,6 +16,17 @@ internal readonly ref struct PublishFields
     public ReadOnlySpan<byte> Topic { get; init; }
 
     /// <summary>
+    /// Whether the caller vouches that <see cref="Topic"/> holds no wildcard and no U+0000: it checked those very
+    /// bytes when it made them, owns them, and has not changed them since. The encoder then leaves out its scan of
+    /// the topic, the one check whose cost grows with the topic's length, which every sizing and writing call
+    /// otherwise repeats; a debug build still asserts it. Every check that reads no topic byte stays: an empty
+    /// topic, one over 65,535 bytes, the QoS, the identifier, DUP and the lengths still throw. The default is
+    /// <see langword="false"/>: the encoder scans the topic on every call. Only the server's deliveries set it,
+    /// for a topic its <c>MqttTopic</c> validated once.
+    /// </summary>
+    public bool IsTopicValidated { get; init; }
+
+    /// <summary>
     /// The quality of service; the default is QoS 0.
     /// </summary>
     public MqttQoS QoS { get; init; }
