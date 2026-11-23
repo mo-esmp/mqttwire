@@ -602,8 +602,9 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Acts on the two deadlines of reading for an Active connection: begins the close with 0x82
-    /// (<see cref="CloseCause.PartialPacketTimedOut"/>) when a packet has stayed incomplete for
-    /// <see cref="ServerLimits.PartialPacketDeadline"/> from its first byte, and with 0x8D
+    /// (<see cref="CloseCause.PartialPacketTimedOut"/>) when a read buffer has been held without a complete packet
+    /// for <see cref="ServerLimits.PartialPacketDeadline"/> (from its rent, or, for a packet that follows another in
+    /// the same read, from that read), and with 0x8D
     /// (<see cref="CloseCause.KeepAliveTimedOut"/>) when no complete packet has come for 1.5 times the
     /// keep-alive. A stamp the code that reads changes meanwhile is at worst one sweep old, so a close that races a
     /// packet just completed ends a connection that was a moment from its deadline anyway.

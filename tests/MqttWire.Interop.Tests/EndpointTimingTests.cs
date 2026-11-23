@@ -130,7 +130,11 @@ public sealed partial class EndpointTimingTests
         // Assert
         IReadOnlyList<LogRecorder.LogEntry> lines = host.Logs.Entries;
         lines.Count(static line => line.EventId.Id == ConnectTimedOutEvent).ShouldBeLessThanOrEqualTo(SilentSockets);
-        lines.Where(static line => line.Level >= LogLevel.Warning).ShouldBeEmpty();
+        // Only the server's own lines: the host records Kestrel's warnings too, and a slow runner draws one (a late
+        // heartbeat) with no fault of the server.
+        lines.Where(static line => line.Level >= LogLevel.Warning
+                && line.Category.StartsWith("MqttWire", StringComparison.Ordinal))
+            .ShouldBeEmpty();
         Volatile.Read(ref ended).ShouldBe(SilentSockets);
         later.StatusCode.ShouldBe(StatusCodes.Status101SwitchingProtocols);
     }

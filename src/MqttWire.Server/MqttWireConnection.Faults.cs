@@ -148,9 +148,10 @@ public sealed partial class MqttWireConnection
             secondary = thrown;
         }
 
-        // A link that cannot even be aborted: the sweep's close deadline is all that is left.
-        secondary ??= TryAbortLink();
-        return secondary;
+        // The abort is issued whether or not the close threw: a close that threw at its stamp has no close deadline
+        // for the sweep to act on. A link that cannot even be aborted is left to that deadline, where there is one.
+        Exception? abortFailure = TryAbortLink();
+        return secondary ?? abortFailure;
     }
 
     /// <summary>

@@ -288,6 +288,10 @@ public sealed class MqttWireServer
     /// then waits until no slot is taken, which is after every
     /// <see cref="IMqttWireHandler.OnClosed"/> has returned and every buffer is back; the sweep keeps running
     /// meanwhile and aborts every link still open at its close deadline, so the wait is bounded and never on a peer.
+    /// The one exception is a connection whose host has not returned from
+    /// <see cref="IMqttWireHandler.OnConnectAsync"/> one close deadline after its token was cancelled: the stop logs
+    /// it and no longer waits for it (<see cref="ConnectionRegistry.TryAbandon"/>), and that connection keeps its
+    /// slot, and a read buffer if it kept one behind its CONNECT, until the host's call returns.
     /// Last, it disposes the sweep's timer: a sweep already running finishes harmlessly, and none starts afterwards.
     /// It never blocks a thread: the walk runs on the calling thread, and the rest is a continuation of the wait.
     /// </summary>
