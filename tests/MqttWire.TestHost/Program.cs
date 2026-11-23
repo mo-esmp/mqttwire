@@ -7,8 +7,9 @@ namespace MqttWire.TestHost;
 
 /// <summary>
 /// The test host: MqttWire's server with <see cref="ExactTopicHandler"/> at <c>/mqtt</c>. Run as a program, it
-/// listens on the URLs given with <c>--urls</c>, takes <c>--max-publish-payload-bytes &lt;n&gt;</c>, and prints
-/// <c>LISTENING &lt;port&gt;</c> on standard output once Kestrel is listening. The tests that reference it as a library
+/// listens on the URLs given with <c>--urls</c>, takes <c>--max-publish-payload-bytes &lt;n&gt;</c>, prints
+/// <c>LISTENING &lt;port&gt;</c> on standard output once Kestrel is listening, and stops when it reads the line
+/// <c>STOP</c> on standard input. The tests that reference it as a library
 /// build the same application with <see cref="CreateBuilder"/> and <see cref="Configure"/>.
 /// </summary>
 public static class Program
@@ -23,6 +24,11 @@ public static class Program
     /// <c>--max-publish-payload-bytes &lt;n&gt;</c>.
     /// </summary>
     public const string MaxPublishPayloadBytesKey = "max-publish-payload-bytes";
+
+    /// <summary>
+    /// The line on standard input that stops the host when it runs as a program.
+    /// </summary>
+    public const string StopCommand = "STOP";
 
     /// <summary>
     /// Builds the application, starts it, prints <c>LISTENING &lt;port&gt;</c> with the port of the first address
@@ -40,7 +46,33 @@ public static class Program
         Configure(app);
         await app.StartAsync().ConfigureAwait(false);
         Console.WriteLine($"LISTENING {GetPort(app).ToString(CultureInfo.InvariantCulture)}");
+
+        // Reading the console blocks its thread, so it gets one of its own; the process does not wait for it.
+        _ = Task.Run(() => StopOnCommand(app.Lifetime, Console.In));
         await app.WaitForShutdownAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads lines until one is <see cref="StopCommand"/>, then asks the host to stop, as Ctrl+C does. A process
+    /// that started the host can stop it this way on every platform; Windows has no signal for it.
+    /// </summary>
+    /// <param name="lifetime">
+    /// The lifetime of the started application.
+    /// </param>
+    /// <param name="input">
+    /// The host's standard input. When it ends without the command, nothing is stopped: a host started with no
+    /// input keeps running.
+    /// </param>
+    private static void StopOnCommand(IHostApplicationLifetime lifetime, TextReader input)
+    {
+        while (input.ReadLine() is { } line)
+        {
+            if (string.Equals(line, StopCommand, StringComparison.Ordinal))
+            {
+                lifetime.StopApplication();
+                return;
+            }
+        }
     }
 
     /// <summary>

@@ -22,3 +22,24 @@ jobs:
       - run: dotnet restore
       - run: dotnet build --no-restore -c Release
       - run: dotnet test --no-build -c Release --logger "trx;LogFileName=test-results.trx"
+
+  interop-js:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CI: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tests/interop-js/package-lock.json
+      - run: dotnet build tests/MqttWire.TestHost -c Release
+      - run: npm ci
+        working-directory: tests/interop-js
+      - run: npm test
+        working-directory: tests/interop-js
