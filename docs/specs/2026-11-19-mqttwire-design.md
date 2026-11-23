@@ -1641,9 +1641,16 @@ Decided while the preview package was made in step 4 (2026-11-23), not yet seen 
 
 53. `MqttWire.Server` packs its dependency on `MqttWire` as exactly its own version (6.15). A
     project reference packs as "this version or later", which would let a later `MqttWire`,
-    with other internals, be loaded under an older server.
+    with other internals, be loaded under an older server. The target that does it rests on
+    internals of the pack targets, so the packed manifest is read back and a pack whose
+    dependency is not the exact version fails; CI packs both packages on every run.
 54. The two packages share one README, the repository's, whose links are absolute so that they
     work on nuget.org; each package has its own description and tags.
+55. Two public members are not named in 6.3 and have been there since step 2:
+    `MqttWireClient.IsConnected`, and `MqttConnectAck.Exception`, the network error behind a
+    connect that could not reach the server. Section 8 asks that the public API be what 6.2
+    and 6.3 describe and nothing more; these two are small and of use to a caller, and are left
+    for the owner to keep or remove before 1.0.
 
 ## 11. Left to the builder
 

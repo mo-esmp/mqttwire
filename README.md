@@ -13,7 +13,8 @@ dotnet add package MqttWire.Server --prerelease
 dotnet add package MqttWire --prerelease
 ```
 
-Both need .NET 10. This is a preview: the public API may still change until 1.0.
+Both need .NET 10. Keep the two on the same version: `MqttWire.Server` works only with the
+`MqttWire` of its own version, and says so in its dependency. This is a preview: the public API may still change until 1.0.
 [What changed](https://github.com/mo-esmp/mqttwire/blob/main/CHANGELOG.md) is in the changelog, and
 [the part of MQTT 5 that is implemented](https://github.com/mo-esmp/mqttwire/blob/main/docs/mqtt-support.md) is written down
 packet by packet and property by property.

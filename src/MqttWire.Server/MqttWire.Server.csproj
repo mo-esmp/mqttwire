@@ -36,6 +36,20 @@
     </ItemGroup>
   </Target>
 
+  <!--
+    The target above rests on an item and a target that are internal to the pack targets. Should a later SDK
+    rename either, it would do nothing and the package would say "this version or later" again, without a word.
+    So the manifest that was written is read back, and a pack whose dependency is not the exact version fails.
+  -->
+  <Target Name="CheckMqttWireIsPinned" AfterTargets="GenerateNuspec">
+    <XmlPeek XmlInputPath="$(NuspecOutputPath)$(PackageId).$(PackageVersion).nuspec"
+             Query="//*[local-name()='dependency'][@id='MqttWire']/@version">
+      <Output TaskParameter="Result" ItemName="_PackedMqttWireVersion" />
+    </XmlPeek>
+    <Error Condition="'@(_PackedMqttWireVersion)' != '[$(PackageVersion)]'"
+           Text="MqttWire.Server must depend on exactly its own version of MqttWire, '[$(PackageVersion)]', but its packed manifest says '@(_PackedMqttWireVersion)'. See the target PinMqttWireToThisVersion." />
+  </Target>
+
   <ItemGroup>
     <InternalsVisibleTo Include="MqttWire.Tests" />
     <InternalsVisibleTo Include="MqttWire.Bench" />

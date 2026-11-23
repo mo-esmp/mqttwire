@@ -6,7 +6,19 @@ implemented. A difference between this document and what MqttWire does on the wi
 one of the two; please report it.
 
 MqttWire speaks **MQTT 5.0 over WebSockets only**: binary messages, WebSocket sub-protocol
-`mqtt`. An MQTT packet may span WebSocket messages, and one message may hold several packets.
+`mqtt`. A request to the server's endpoint that does not ask for that sub-protocol is answered
+with HTTP 400, and a text message closes the WebSocket with status 1003.
+
+**MQTT packets and WebSocket messages are not the same thing.** Both sides read the incoming
+messages as one stream of bytes: a packet may span messages, and a message may hold several
+packets. What each side writes:
+
+- **The server** writes acknowledgements that wait together as one message, and a PUBLISH whose
+  packet is over 16,384 bytes as several messages: its header, then its payload in pieces of at
+  most 65,536 bytes. A client must not assume one packet per message.
+- **The client** writes one packet per message.
+
+After a refusing CONNACK or a DISCONNECT, the WebSocket is closed with status 1000.
 
 The server is a connection server, not a broker: it handles the protocol for each connection
 and leaves who may connect, what a subscription means and where a message goes to the host's
@@ -19,7 +31,7 @@ handler. Where this document says "the host", that handler decides.
 | Protocol | MQTT 5.0. A CONNECT for another version is refused with `0x84`. |
 | Transport | WebSockets, on ASP.NET Core (server) and `ClientWebSocket` (client). No raw TCP. |
 | QoS | 0, 1 and 2, in both directions, as complete exchanges inside one connection. |
-| Sessions | None. Clean start always; Session Expiry Interval is answered with 0. Nothing is kept for a client that is away, and nothing is sent a second time. |
+| Sessions | None. The server does not look at the Clean Start flag: every connection starts with nothing, and the CONNACK says Session Present 0. Session Expiry Interval is answered with 0. Nothing is kept for a client that is away, and nothing is sent a second time. |
 | Subscriptions | Passed to the host, filter by filter. MqttWire keeps no subscription table and matches no wildcard. |
 | Retained messages | Not stored. The retain flag of a publish is passed to the host. |
 | Authentication | User name and password in CONNECT, checked by the host. Enhanced authentication (AUTH) is refused. |
@@ -50,24 +62,31 @@ exception in the host.
 **The first packet** must be a complete CONNECT, within 10 seconds of the WebSocket being
 accepted.
 
+The checks run in the order of this table, and the first row that applies answers:
+
 | CONNECT | Answer |
 |---|---|
 | The first packet is not a CONNECT, or its fixed header is malformed | No MQTT packet; the WebSocket is closed with status 1002. |
 | Longer than 16,384 bytes | CONNACK `0x95` (packet too large). |
-| Malformed | CONNACK with the reason code of the fault, `0x81` or `0x82`. |
-| Protocol version is not 5 | CONNACK `0x84` (unsupported protocol version). |
+| The protocol name or version is not that of MQTT 5 | CONNACK `0x84` (unsupported protocol version). |
+| Malformed, or holding something that is not allowed | CONNACK with the reason code of the fault: `0x81`, `0x82` (Authentication Data without an Authentication Method is one such), or `0x90` (topic name invalid) for a Will topic that is empty or holds a wildcard. |
+| Carries an Authentication Method | CONNACK `0x8C` (bad authentication method). |
 | Carries a Will | CONNACK `0x87` (not authorized), "Will messages are not supported." |
-| Carries Authentication Method or Authentication Data | CONNACK `0x8C` (bad authentication method). |
-| The client id is empty, longer than 256 bytes, or holds a control character (U+0001 to U+001F, U+007F to U+009F) or a line or paragraph separator (U+2028, U+2029) | CONNACK `0x85` (client identifier not valid). |
 | Maximum Packet Size below 4,096 | CONNACK `0x95`. |
+| The client id is empty, longer than 256 bytes, or holds a control character (U+0001 to U+001F, U+007F to U+009F) or a line or paragraph separator (U+2028, U+2029) | CONNACK `0x85` (client identifier not valid). |
+| The server is stopping | CONNACK `0x8B` (server shutting down); a new WebSocket request gets HTTP 503. |
 | The host refuses | CONNACK with the host's reason code (`0x80` or above) and reason string. |
 | The host does not answer within 10 seconds | CONNACK `0x88` (server unavailable). |
-| The server is stopping | CONNACK `0x8B` (server shutting down); a new WebSocket request gets HTTP 503. |
 | Accepted | CONNACK success with the properties of section 5. |
+
+So a CONNECT with a Will and an Authentication Method gets `0x8C`, and one with an empty client
+id and a Maximum Packet Size of 100 gets `0x95`.
 
 A refusing CONNACK respects the Maximum Packet Size the CONNECT announced: its reason string is
 left out when the packet would not fit, and when not even its five bytes fit, no MQTT packet is
-written and the WebSocket is closed with status 1002.
+written and the WebSocket is closed with status 1002. Two refusals cannot respect a limit,
+because it is not known when they are written: the one for a CONNECT that is malformed, and
+the one for a CONNECT over 16,384 bytes.
 
 **One connection per client id.** A new connection with a client id that is in use takes the
 old one over, when the host allows it: the old connection gets DISCONNECT `0x8E` (session taken
@@ -85,13 +104,16 @@ over).
 | PUBLISH whose whole packet is over 16 times the payload limit | DISCONNECT `0x95` (packet too large). |
 | PUBREL | PUBCOMP. For an identifier that is not remembered, PUBCOMP `0x92` (packet identifier not found). |
 | PUBACK, PUBREC, PUBCOMP | They end, or move on, the exchange of a message the server sent (section 4). |
-| SUBSCRIBE | The host is asked once per filter. SUBACK carries one reason code per filter, and the reason string of the host's first refusal. A grant is the lowest of what the host granted, what the client asked for and the server's highest QoS. A filter that is not a valid MQTT filter gets `0x8F` (topic filter invalid) without the host being asked. Subscription options (No Local, Retain As Published, Retain Handling) are read and have no effect. |
+| SUBSCRIBE | The host is asked once per filter. SUBACK carries one reason code per filter, and the reason string of the host's first refusal. A grant is the lowest of what the host granted, what the client asked for and the server's highest QoS. A filter that is not a valid MQTT filter gets `0x8F` (topic filter invalid) without the host being asked. Subscription options (No Local, Retain As Published, Retain Handling) are read and have no effect, except that No Local on a `$share/` filter is a protocol error (`0x82`), as MQTT says. |
 | UNSUBSCRIBE | The host is told once per filter. UNSUBACK success. |
 | PINGREQ | PINGRESP. |
 | DISCONNECT | The connection is closed; no DISCONNECT is sent back. |
 | A second CONNECT; AUTH; CONNACK, SUBACK, UNSUBACK, PINGRESP; the reserved type 0 | DISCONNECT `0x82` (protocol error). |
 | A malformed packet | DISCONNECT `0x81` (malformed packet). |
+| A PUBLISH whose topic holds `+` or `#` | DISCONNECT `0x90` (topic name invalid). |
 | Any packet other than PUBLISH over 16,384 bytes | DISCONNECT `0x95` (packet too large). |
+
+Where MQTT names a more specific reason code than `0x81` or `0x82`, that one is used.
 
 **Reason codes the server sends on its own account,** besides those above:
 
@@ -102,9 +124,10 @@ over).
 | `0x8D` keep alive timeout | No packet from the client for 1.5 times the keep-alive. |
 | `0x93` receive maximum exceeded | The client has more than 256 publishes at QoS 1 or 2 unanswered. |
 | `0x94` topic alias invalid | A PUBLISH carries a Topic Alias. |
-| `0x95` packet too large | A message the host sends does not fit the client's Maximum Packet Size, or is over the outgoing byte limit. |
-| `0x97` quota exceeded | The client has fallen too far behind: more messages or bytes wait for it than the outgoing limits allow. |
+| `0x95` packet too large | A message the host sends does not fit the client's Maximum Packet Size, or is over the outgoing byte limit. Also a SUBACK or UNSUBACK that would not fit the client's Maximum Packet Size: the connection ends before the host is asked. |
+| `0x97` quota exceeded | The client has fallen too far behind: more messages or bytes wait for it than the outgoing limits allow, or more than 1,024 acknowledgements, or 65,536 bytes of them. |
 | `0xA1` subscription identifiers not supported | A SUBSCRIBE carries a Subscription Identifier. |
+| Any code the host chooses | The host closes a connection itself (`MqttWireConnection.Close`), with a reason code and a reason string of its own. |
 
 When a write to the client is already in progress as the server decides to end a connection,
 the link is aborted and no DISCONNECT is sent: a socket that is not taking data is not asked to
@@ -139,7 +162,9 @@ keep-alive interval.
 
 "Ignored" means: checked for form, then without effect, which MQTT 5 allows for that property.
 An ignored property must still be one that is allowed in its packet, appear no more often than
-it may, and hold a value of the right type; otherwise the packet is malformed.
+it may, and hold a value of the right type; otherwise the packet is malformed (`0x81`). A value
+that is of the right type but not allowed, such as a Payload Format Indicator of 2 or a Response
+Topic with a wildcard, is a protocol error (`0x82`).
 
 **Which error is which:**
 
@@ -170,9 +195,9 @@ it may, and hold a value of the right type; otherwise the packet is malformed.
 | Property | Treatment |
 |---|---|
 | Payload Format Indicator, Content Type, Message Expiry Interval, Response Topic, Correlation Data, User Property (in a PUBLISH) | Ignored. They are not passed to the host in this version. |
-| Topic Alias | Refused: DISCONNECT `0x94`. |
+| Topic Alias | Refused: DISCONNECT `0x94`. A Topic Alias of 0 is a protocol error (`0x82`). |
 | Subscription Identifier in a PUBLISH | Protocol error (`0x82`). |
-| Subscription Identifier in a SUBSCRIBE | Refused: DISCONNECT `0xA1`. |
+| Subscription Identifier in a SUBSCRIBE | Refused: DISCONNECT `0xA1`. A Subscription Identifier of 0 is a protocol error (`0x82`). |
 | User Property, Reason String, Session Expiry Interval (in the other packets) | Ignored. |
 
 **CONNACK, written by the server**
@@ -220,8 +245,17 @@ DISCONNECT carry a reason code and, for a refusal, a Reason String of at most 25
 **What else the client does with what it reads.** A PUBLISH with a Topic Alias ends the
 connection with DISCONNECT `0x94`; a packet over `MaxIncomingPacketBytes` with `0x95`, before
 it is buffered; too many unanswered QoS 2 publishes from the server with `0x93`. The client's
-own publishes, subscriptions and unsubscriptions carry no properties; a SUBSCRIBE asks for one
-filter with a QoS and no other option.
+own publishes, subscriptions and unsubscriptions carry no properties; a publish never sets the
+retain flag, and a SUBSCRIBE asks for one filter with a QoS and no other option.
+
+**How the client ends a connection:**
+
+| When | What it sends |
+|---|---|
+| The server's packet is malformed, or not allowed | DISCONNECT `0x81` or `0x82`. |
+| The application's `OnMessage` throws | DISCONNECT `0x83`. |
+| The application disposes the client | DISCONNECT `0x00`. |
+| A timeout, or a failed read or write | Nothing: the link is aborted. |
 
 ## 6. Limits
 
@@ -251,7 +285,7 @@ A client that falls further behind than the two outgoing limits allow is disconn
 | Topic of a message the host sends | 65,526 bytes |
 | Reason String the server sends | 256 bytes |
 | User properties in a CONNACK | 1,024 bytes |
-| Acknowledgements waiting to be written | 1,024 packets |
+| Acknowledgements waiting to be written | 1,024 packets and 65,536 bytes; a client that lets more wait is disconnected with `0x97` |
 
 **The client's limits:**
 
@@ -285,37 +319,40 @@ server waits until all have ended.
 
 | Deadline | Length | What happens |
 |---|---|---|
-| Connect | 10 s for the CONNACK | The connect fails. |
+| Connect | 10 s to open the WebSocket and receive the CONNACK | The connect fails. |
 | Keep-alive | The Server Keep Alive from the CONNACK when there is one, else `KeepAlive`. A PINGREQ is sent when nothing was sent for half the interval. | A PINGRESP that does not come within one interval ends the connection. |
 | Acknowledgement | Twice the keep-alive interval for the oldest unanswered request | The connection is treated as lost. |
 | Close | 2 s | The link is aborted. |
 
 The reconnecting client (`MqttWireReconnectingClient`) makes a new connection for every
-attempt, waits 500 ms before the first retry and doubles the wait up to 15 seconds, each with a
-random part of ±20 %. It subscribes again to what was subscribed through it, sends nothing a
+attempt. By default it waits 500 ms before the first retry and doubles the wait up to 15
+seconds (`InitialDelay` and `MaxDelay`), each with a random part of ±20 %. It subscribes again to what was subscribed through it, sends nothing a
 second time, and stops for good on CONNACK `0x84`, `0x85`, `0x86`, `0x87` and `0x8A`.
 
 ## 8. Not implemented
 
-Not in this version, and not planned:
+**Not planned:**
 
-- **Routing between clients:** no subscription table, no wildcard matching, no fan-out. A host
-  does that on top; `samples/GroupChat` shows how.
 - **Sessions that survive a reconnect,** and with them offline messages and re-sending.
-- **Retained messages** as a feature of the server.
 - **Will messages.**
 - **Topic aliases,** in either direction.
 - **Shared subscriptions** as a feature of the server. A `$share/` filter is passed to the host
   like any other.
 - **Subscription identifiers.**
 - **Enhanced authentication** (the AUTH packet).
-- **Request/response properties** (Response Topic, Correlation Data, Request Response
-  Information) and the other properties of a PUBLISH: they are accepted and dropped.
 - **MQTT 3.1 and 3.1.1.**
 - **A raw TCP endpoint,** and WebSocket compression.
+
+**Not in this version; each may come later, with a design of its own:**
+
+- **Routing between clients:** a subscription table, wildcard matching, fan-out. Today a host
+  does that on top; `samples/GroupChat` shows how.
+- **Retained messages.** Today the retain flag of a publish is passed to the host.
+- **The properties of a PUBLISH** (Response Topic, Correlation Data, Content Type, user
+  properties and the others): today they are accepted and dropped, not passed to the host.
 - **Metrics,** and limits across connections.
 
-[The roadmap](roadmap.md) says what may come later.
+[The roadmap](roadmap.md) is where this is decided.
 
 ## 9. What it is tested against
 
