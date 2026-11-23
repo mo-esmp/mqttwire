@@ -13,6 +13,10 @@ application decides all of that, through one small handler interface, and sends 
 connections itself. An idle connection costs MqttWire almost nothing, and every connection is
 bounded in bytes and in time, including one that has stopped reading.
 
+Measured at 3,000 and 12,000 connections, an idle connection costs MqttWire about 600 bytes on
+top of what a bare ASP.NET Core WebSocket costs, which is about 10,750 bytes
+([the report](docs/bench/2026-11-idle-memory.md)).
+
 What it does not do:
 
 - **No routing between clients.** No subscription table, no wildcard matching, no fan-out. Your

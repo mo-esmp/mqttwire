@@ -20,7 +20,8 @@ alike.
 
 So the figure that decides, live managed bytes as a slope, says "met" for an idle connection
 and "at the edge" for one that has been active, and the cause of the second is below MqttWire.
-Whether that counts as the target met is the owner's decision (section 8).
+**The owner decided on 2026-11-23 that the target is judged on MqttWire's own state, which
+meets it before and after activity** (section 8).
 
 ## 2. How it was measured
 
@@ -192,18 +193,20 @@ say little about states 2 and 3: the server's own object pools hold at most 1,02
 so they still grow with the count there. `--dumps` needs `dotnet-gcdump` installed, and its
 figures are not ones to report.
 
-## 8. For the owner to decide
+## 8. The owner's decision
 
 The design's target compares MqttWire with a floor that never sees traffic. Idle, that is a
 fair comparison and the target is met with about 400 bytes to spare. After activity, the floor
-has had none, and what is kept is Kestrel's. Three ways to read it:
+has had none, and what is kept is Kestrel's. There were three ways to read it:
 
 1. **The target is about MqttWire's own state,** which is what the design's goal 2 lists (no
    buffer, no queue storage, no timer, no cancellation source, no record). Then it is met before
-   and after activity: 519 to 624 bytes in the benchmark, 612 to 668 in the unit tests, and the
-   design says so in 6.14.
+   and after activity: 519 to 624 bytes in the benchmark, 612 to 668 in the unit tests.
 2. **The target stands as written,** against the idle floor. Then it is not reliably met after
    activity, and the next step is to look at what a host or MqttWire can do about Kestrel's
    pool, such as how long it keeps blocks and whether a burst can be spread.
 3. **Measure more first:** the same states a few minutes later, to see whether the pool lets
    go, and a burst that reaches a part of the connections at a time.
+
+**On 2026-11-23 the owner chose the first.** Section 6.14 of the design records it. What the
+second and third would have looked at is still unmeasured (section 6).
