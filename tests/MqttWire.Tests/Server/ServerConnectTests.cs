@@ -14,6 +14,11 @@ namespace MqttWire.Tests.Server;
 public sealed class ServerConnectTests
 {
     /// <summary>
+    /// The event id of the log entry for a connection that broke the protocol.
+    /// </summary>
+    private const int ProtocolErrorEvent = 2;
+
+    /// <summary>
     /// The event id of the log entry for a host that did not answer in time.
     /// </summary>
     private const int AuthenticationTimedOutEvent = 4;
@@ -414,6 +419,140 @@ public sealed class ServerConnectTests
         harness.Handler.Calls.ShouldBeEmpty();
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Pool.LargestRent.ShouldBeLessThanOrEqualTo(ServerLimits.MaxControlPacketBytes);
+    }
+
+    /// <summary>
+    /// Proves that a CONNECT MqttWire refuses itself, from a client that announced a Maximum Packet Size too small
+    /// for even the bare five-byte CONNACK, gets no MQTT packet at all (MQTT-3.1.2-24): the WebSocket is closed with
+    /// 1002, the host is not asked, and the log line carries the reason code the CONNACK would have carried.
+    /// </summary>
+    /// <param name="limit">
+    /// The Maximum Packet Size the CONNECT announces, from 1 to 4.
+    /// </param>
+    /// <param name="will">
+    /// Whether the CONNECT also carries a Will, which is refused first, with 0x87.
+    /// </param>
+    /// <param name="expected">
+    /// The reason code of the refusal, which only the log carries.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Theory]
+    [InlineData(1, false, MqttReasonCode.PacketTooLarge)]
+    [InlineData(3, false, MqttReasonCode.PacketTooLarge)]
+    [InlineData(4, false, MqttReasonCode.PacketTooLarge)]
+    [InlineData(4, true, MqttReasonCode.NotAuthorized)]
+    public async Task Connect_RefusedWithAMaximumPacketSizeBelowTheBareConnAck_WritesNoPacketAndClosesWith1002(
+        int limit, bool will, MqttReasonCode expected)
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Accept();
+
+        // Act
+        connection.Deliver(ConnectWithMaximumPacketSize(limit, will));
+
+        // Assert
+        connection.TakeWritten().ShouldBeEmpty();
+        connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.ProtocolError);
+        connection.Link.IsAborted.ShouldBeFalse();
+        await connection.RunEnded();
+        harness.Handler.Calls.ShouldBeEmpty();
+        harness.Pool.Outstanding.ShouldBe(0);
+        (LogLevel Level, EventId Id, string Message, Exception? Exception) entry = harness.Log.Entries.ShouldHaveSingleItem();
+        entry.Id.Id.ShouldBe(ProtocolErrorEvent);
+        entry.Message.ShouldContain(expected.ToString());
+    }
+
+    /// <summary>
+    /// Proves that a client that announced a Maximum Packet Size of exactly the bare refusing CONNACK's five bytes
+    /// is answered with that CONNACK, 0x95, and closed with 1000, without the host being asked.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Connect_RefusedWithAMaximumPacketSizeOfFive_AnswersTheBareConnAck()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Accept();
+
+        // Act
+        connection.Deliver(ConnectWithMaximumPacketSize(limit: 5, will: false));
+
+        // Assert
+        connection.TakeWritten().ShouldBe(Hex.Parse("20 03 00 95 00"));
+        connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
+        await connection.RunEnded();
+        harness.Handler.Calls.ShouldBeEmpty();
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that the CONNACK that refuses a Will leaves its reason string out when the packet with it, 40 bytes,
+    /// would pass the Maximum Packet Size the client announced, and still carries 0x87; the host is not asked.
+    /// </summary>
+    /// <param name="limit">
+    /// The Maximum Packet Size the CONNECT announces: at least the bare CONNACK's 5 bytes, below the 40 of the one
+    /// with its reason string.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Theory]
+    [InlineData(5)]
+    [InlineData(39)]
+    public async Task Connect_WillRefusedWithAMaximumPacketSizeBelowTheReasonString_AnswersWithoutTheReasonString(
+        int limit)
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Accept();
+
+        // Act
+        connection.Deliver(ConnectWithMaximumPacketSize(limit, will: true));
+
+        // Assert
+        connection.TakeWritten().ShouldBe(ServerPackets.ConnAckRefused(MqttReasonCode.NotAuthorized));
+        connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
+        await connection.RunEnded();
+        harness.Handler.Calls.ShouldBeEmpty();
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that the CONNACK that refuses a Will keeps its reason string when the whole packet, 40 bytes, fits the
+    /// Maximum Packet Size the client announced; the host is not asked.
+    /// </summary>
+    /// <param name="limit">
+    /// The Maximum Packet Size the CONNECT announces, at least 40.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Theory]
+    [InlineData(40)]
+    [InlineData(4_096)]
+    [InlineData(268_435_460)]
+    public async Task Connect_WillRefusedWithAMaximumPacketSizeThatFitsTheReasonString_CarriesTheReasonString(
+        int limit)
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Accept();
+
+        // Act
+        connection.Deliver(ConnectWithMaximumPacketSize(limit, will: true));
+
+        // Assert
+        connection.TakeWritten().ShouldBe(ServerPackets.ConnAckWillRefused);
+        ServerPackets.ConnAckWillRefused.Length.ShouldBe(40);
+        connection.Link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
+        await connection.RunEnded();
+        harness.Handler.Calls.ShouldBeEmpty();
+        harness.Pool.Outstanding.ShouldBe(0);
     }
 
     /// <summary>
@@ -867,5 +1006,28 @@ public sealed class ServerConnectTests
         connection.TakeWritten().ShouldBe(ServerPackets.ConnAck);
         harness.Pool.Outstanding.ShouldBe(0);
         harness.Pool.LargestRent.ShouldBeLessThanOrEqualTo(ServerLimits.MaxControlPacketBytes);
+    }
+
+    /// <summary>
+    /// Builds a CONNECT with client id "c1" that announces a Maximum Packet Size, with or without a Will on topic
+    /// "t" with an empty payload.
+    /// </summary>
+    /// <param name="limit">
+    /// The Maximum Packet Size to announce, at least 1.
+    /// </param>
+    /// <param name="will">
+    /// Whether the CONNECT carries a Will.
+    /// </param>
+    /// <returns>
+    /// The packet's bytes, fixed header included.
+    /// </returns>
+    private static byte[] ConnectWithMaximumPacketSize(int limit, bool will)
+    {
+        byte[] properties = [0x27, (byte)(limit >> 24), (byte)(limit >> 16), (byte)(limit >> 8), (byte)limit];
+        byte[] clientId = ServerPackets.Field("c1"u8);
+        return will
+            ? ServerPackets.BuildConnect(flags: 0x06, properties,
+                payload: [.. clientId, 0x00, .. ServerPackets.Field("t"u8), .. ServerPackets.Field([])])
+            : ServerPackets.BuildConnect(flags: 0x02, properties, payload: clientId);
     }
 }

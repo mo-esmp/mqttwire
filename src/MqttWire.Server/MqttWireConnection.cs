@@ -205,7 +205,10 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// The client's Maximum Packet Size, in bytes; <see cref="int.MaxValue"/> when it sent none or a larger one, and
-    /// until the connect phase has read the CONNECT, so a CONNACK that refuses an unread CONNECT is not limited.
+    /// until the connect phase has decoded the CONNECT. It is set from the decoded CONNECT before any of MqttWire's
+    /// own checks runs, so the CONNACK of a refusal respects it; only a CONNACK that refuses a CONNECT that was not
+    /// decoded (one the codec refused, or one over 16 KB judged from its fixed header) is not limited, because the
+    /// limit is not known then.
     /// </summary>
     private int _clientMaxPacketSize = int.MaxValue;
 

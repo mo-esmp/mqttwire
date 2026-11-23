@@ -100,7 +100,10 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Decodes the complete CONNECT at the start of the read buffer, applies MqttWire's own checks in the order of
-    /// design 6.6, records what the connection keeps of it, and copies what the host is given out of the buffer.
+    /// design 6.6, records what the connection keeps of it, and copies what the host is given out of the buffer. The
+    /// Maximum Packet Size the client announced is recorded first, before any of those checks, so that the CONNACK
+    /// of a refusal respects it too (MQTT-3.1.2-24, <see cref="RefuseConnect"/>). A CONNECT the codec refuses is
+    /// answered without that limit, which cannot be known then.
     /// </summary>
     /// <param name="length">
     /// The CONNECT's total length.
@@ -128,14 +131,18 @@ public sealed partial class MqttWireConnection
             return null;
         }
 
+        // First of all: every packet written from here on, a refusal's CONNACK included, is held to it.
+        PropertyBlock properties = connect.Properties;
+        _clientMaxPacketSize = properties.TryGetInteger(PropertyId.MaximumPacketSize, out uint maximumPacketSize)
+            ? (int)Math.Min(maximumPacketSize, int.MaxValue)
+            : int.MaxValue;
         code = CheckConnect(connect, out string? reasonString);
         if (code != MqttReasonCode.Success)
         {
-            BeginClose(CloseCause.ProtocolError, code, reasonString);
+            RefuseConnect(code, reasonString);
             return null;
         }
 
-        PropertyBlock properties = connect.Properties;
         _keepAliveSeconds = connect.KeepAliveSeconds is 0 or > ServerLimits.MaxKeepAliveSeconds
             ? (ushort)ServerLimits.MaxKeepAliveSeconds
             : connect.KeepAliveSeconds;
@@ -143,9 +150,6 @@ public sealed partial class MqttWireConnection
         _clientWindow = properties.TryGetInteger(PropertyId.ReceiveMaximum, out uint receiveMaximum)
             ? (int)Math.Min(receiveMaximum, ServerLimits.ReceiveMaximum)
             : ServerLimits.ReceiveMaximum;
-        _clientMaxPacketSize = properties.TryGetInteger(PropertyId.MaximumPacketSize, out uint maximumPacketSize)
-            ? (int)Math.Min(maximumPacketSize, int.MaxValue)
-            : int.MaxValue;
         _problemInformation =
             !properties.TryGetInteger(PropertyId.RequestProblemInformation, out uint problemInformation)
             || problemInformation != 0;
@@ -154,6 +158,31 @@ public sealed partial class MqttWireConnection
 
         ClientId = Encoding.UTF8.GetString(connect.ClientId);
         return CreateRequest(connect);
+    }
+
+    /// <summary>
+    /// Refuses a CONNECT that failed one of MqttWire's own checks, within the Maximum Packet Size it announced,
+    /// which <see cref="_clientMaxPacketSize"/> already holds (MQTT-3.1.2-24): the close begins with a CONNACK that
+    /// carries the code, and the reason string when the packet with it fits (<see cref="ShapeReasonString"/>). When
+    /// not even the bare CONNACK fits (five bytes, so a client that announced 1 to 4), no MQTT packet can answer:
+    /// the WebSocket is closed with status 1002, as for a first packet that is not a CONNECT, and the log line still
+    /// carries the code.
+    /// </summary>
+    /// <param name="code">
+    /// The reason code of the refusal, a failure.
+    /// </param>
+    /// <param name="reasonString">
+    /// The reason string the CONNACK carries when it fits, or <see langword="null"/> for none.
+    /// </param>
+    private void RefuseConnect(MqttReasonCode code, string? reasonString)
+    {
+        if (ConnAckCodec.GetSize(new ConnAckFields { ReasonCode = code }) > _clientMaxPacketSize)
+        {
+            RefuseFirstPacket(CloseCause.ProtocolError, code);
+            return;
+        }
+
+        BeginClose(CloseCause.ProtocolError, code, reasonString);
     }
 
     /// <summary>

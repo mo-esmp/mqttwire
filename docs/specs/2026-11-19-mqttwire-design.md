@@ -559,6 +559,17 @@ into pieces.
    | the client id is not empty and not longer than 256 bytes | `0x85`. An empty client id is well-formed MQTT, so the codec accepts it and this check refuses it. |
    | the client id holds no control character (U+0001 to U+001F, U+007F to U+009F) and no line or paragraph separator (U+2028, U+2029) | `0x85`. The standard lets a receiver refuse the control characters. The client id is written into every log line of its connection (6.12) and handed to the host, so a character that ends a line is refused here and never has to be escaped afterwards. |
 
+   **A refusal respects the client's "maximum packet size"** (MQTT-3.1.2-24). The size the
+   CONNECT announced is recorded as soon as the codec has decoded it, before any check of this
+   table runs, so the CONNACK of each of these refusals is held to it: its reason string is left
+   out when the packet with it would not fit (the Will's CONNACK is 40 bytes with its reason
+   string and 5 without), and when not even the bare CONNACK of 5 bytes fits, which is a client
+   that announced 1 to 4, no MQTT packet is written at all: the WebSocket is closed with status
+   1002, as for a first packet that is not a CONNECT, and the log line carries the reason code
+   the CONNACK would have carried. Two refusals cannot respect a limit, because it is not known
+   when they are written: the CONNACK of a CONNECT the codec refuses (it was not decoded), and
+   the CONNACK `0x95` of a CONNECT over 16 KB, judged from its fixed header (it was not read).
+
 4. `OnConnectAsync`: the host accepts or refuses. Any further rule for client ids, and all of
    authentication, is the host's.
 5. **The admission step** (below): `OnAdmit`.
@@ -741,7 +752,8 @@ behind is disconnected.** The network's own buffers absorb some data before a wr
 a slow consumer is noticed after "what those buffers hold, plus the limits".
 
 **A client's "maximum packet size".** A CONNECT that announces less than 4 KiB is refused with
-`0x95`. Every control packet then fits, because its variable parts are bounded: a reason string
+`0x95`, in a CONNACK that itself fits what was announced, or with no packet at all when none
+can ("Life of a connection", step 3). Every control packet then fits, because its variable parts are bounded: a reason string
 is cut to 256 bytes, and the user properties a host may put into CONNACK are limited to 1 KiB
 in total. A reason string that would still make a packet too large for the client is left out.
 The one exception is a SUBACK or UNSUBACK, which carries a reason code per topic filter: one that
@@ -926,7 +938,7 @@ Where MQTT names a more specific reason code, that one is used.
 |---|---|
 | Session Expiry Interval | Overridden: if the client asks for more than 0, CONNACK carries Session Expiry Interval 0. |
 | Receive Maximum | Honoured for deliveries at QoS 1 and 2. The value 0 is a protocol error. |
-| Maximum Packet Size | Honoured (6.6). 0 is a protocol error; less than 4 KiB is refused. |
+| Maximum Packet Size | Honoured (6.6), from the moment the CONNECT is decoded: the CONNACK that refuses the CONNECT respects it too, and is left out (WebSocket status 1002) when even its 5 bytes pass it. 0 is a protocol error; less than 4 KiB is refused. |
 | Topic Alias Maximum | Ignored: the server never uses aliases. |
 | Request Response Information | Ignored. |
 | Request Problem Information | **Honoured.** When it is 0, PUBACK, PUBREC, PUBREL, PUBCOMP, SUBACK and UNSUBACK carry their reason code but no reason string and no user property. |
@@ -1439,6 +1451,11 @@ the owner there:
 41. A SUBACK grants a filter the lowest of the host's grant, the QoS the client asked for it and
     `MaxQoS`; it used to be capped at `MaxQoS` only, so a host that granted more than was asked
     made the server send a grant MQTT forbids (6.2, 6.6).
+42. The CONNACK that refuses a CONNECT for one of MqttWire's own checks respects the Maximum
+    Packet Size that CONNECT announced: without its reason string when that would not fit, and
+    not at all, with WebSocket status 1002, when the client announced less than the 5 bytes of
+    the bare CONNACK. A CONNECT the codec refuses, and one over 16 KB, are answered without the
+    limit, which is not known then (6.6, 6.7).
 
 ## 11. Left to the builder
 

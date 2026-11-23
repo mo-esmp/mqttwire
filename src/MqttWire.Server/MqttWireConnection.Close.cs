@@ -60,8 +60,8 @@ public sealed partial class MqttWireConnection
     /// </param>
     /// <param name="status">
     /// The WebSocket status the peer sees when the close is handed to the link; with
-    /// <see cref="WebSocketCloseStatus.ProtocolError"/>, a first packet that was not a CONNECT, no MQTT packet is
-    /// written whatever the code.
+    /// <see cref="WebSocketCloseStatus.ProtocolError"/>, a first packet that was not a CONNECT or a CONNECT that no
+    /// CONNACK can answer within the client's Maximum Packet Size, no MQTT packet is written whatever the code.
     /// </param>
     /// <param name="payloadLength">
     /// The length of the payload of the message that was too large to send, for the log of
@@ -238,9 +238,10 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Refuses a first packet that is not a CONNECT, or whose fixed header is malformed: no MQTT packet can answer
-    /// it, so the connection begins to close with no packet and the WebSocket is closed with status 1002 (plan
-    /// decision 7), through the send path like every close. Does nothing when the connection is Closing already.
+    /// Refuses a first packet that is not a CONNECT, or whose fixed header is malformed, or a CONNECT whose client
+    /// announced a Maximum Packet Size that not even the bare refusing CONNACK fits: no MQTT packet can answer it,
+    /// so the connection begins to close with no packet and the WebSocket is closed with status 1002 (plan decision
+    /// 7), through the send path like every close. Does nothing when the connection is Closing already.
     /// </summary>
     /// <param name="cause">
     /// Why the connection ends.
