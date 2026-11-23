@@ -51,8 +51,9 @@ internal static class RunRole
     /// </param>
     /// <param name="dumps">
     /// A folder for heap dumps of MqttWire's server, idle and after activity, at both counts, taken with
-    /// <c>dotnet-gcdump</c>, which must be installed; or <see langword="null"/> for none. Taking a dump leaves
-    /// memory behind in the server, so the figures of a run with dumps are not the ones to report.
+    /// <c>dotnet-gcdump</c>, which must be installed; or <see langword="null"/> for none. Whether taking a dump
+    /// changes what the server keeps afterwards is not known, so a dump taken between two states may change the
+    /// figures of the later ones.
     /// </param>
     /// <returns>
     /// 0 when the run ended; 1 when the counts give no slope.
@@ -70,7 +71,7 @@ internal static class RunRole
         if (dumps is not null)
         {
             Directory.CreateDirectory(dumps);
-            Log($"Heap dumps go to {Path.GetFullPath(dumps)}; this run's figures are not the ones to report.");
+            Log($"Heap dumps go to {Path.GetFullPath(dumps)}; a dump taken between two states may change the later ones.");
         }
 
         Measurement floorSmall = (await MeasureTargetAsync(ServerRole.FloorPath, smallCount, tls, dumps: null))[0];
@@ -90,7 +91,7 @@ internal static class RunRole
             out bool met);
         Console.WriteLine();
         Console.WriteLine(report);
-        Log($"Done in {watch.Elapsed.TotalSeconds:N0} s. The target is {(met ? "met" : "NOT met")} in this run.");
+        Log($"Done in {watch.Elapsed.TotalSeconds:N0} s. For an idle connection the target is {(met ? "met" : "NOT met")} in this run.");
         return 0;
     }
 

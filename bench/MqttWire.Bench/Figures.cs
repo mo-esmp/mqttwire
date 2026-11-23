@@ -56,7 +56,10 @@ internal readonly record struct State(string Name, Measurement Small, Measuremen
 internal static class Figures
 {
     /// <summary>
-    /// The target: MqttWire adds at most this many bytes to the floor for an idle connection.
+    /// The target: MqttWire adds at most this many bytes to the floor for an idle connection. The benchmark
+    /// decides it for the idle state. After activity and after churn the target is judged on MqttWire's own state
+    /// (design 6.14), which a heap total cannot tell from what Kestrel's buffer pool keeps; those two states are
+    /// reported against the idle floor for information.
     /// </summary>
     public const int TargetBytesAboveFloor = 1_024;
 
@@ -129,7 +132,8 @@ internal static class Figures
     /// MqttWire after every connection was closed and opened again, then quiet.
     /// </param>
     /// <param name="met">
-    /// Set to whether all three of MqttWire's states meet the target, which is measured against the idle floor.
+    /// Set to whether MqttWire's idle state meets the target. The states after activity and after churn do not
+    /// decide it (design 6.14).
     /// </param>
     /// <returns>
     /// The report.
@@ -144,19 +148,12 @@ internal static class Figures
         report.AppendLine();
         report.AppendLine("| State | Live managed bytes per connection | Above the floor | Fixed (MB) | Working set per connection |");
         report.AppendLine("|---|---|---|---|---|");
-        met = true;
         foreach (State state in (ReadOnlySpan<State>)[floor, echoIdle, echoAfterActivity, idle, afterActivity, afterChurn])
         {
             Line live = FitLive(smallCount, largeCount, state);
             Line workingSet = Fit(smallCount, state.Small.WorkingSetBytes, largeCount, state.Large.WorkingSetBytes);
             bool isFloor = state == floor;
-            bool isMqttWire = state == idle || state == afterActivity || state == afterChurn;
             double above = live.PerConnection - floorLine.PerConnection;
-            if (isMqttWire && above > TargetBytesAboveFloor)
-            {
-                met = false;
-            }
-
             string aboveText = isFloor ? "–" : above.ToString("N0", culture);
             report.AppendLine(culture,
                 $"| {state.Name} | {live.PerConnection:N0} | {aboveText} | {live.Fixed / 1_048_576:N1} | {workingSet.PerConnection:N0} |");
@@ -179,12 +176,16 @@ internal static class Figures
             $"- The same traffic on a bare endpoint: the echo floor's slope after activity is {echoActivityLine.PerConnection - echoIdleLine.PerConnection:N0} bytes from its idle slope. Against the echo floor in the same state, MqttWire is {idleLine.PerConnection - echoIdleLine.PerConnection:N0} bytes per connection above it idle and {activityLine.PerConnection - echoActivityLine.PerConnection:N0} after activity.");
         report.AppendLine(culture,
             $"- One sweep at {largeCount:N0} connections: {idle.Large.LastSweepMicroseconds:N0} µs idle, {afterActivity.Large.LastSweepMicroseconds:N0} µs after activity.");
-        foreach (State state in (ReadOnlySpan<State>)[idle, afterActivity, afterChurn])
+        double idleAbove = idleLine.PerConnection - floorLine.PerConnection;
+        met = idleAbove <= TargetBytesAboveFloor;
+        report.AppendLine(culture,
+            $"- Target (floor + {TargetBytesAboveFloor:N0} bytes), {idle.Name}: {(met ? "met" : "NOT met")} ({idleAbove:N0} bytes above the floor).");
+        foreach (State state in (ReadOnlySpan<State>)[afterActivity, afterChurn])
         {
             double above = FitLive(smallCount, largeCount, state).PerConnection - floorLine.PerConnection;
-            string verdict = above <= TargetBytesAboveFloor ? "met" : "NOT met";
+            string side = above <= TargetBytesAboveFloor ? "within" : "over";
             report.AppendLine(culture,
-                $"- Target (floor + {TargetBytesAboveFloor:N0} bytes), {state.Name}: {verdict} ({above:N0} bytes above the floor).");
+                $"- For information, against the idle floor: {state.Name} is {above:N0} bytes above it, {side} floor + {TargetBytesAboveFloor:N0}. This does not decide the target: there it is judged on MqttWire's own state (design 6.14), and the heap also holds what Kestrel's pool kept.");
         }
 
         return report.ToString();

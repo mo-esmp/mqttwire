@@ -1370,24 +1370,31 @@ companion design).
 **What the target is judged on** (the owner, 2026-11-23): MqttWire's own state for a
 connection, which is what goal 2 lists. The floor never sees traffic, so after activity it is
 not a like-for-like comparison: Kestrel's pool of transport buffers keeps blocks after a burst
-that reaches every connection at once, under a bare endpoint as much as under MqttWire.
+that reaches every connection at once, also under a bare endpoint, and unsteadily. So the first
+figure above, live managed bytes as a slope, decides for the idle state. After activity the
+evidence is a unit test over the in-memory link and the server's heap by type; the benchmark
+reports states 2 and 3 against the idle floor for information.
 
 **Measured on 2026-11-23** ([the report](../bench/2026-11-idle-memory.md)), at 3,000 and 12,000
 connections, on a floor of about 10,750 bytes per connection:
 
 - **Idle,** MqttWire adds 519 to 624 bytes to the floor, in six runs. In a heap dump the types
   that name MqttWire come to 591 bytes per connection.
-- **After activity** a connection is 841 to 1,057 bytes above the idle floor, and after churn
-  828 to 1,023. What activity added is Kestrel's: in the heap dumps 618 of 625 bytes per
-  connection are the 4 KB blocks of its memory pool, and about 8 are MqttWire's pooled exchange
-  records. A bare endpoint that echoed the same traffic (the benchmark's "echo floor") moved by
-  -189 to +3,053 bytes per connection in three runs.
+- **After activity** a connection is 841 to 1,251 bytes above the idle floor in seven runs,
+  over floor + 1,024 in three of them. What activity added is Kestrel's: in the heap dumps 618
+  of 625 bytes per connection are the 4 KB blocks of its memory pool, and about 8 are MqttWire's
+  pooled exchange records. A bare endpoint that echoed the same traffic (the benchmark's "echo
+  floor") moved by -189 to +3,053 bytes per connection in three runs.
+- **After churn,** which the benchmark runs in the server that has had the activity, the figure
+  is 828 to 1,247: churn moved it by -52 to +29 bytes. Nothing piles up in one cycle. "Live
+  managed bytes coming back after churn" (section 8) is not shown by this: what the pool kept
+  after the activity was still there after the churn.
 - **Over the in-memory link,** where there is no Kestrel, a connection costs MqttWire 668 bytes
   idle (in a Release build; the smallest of 688, 668 and 668) and 612 to 668 after the same
   activity. Two unit tests hold both to 768, which leaves out the WebSocket link object and its
   parked read.
-- **One sweep** over 12,000 connections takes 0.8 to 5.7 ms. **With TLS** the floor is 13,525
-  bytes, and MqttWire adds 511 to 548 in all three states.
+- **One sweep** over 12,000 connections takes 0.5 to 6.8 ms. **With TLS** (two runs) the floor
+  is about 13,500 bytes, and MqttWire adds 511 to 633 in all three states.
 
 So the target is met on MqttWire's own state, before and after activity. The second figure
 above did not come out as wished: what the buffer pools keep after activity does grow with
@@ -1662,7 +1669,7 @@ The codec and the client were built and run in steps 1 and 2. The server has now
 run: its unit tests over the in-memory link, and the interops with MQTTnet's client and
 MqttWire's client over Kestrel, at QoS 0, 1 and 2 in both directions. The rest of step 3 was
 run on 2026-11-23: MQTT.js 5.16.1 against the server, at QoS 0, 1 and 2 in both directions (13
-tests, also in CI); the `GroupChat` sample in a browser, once (Chromium 156; its README records
+tests, which a CI job of their own runs); the `GroupChat` sample in a browser, once (Chromium 156; its README records
 the run); and the benchmark, whose report is
 [docs/bench/2026-11-idle-memory.md](../bench/2026-11-idle-memory.md). Not run: the benchmark
 on Linux or on a machine that is not virtual, and the sample in any other browser.
