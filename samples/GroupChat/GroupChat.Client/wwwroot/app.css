@@ -1,0 +1,66 @@
+body {
+    font-family: system-ui, sans-serif;
+    margin: 2rem auto;
+    max-width: 40rem;
+    padding: 0 1rem;
+}
+
+form {
+    display: flex;
+    gap: 0.5rem;
+    margin: 0.75rem 0;
+}
+
+input,
+select,
+button {
+    font: inherit;
+    padding: 0.3rem 0.5rem;
+}
+
+input {
+    flex: 1;
+    min-width: 0;
+}
+
+.status {
+    font-weight: 600;
+}
+
+.status[data-status="connected"] {
+    color: #1a7f37;
+}
+
+.status[data-status="reconnecting"],
+.status[data-status="connecting"] {
+    color: #9a6700;
+}
+
+.status[data-status="stopped"] {
+    color: #cf222e;
+}
+
+.notice {
+    color: #cf222e;
+}
+
+.messages {
+    border-top: 1px solid #d0d7de;
+    list-style: none;
+    margin: 1rem 0 0;
+    padding: 0.5rem 0 0;
+}
+
+.messages li {
+    padding: 0.15rem 0;
+}
+
+#blazor-error-ui {
+    background: #fff8c5;
+    bottom: 0;
+    display: none;
+    left: 0;
+    padding: 0.6rem 1rem;
+    position: fixed;
+    width: 100%;
+}

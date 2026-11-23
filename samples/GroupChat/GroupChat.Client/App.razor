@@ -1,0 +1,9 @@
+@* The root component: the sample has one page, Pages/Chat.razor. *@
+<Router AppAssembly="@typeof(App).Assembly">
+    <Found Context="routeData">
+        <RouteView RouteData="@routeData" />
+    </Found>
+    <NotFound>
+        <p>There is nothing at this address. <a href="">Go to the chat.</a></p>
+    </NotFound>
+</Router>

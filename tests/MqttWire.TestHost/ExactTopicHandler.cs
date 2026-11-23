@@ -223,6 +223,24 @@ public sealed class ExactTopicHandler(IOptions<MqttWireServerOptions> options) :
     }
 
     /// <summary>
+    /// Counts the connections subscribed to a topic, for a test that asserts on the table itself: a connection that
+    /// ended is no longer counted once its <see cref="OnClosed"/> has run.
+    /// </summary>
+    /// <param name="topic">
+    /// The exact topic.
+    /// </param>
+    /// <returns>
+    /// The number of subscribed connections; 0 for a topic nobody is subscribed to.
+    /// </returns>
+    public int CountSubscribers(string topic)
+    {
+        lock (_gate)
+        {
+            return _subscribers.TryGetValue(topic, out Dictionary<MqttWireConnection, MqttQoS>? members) ? members.Count : 0;
+        }
+    }
+
+    /// <summary>
     /// Gets the connection's own list of subscriptions, which <see cref="OnConnectAsync"/> made its state.
     /// </summary>
     /// <param name="connection">

@@ -12,6 +12,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/MqttWire/MqttWire.csproj" />
     <ProjectReference Include="../../src/MqttWire.Server/MqttWire.Server.csproj" />
+    <ProjectReference Include="../MqttWire.TestHost/MqttWire.TestHost.csproj" />
   </ItemGroup>
 
   <ItemGroup>

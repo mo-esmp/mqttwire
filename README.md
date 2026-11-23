@@ -130,6 +130,20 @@ come before the endpoint.
 An invalid option throws `OptionsValidationException` at start-up, and the host does not start.
 The deadlines and the other bounds are fixed.
 
+### Sample: a group chat
+
+[`samples/GroupChat`](samples/GroupChat) is a chat with a topic per group and every member
+subscribed: an ASP.NET Core server whose handler is all of the chat's logic, and a Blazor
+WebAssembly client on the reconnecting client. It shows how a host puts many connections on one
+topic: one copy of a payload goes to every member, each at no higher QoS than it was granted,
+and a member that stops reading is disconnected without delaying the others.
+
+```
+dotnet run --project samples/GroupChat/GroupChat.Server
+```
+
+Then open <http://localhost:5210> in two browser tabs.
+
 ## Client
 
 `MqttWireClient` is a general MQTT 5 client over WebSockets. One instance is one connection. It
