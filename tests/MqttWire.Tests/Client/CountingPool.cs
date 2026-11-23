@@ -8,7 +8,7 @@ namespace MqttWire.Tests.Client;
 /// An <see cref="ArrayPool{T}"/> over the shared pool that counts what is out and refuses a return it did not
 /// expect, so a test can prove that every rented buffer comes back exactly once.
 /// </summary>
-internal sealed class CountingPool : ArrayPool<byte>
+internal sealed class CountingPool : ArrayPool<byte>, IPoolCounts
 {
     private readonly Lock _gate = new();
     private readonly HashSet<byte[]> _rented = [];
@@ -18,6 +18,26 @@ internal sealed class CountingPool : ArrayPool<byte>
     /// The number of returns refused; under <see cref="_gate"/>.
     /// </summary>
     private int _faultyReturns;
+
+    /// <summary>
+    /// The most buffers that were out at one moment; under <see cref="_gate"/>.
+    /// </summary>
+    private int _peakOutstanding;
+
+    /// <summary>
+    /// The length of the longest array handed out; under <see cref="_gate"/>.
+    /// </summary>
+    private int _largestArray;
+
+    /// <summary>
+    /// The lengths of the arrays that are out now, added up; under <see cref="_gate"/>.
+    /// </summary>
+    private long _bytesOutstanding;
+
+    /// <summary>
+    /// The most <see cref="_bytesOutstanding"/> has been; under <see cref="_gate"/>.
+    /// </summary>
+    private long _peakBytesOutstanding;
 
     /// <summary>
     /// Completes when no buffer is out, or <see langword="null"/> when no one waits; under <see cref="_gate"/>.
@@ -31,6 +51,12 @@ internal sealed class CountingPool : ArrayPool<byte>
     public Action<byte[]>? Returning { get; set; }
 
     /// <summary>
+    /// Gets or sets a callback that runs before each rent, with the length asked for, on the renting thread, so a
+    /// test can act at the moment a buffer is rented; or <see langword="null"/>.
+    /// </summary>
+    public Action<int>? Renting { get; set; }
+
+    /// <summary>
     /// Gets the number of buffers rented and not yet returned.
     /// </summary>
     public int Outstanding
@@ -40,6 +66,22 @@ internal sealed class CountingPool : ArrayPool<byte>
             lock (_gate)
             {
                 return _rented.Count;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the most buffers that were rented and not yet returned at one moment since the pool was created. It is
+    /// counted at every rent, so no moment is missed, however short: a test whose threads run at once asserts a
+    /// bound on it that no sampling could.
+    /// </summary>
+    public int PeakOutstanding
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _peakOutstanding;
             }
         }
     }
@@ -60,7 +102,9 @@ internal sealed class CountingPool : ArrayPool<byte>
     }
 
     /// <summary>
-    /// Gets the largest minimum length any rent asked for; 0 before the first rent.
+    /// Gets the largest minimum length any rent asked for; 0 before the first rent. It is the size the renter asked
+    /// for, a logical limit, not the length of the array it was handed, which the shared pool rounds up to the next
+    /// power of two: see <see cref="LargestArray"/>.
     /// </summary>
     public int LargestRent
     {
@@ -69,6 +113,37 @@ internal sealed class CountingPool : ArrayPool<byte>
             lock (_gate)
             {
                 return _largestRent;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the length of the longest array any rent was handed; 0 before the first rent. It is the memory really
+    /// held for the rent: the shared pool hands out the next power of two, so a rent of 70,660 bytes holds 131,072.
+    /// </summary>
+    public int LargestArray
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _largestArray;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the most bytes of arrays, by their lengths, that were rented and not yet returned at one moment since
+    /// the pool was created. It is counted at every rent, so it includes the moment at which a buffer that grows
+    /// holds its old array and its new one.
+    /// </summary>
+    public long PeakBytesOutstanding
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _peakBytesOutstanding;
             }
         }
     }
@@ -102,13 +177,42 @@ internal sealed class CountingPool : ArrayPool<byte>
     }
 
     /// <summary>
+    /// Tells whether any array this pool has rented and not had returned satisfies a condition, so a test can look
+    /// at what the renter holds now.
+    /// </summary>
+    /// <param name="condition">
+    /// The condition, called under the pool's lock for each array that is out; it must not rent or return.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the condition holds for at least one array that is out.
+    /// </returns>
+    public bool AnyRented(Func<byte[], bool> condition)
+    {
+        ArgumentNullException.ThrowIfNull(condition);
+        lock (_gate)
+        {
+            foreach (byte[] array in _rented)
+            {
+                if (condition(array))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Waits until every rented buffer is back, for buffers that writes running on the thread pool return after
-    /// the test has moved on. It completes on the return that empties the pool; the 30-second limit is only a
-    /// fail-safe, so that a leak fails the test instead of hanging the run, and no outcome depends on it.
+    /// the test has moved on. It completes on the return that empties the pool; the limit of
+    /// <see cref="BoundedWaits"/> is only a fail-safe, so that a leak fails the test instead of hanging the run, and
+    /// no outcome depends on it.
     /// </summary>
     /// <returns>
     /// A task that completes, never inline, once no buffer is out; at once when none is out now. It fails with
-    /// <see cref="TimeoutException"/> when a buffer is still out after 30 seconds.
+    /// <see cref="TimeoutException"/>, naming the wait, when a buffer is still out after
+    /// <see cref="BoundedWaits.Limit"/>.
     /// </returns>
     public Task WhenNoneOutstandingAsync()
     {
@@ -120,7 +224,7 @@ internal sealed class CountingPool : ArrayPool<byte>
             }
 
             _noneOutstanding ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            return _noneOutstanding.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            return _noneOutstanding.Task.Within("The return of every rented buffer");
         }
     }
 
@@ -135,11 +239,16 @@ internal sealed class CountingPool : ArrayPool<byte>
     /// </returns>
     public override byte[] Rent(int minimumLength)
     {
+        Renting?.Invoke(minimumLength);
         byte[] array = Shared.Rent(minimumLength);
         lock (_gate)
         {
             _rented.Add(array);
+            _peakOutstanding = Math.Max(_peakOutstanding, _rented.Count);
             _largestRent = Math.Max(_largestRent, minimumLength);
+            _largestArray = Math.Max(_largestArray, array.Length);
+            _bytesOutstanding += array.Length;
+            _peakBytesOutstanding = Math.Max(_peakBytesOutstanding, _bytesOutstanding);
         }
 
         return array;
@@ -168,6 +277,7 @@ internal sealed class CountingPool : ArrayPool<byte>
                 throw new InvalidOperationException("The buffer was not rented from this pool, or was returned twice.");
             }
 
+            _bytesOutstanding -= array.Length;
             if (_rented.Count == 0 && _noneOutstanding is not null)
             {
                 _noneOutstanding.TrySetResult();

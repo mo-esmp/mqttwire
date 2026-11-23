@@ -8,7 +8,7 @@ namespace MqttWire.Tests.Client;
 /// every returned array with <see cref="Filler"/> and hands it out again on the next <see cref="Rent"/> of a size
 /// it fits, the most recently returned first. It counts what is out and refuses a return it did not expect.
 /// </summary>
-internal sealed class OverwritingPool : ArrayPool<byte>
+internal sealed class OverwritingPool : ArrayPool<byte>, IPoolCounts
 {
     /// <summary>
     /// The byte every returned array is filled with.
@@ -36,6 +36,17 @@ internal sealed class OverwritingPool : ArrayPool<byte>
     private int _faultyReturns;
 
     /// <summary>
+    /// The largest minimum length any rent asked for.
+    /// </summary>
+    private int _largestRent;
+
+    /// <summary>
+    /// Gets or sets a callback that sees each array as it comes back, before it is overwritten and while it is still
+    /// counted as rented, so a test can act at the very moment of a return; or <see langword="null"/>.
+    /// </summary>
+    public Action<byte[]>? Returning { get; set; }
+
+    /// <summary>
     /// Gets the number of arrays rented and not yet returned.
     /// </summary>
     public int Outstanding
@@ -59,6 +70,20 @@ internal sealed class OverwritingPool : ArrayPool<byte>
             lock (_gate)
             {
                 return _faultyReturns;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the largest minimum length any rent asked for; 0 before the first rent.
+    /// </summary>
+    public int LargestRent
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _largestRent;
             }
         }
     }
@@ -113,6 +138,7 @@ internal sealed class OverwritingPool : ArrayPool<byte>
 
             array ??= new byte[minimumLength];
             _rented.Add(array);
+            _largestRent = Math.Max(_largestRent, minimumLength);
             return array;
         }
     }
@@ -133,6 +159,7 @@ internal sealed class OverwritingPool : ArrayPool<byte>
     public override void Return(byte[] array, bool clearArray = false)
     {
         ArgumentNullException.ThrowIfNull(array);
+        Returning?.Invoke(array);
         lock (_gate)
         {
             if (!_rented.Remove(array))

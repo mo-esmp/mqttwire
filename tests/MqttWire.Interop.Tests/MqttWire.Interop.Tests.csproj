@@ -16,6 +16,14 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/MqttWire/MqttWire.csproj" />
+    <ProjectReference Include="../../src/MqttWire.Server/MqttWire.Server.csproj" />
+    <ProjectReference Include="../MqttWire.TestHost/MqttWire.TestHost.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The packets of the unit tests, shared so that no test spells a packet's bytes a second time. -->
+    <Compile Include="../MqttWire.Tests/Codec/Hex.cs" Link="Shared/Hex.cs" />
+    <Compile Include="../MqttWire.Tests/Server/ServerPackets.cs" Link="Shared/ServerPackets.cs" />
   </ItemGroup>
 
   <ItemGroup>

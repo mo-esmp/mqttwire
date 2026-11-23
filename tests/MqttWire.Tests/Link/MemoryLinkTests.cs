@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Runtime.CompilerServices;
 
 namespace MqttWire.Tests.Link;
 
@@ -53,6 +54,85 @@ public sealed class MemoryLinkTests
         write.IsCompleted.ShouldBeTrue();
         link.TakeWritten().ShouldBe(packet);
         link.WriteCount.ShouldBe(1);
+    }
+
+    /// <summary>
+    /// Proves that in the mode of <see cref="MemoryLink.PendWrites"/> each write stays pending until it is ended,
+    /// what awaits it carries on inside the call that ends it, a failed one throws what it was failed with, and the
+    /// writes that succeeded are the ones written.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task PendWrites_WritesIssuedOneAfterTheOther_PendUntilEachIsEnded()
+    {
+        // Arrange
+        MemoryLink link = new();
+        link.PendWrites();
+        InvalidOperationException failure = new("The write failed.");
+        bool continuedInside = false;
+
+        // Act
+        ValueTask first = link.WriteAsync(new byte[] { 1 }, CancellationToken.None);
+        bool firstPending = !first.IsCompleted && link.IsWritePending;
+        Register(first, () => continuedInside = true);
+        bool ended = link.CompletePendingWrite();
+        bool continuedByTheEnd = continuedInside;
+        await first;
+        ValueTask second = link.WriteAsync(new byte[] { 2 }, CancellationToken.None);
+        bool secondPending = !second.IsCompleted;
+        link.CompletePendingWrite(failure);
+        Exception? thrown = await Record.ExceptionAsync(async () => await second);
+        ValueTask third = link.WriteAsync(new byte[] { 3 }, CancellationToken.None);
+        link.CompletePendingWrite();
+        await third;
+        bool endedWithNothingPending = link.CompletePendingWrite();
+
+        // Assert
+        firstPending.ShouldBeTrue();
+        ended.ShouldBeTrue();
+        continuedByTheEnd.ShouldBeTrue();
+        secondPending.ShouldBeTrue();
+        thrown.ShouldBe(failure);
+        endedWithNothingPending.ShouldBeFalse();
+        link.IsWritePending.ShouldBeFalse();
+        link.TakeWritten().ShouldBe(new byte[] { 1, 3 });
+        link.WriteCount.ShouldBe(2);
+        link.OverlappingWrites.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a write pending in the mode of <see cref="MemoryLink.PendWrites"/>, registered and ended, allocates
+    /// nothing in the link once the mode is on: every write pends on the one source.
+    /// </summary>
+    [Fact]
+    public void PendWrites_WriteRegisteredAndEnded_AllocatesNothing()
+    {
+        // Arrange
+        MemoryLink link = new() { DiscardsWritten = true };
+        link.PendWrites();
+        byte[] packet = [0xC0, 0x00];
+        int continued = 0;
+        Action continuation = () => continued++;
+        for (int i = 0; i < 100; i++)
+        {
+            PendOnce(link, packet, continuation);
+        }
+
+        // Act
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 100; i++)
+        {
+            PendOnce(link, packet, continuation);
+        }
+
+        long after = GC.GetAllocatedBytesForCurrentThread();
+
+        // Assert
+        (after - before).ShouldBe(0);
+        continued.ShouldBe(200);
+        link.WriteCount.ShouldBe(200);
     }
 
     /// <summary>
@@ -642,6 +722,111 @@ public sealed class MemoryLinkTests
             perMarker[t].ShouldBe(PacketsPerThread);
         }
     }
+
+    /// <summary>
+    /// Proves the link counts a write, and a close, begun while a write it holds has not ended, on itself and in the
+    /// checks it shares, and counts none for writes that follow each other.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task WriteAsync_BegunWhileAnotherIsHeld_IsCountedAsOverlapping()
+    {
+        // Arrange
+        MemoryLinkChecks checks = new();
+        MemoryLink link = new() { Checks = checks };
+        await link.WriteAsync(new byte[] { 1 }, CancellationToken.None);
+        await link.WriteAsync(new byte[] { 2 }, CancellationToken.None);
+        int afterWritesInTurn = link.OverlappingWrites;
+        link.HoldWrites();
+        ValueTask held = link.WriteAsync(new byte[] { 3 }, CancellationToken.None);
+
+        // Act
+        ValueTask overlapping = link.WriteAsync(new byte[] { 4 }, CancellationToken.None);
+        await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
+        link.CompleteHeldWrites();
+        await held;
+        await overlapping;
+
+        // Assert
+        afterWritesInTurn.ShouldBe(0);
+        link.OverlappingWrites.ShouldBe(2);
+        checks.OverlappingWrites.ShouldBe(2);
+        link.WritesAfterAbort.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves a write begun after the abort fails at once, also while writes are held, and is counted; that the
+    /// shared checks count only what follows the first such write on a link; and that a write held before the abort
+    /// is still the test's to complete.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task WriteAsync_BegunAfterTheAbort_FailsAndIsCounted()
+    {
+        // Arrange
+        MemoryLinkChecks checks = new();
+        MemoryLink link = new() { Checks = checks };
+        link.HoldWrites();
+        ValueTask heldBeforeTheAbort = link.WriteAsync(new byte[] { 1 }, CancellationToken.None);
+        link.Abort();
+        link.CompleteHeldWrites();
+        await heldBeforeTheAbort;
+        link.HoldWrites();
+
+        // Act
+        ValueTask first = link.WriteAsync(new byte[] { 2 }, CancellationToken.None);
+        int sharedAfterTheFirst = checks.FurtherWritesAfterAbort;
+        ValueTask second = link.WriteAsync(new byte[] { 3 }, CancellationToken.None);
+
+        // Assert
+        first.IsFaulted.ShouldBeTrue();
+        second.IsFaulted.ShouldBeTrue();
+        await Should.ThrowAsync<OperationCanceledException>(async () => await first);
+        await Should.ThrowAsync<OperationCanceledException>(async () => await second);
+        link.WritesAfterAbort.ShouldBe(2);
+        sharedAfterTheFirst.ShouldBe(0);
+        checks.FurtherWritesAfterAbort.ShouldBe(1);
+        link.TakeWritten().ShouldBe(new byte[] { 1 });
+    }
+
+    /// <summary>
+    /// Begins a write that pends, registers a continuation on it, ends it, and takes its result, as a writer does
+    /// that does not use an async method.
+    /// </summary>
+    /// <param name="link">
+    /// The link, in the mode of <see cref="MemoryLink.PendWrites"/>.
+    /// </param>
+    /// <param name="packet">
+    /// The packet to write.
+    /// </param>
+    /// <param name="continuation">
+    /// What runs when the write ends.
+    /// </param>
+    private static void PendOnce(MemoryLink link, byte[] packet, Action continuation)
+    {
+        ValueTask write = link.WriteAsync(packet, CancellationToken.None);
+        ConfiguredValueTaskAwaitable.ConfiguredValueTaskAwaiter awaiter = write.ConfigureAwait(false).GetAwaiter();
+        awaiter.UnsafeOnCompleted(continuation);
+        link.CompletePendingWrite();
+        awaiter.GetResult();
+    }
+
+    /// <summary>
+    /// Registers a continuation on a write without the synchronization context of the calling thread, so that it
+    /// runs where the write is ended.
+    /// </summary>
+    /// <param name="write">
+    /// The write, pending.
+    /// </param>
+    /// <param name="continuation">
+    /// What runs when the write ends.
+    /// </param>
+    private static void Register(ValueTask write, Action continuation) =>
+        write.ConfigureAwait(false).GetAwaiter().UnsafeOnCompleted(continuation);
 
     /// <summary>
     /// Creates a deterministic byte pattern.

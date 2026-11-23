@@ -1,0 +1,128 @@
+﻿namespace MqttWire.Server;
+
+/// <summary>
+/// The one interface a host implements to drive the server: who may connect, what a client may subscribe to and
+/// publish, and what to do when a connection ends. MqttWire keeps no record of subscriptions; what a subscription
+/// means, and remembering it, is the host's.
+/// </summary>
+/// <remarks>
+/// <see cref="OnSubscribe"/>, <see cref="OnUnsubscribe"/> and <see cref="OnPublish"/> are called from the
+/// connection's read path: for one connection one at a time, in the order the packets arrived; for different
+/// connections at the same time. They are synchronous and must return quickly; work that takes time is queued by
+/// the host. <see cref="OnAdmit"/> runs inside the admission step of the server and must not block or call back
+/// into the server. <see cref="OnClosed"/> is called once, after the last other call for that connection has
+/// returned, and only for a connection that <see cref="OnAdmit"/> accepted: a connection refused in
+/// <see cref="OnConnectAsync"/> or <see cref="OnAdmit"/> gets none. A handler method that throws is the host's
+/// fault: the exception is logged as an error and the connection is closed with reason code 0x83 (implementation
+/// specific error); an exception from <see cref="OnClosed"/> is logged only.
+/// </remarks>
+public interface IMqttWireHandler
+{
+    /// <summary>
+    /// Decides who a connecting client is. May take time and may do I/O; it has a deadline of about 10 seconds, and
+    /// a connection that overruns it is refused with CONNACK 0x88. What it returns or throws after that is logged
+    /// and discarded. It must not block the calling thread: a call that neither returns nor heeds its token has its
+    /// connection's socket aborted 2 seconds after the token was cancelled, and holds that connection's place in the
+    /// server until it returns.
+    /// </summary>
+    /// <param name="request">
+    /// The CONNECT as the host needs it. It owns copies of what it holds, so it may be used across awaits.
+    /// </param>
+    /// <param name="cancellationToken">
+    /// Canceled when the deadline passes, the client goes away or the server stops.
+    /// </param>
+    /// <returns>
+    /// Accept, with the state object of the host for the connection and optional CONNACK user properties; or
+    /// refuse, with a reason code and a reason string.
+    /// </returns>
+    ValueTask<MqttConnectResult> OnConnectAsync(MqttConnectRequest request, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Decides whether the client may come in now. Called inside the admission step: synchronous and quick; it
+    /// must not block or call back into the server.
+    /// </summary>
+    /// <remarks>
+    /// It runs under a lock of the server, the one <see cref="MqttWireServer.TryGetConnection"/> and
+    /// <see cref="MqttWireServer.ConnectionCount"/> take for a moment. A lock of the host's own that this method
+    /// takes must therefore never be held, on any other thread, across a call of either of those two: the two
+    /// threads would take the two locks in opposite orders and wait for each other for ever.
+    /// </remarks>
+    /// <param name="connection">
+    /// The new connection, which is not open yet.
+    /// </param>
+    /// <param name="replaces">
+    /// The connection that currently has this client id, or <see langword="null"/> when there is none. It may be
+    /// closing already; it then keeps the reason it is closing with.
+    /// </param>
+    /// <returns>
+    /// Accept or refuse. When <paramref name="replaces"/> is not <see langword="null"/> and the host accepts, the
+    /// new connection takes over and the old one is closed with the reason "session taken over".
+    /// </returns>
+    MqttAdmitResult OnAdmit(MqttWireConnection connection, MqttWireConnection? replaces);
+
+    /// <summary>
+    /// Decides a subscription. Called from the read path of the connection: synchronous, and it must return
+    /// quickly.
+    /// </summary>
+    /// <param name="connection">
+    /// The subscribing connection.
+    /// </param>
+    /// <param name="topicFilter">
+    /// The topic filter the client asked for.
+    /// </param>
+    /// <param name="requested">
+    /// The QoS the client asked for.
+    /// </param>
+    /// <returns>
+    /// Grant at a QoS, or refuse with a reason code and a reason string. The SUBACK never carries more than the
+    /// client asked for: the server lowers a grant to <paramref name="requested"/> and to
+    /// <see cref="MqttWireServerOptions.MaxQoS"/>, whichever is lower. The server does not remember the grant, so a
+    /// host that granted above <paramref name="requested"/> remembers the lower one, which is what the client was
+    /// told.
+    /// </returns>
+    MqttSubscribeResult OnSubscribe(MqttWireConnection connection, string topicFilter, MqttQoS requested);
+
+    /// <summary>
+    /// Tells the host that a client removed a subscription. Called from the read path of the connection:
+    /// synchronous, and it must return quickly.
+    /// </summary>
+    /// <param name="connection">
+    /// The connection that unsubscribed.
+    /// </param>
+    /// <param name="topicFilter">
+    /// The topic filter the client removed.
+    /// </param>
+    void OnUnsubscribe(MqttWireConnection connection, string topicFilter);
+
+    /// <summary>
+    /// Receives a message a client published. Called from the read path of the connection: synchronous, and it
+    /// must return quickly.
+    /// </summary>
+    /// <param name="connection">
+    /// The publishing connection.
+    /// </param>
+    /// <param name="publish">
+    /// The message: a view that is valid only during the call. A host that keeps the topic or the payload copies
+    /// it.
+    /// </param>
+    /// <returns>
+    /// Accept, or refuse with a reason code and a reason string. The server sends the answer in the form the QoS
+    /// calls for: a PUBACK at QoS 1, a PUBREC at QoS 2, nothing at QoS 0.
+    /// </returns>
+    MqttPublishResult OnPublish(MqttWireConnection connection, in MqttPublish publish);
+
+    /// <summary>
+    /// Tells the host that a connection ended. Called exactly once for every connection that
+    /// <see cref="OnAdmit"/> accepted, after the last other call for that connection has returned. It may run on a
+    /// thread-pool thread, and never runs inside the host's own <see cref="MqttWireConnection.TrySend"/> or
+    /// <see cref="MqttWireConnection.Close"/>. It must not wait on the server's stop, or on a shutdown of the host's
+    /// own that waits for it: the stop waits for every <see cref="OnClosed"/> to return.
+    /// </summary>
+    /// <param name="connection">
+    /// The connection that ended.
+    /// </param>
+    /// <param name="reason">
+    /// Why it ended.
+    /// </param>
+    void OnClosed(MqttWireConnection connection, MqttCloseReason reason);
+}

@@ -20,26 +20,47 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
     private bool _textReceived;
 
     /// <summary>
+    /// 1 once this link has started its one close frame: its own close with 1003 for a text message
+    /// (<see cref="ReadAsync"/>) or the caller's (<see cref="CloseAsync"/>), whichever came first; 0 before. Taken
+    /// with <see cref="Interlocked.Exchange(ref int, int)"/>, so exactly one of them sends a close frame.
+    /// </summary>
+    private int _closeStarted;
+
+    /// <summary>
     /// Waits with a zero-byte receive, which completes when data is available and consumes nothing but the type of
-    /// the message it reports, which is remembered when it is text. It uses the pooling builder, so a wait that
+    /// the message it reports, which is remembered when it is text. An empty binary message is consumed whole by
+    /// that receive and brings no bytes, so it does not end the wait: the wait goes on, and a peer cannot make the
+    /// caller rent a buffer for a read that then has nothing to read. It uses the pooling builder, so a wait that
     /// suspends, as every idle wait does, allocates nothing in steady state.
     /// </summary>
     /// <param name="cancellationToken">
     /// Cancels the wait.
     /// </param>
     /// <returns>
-    /// A task that completes when a read would not wait. A close from the peer also completes it: the socket then
-    /// records the close, and the next <see cref="ReadAsync"/> returns 0.
+    /// A task that completes when a message has begun to arrive: a read then finds its bytes, or waits for them when
+    /// the peer sent the start of a message and withholds the rest, which the link cannot tell apart. A close from
+    /// the peer also completes it: the socket then records the close, and the next <see cref="ReadAsync"/> returns
+    /// 0.
     /// </returns>
     [AsyncMethodBuilder(builderType: typeof(PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask WaitForDataAsync(CancellationToken cancellationToken)
     {
-        ValueWebSocketReceiveResult result =
-            await webSocket.ReceiveAsync(buffer: Memory<byte>.Empty, cancellationToken: cancellationToken)
-                .ConfigureAwait(continueOnCapturedContext: false);
-        if (result.MessageType == WebSocketMessageType.Text)
+        while (true)
         {
-            _textReceived = true;
+            ValueWebSocketReceiveResult result =
+                await webSocket.ReceiveAsync(buffer: Memory<byte>.Empty, cancellationToken: cancellationToken)
+                    .ConfigureAwait(continueOnCapturedContext: false);
+            if (result.MessageType == WebSocketMessageType.Text)
+            {
+                _textReceived = true;
+                return;
+            }
+
+            // A zero-byte receive says "end of message" for a binary message only when the message is empty.
+            if (result.MessageType != WebSocketMessageType.Binary || !result.EndOfMessage)
+            {
+                return;
+            }
         }
     }
 
@@ -54,7 +75,8 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
     /// Cancels the read.
     /// </param>
     /// <returns>
-    /// The number of bytes read, or 0 when the peer closed or sent a text message (the link then closes with 1003).
+    /// The number of bytes read, or 0 when the peer closed or sent a text message (the link then closes with 1003,
+    /// unless it has started a close already; see <see cref="CloseAsync"/>).
     /// A close the peer sent is not answered here: the caller answers it with <see cref="CloseAsync"/>.
     /// </returns>
     /// <exception cref="WebSocketException">
@@ -65,9 +87,7 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
     {
         if (_textReceived)
         {
-            await webSocket.CloseOutputAsync(closeStatus: WebSocketCloseStatus.InvalidMessageType,
-                    statusDescription: null, cancellationToken: cancellationToken)
-                .ConfigureAwait(continueOnCapturedContext: false);
+            await CloseForTextAsync(cancellationToken).ConfigureAwait(continueOnCapturedContext: false);
             return 0;
         }
 
@@ -89,9 +109,7 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
                 case WebSocketMessageType.Close:
                     return 0;
                 case WebSocketMessageType.Text:
-                    await webSocket.CloseOutputAsync(closeStatus: WebSocketCloseStatus.InvalidMessageType,
-                            statusDescription: null, cancellationToken: cancellationToken)
-                        .ConfigureAwait(continueOnCapturedContext: false);
+                    await CloseForTextAsync(cancellationToken).ConfigureAwait(continueOnCapturedContext: false);
                     return 0;
                 default:
                     if (result.Count > 0 || buffer.IsEmpty)
@@ -121,21 +139,58 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
             cancellationToken: cancellationToken);
 
     /// <summary>
-    /// Sends a close message and does not wait for the peer's reply, so it is safe beside a pending read.
+    /// Starts the close of the link with the given status and does not wait for the peer's reply, so it is safe beside
+    /// a pending read. This link starts at most one close frame, whichever side starts first: when its own close for
+    /// a text message (<see cref="ReadAsync"/>) has started, also while that frame still waits behind a write in
+    /// progress, nothing more is sent and this completes at once; the peer then sees the close with 1003, not
+    /// <paramref name="status"/>. Nothing is sent either when the WebSocket is already in a state in which no close
+    /// can be sent (<see cref="WebSocketState.CloseSent"/> or <see cref="WebSocketState.Closed"/>). A second close
+    /// frame would fail, and a failed close makes the caller abort the link, which can reset the connection before the
+    /// peer has read the first.
     /// </summary>
     /// <param name="status">
-    /// The close status the peer sees.
+    /// The close status the peer sees, when this call is the one that starts the close.
     /// </param>
     /// <param name="cancellationToken">
     /// Cancels the close.
     /// </param>
     /// <returns>
-    /// A task that completes when the close message has been sent.
+    /// A task that completes when this call's close message has been sent, or at once when it sends none.
     /// </returns>
     public async ValueTask CloseAsync(WebSocketCloseStatus status, CancellationToken cancellationToken)
-        => await webSocket
+    {
+        if (Interlocked.Exchange(ref _closeStarted, value: 1) != 0
+            || webSocket.State is WebSocketState.CloseSent or WebSocketState.Closed)
+        {
+            return;
+        }
+
+        await webSocket
             .CloseOutputAsync(closeStatus: status, statusDescription: null, cancellationToken: cancellationToken)
             .ConfigureAwait(continueOnCapturedContext: false);
+    }
+
+    /// <summary>
+    /// Closes the link with 1003 because the peer sent a text message, unless this link has started a close already
+    /// (<see cref="CloseAsync"/> came first): then nothing more is sent, and the peer sees that close instead.
+    /// </summary>
+    /// <param name="cancellationToken">
+    /// Cancels the close.
+    /// </param>
+    /// <returns>
+    /// A task that completes when the close message has been sent, or at once when none is sent.
+    /// </returns>
+    private async ValueTask CloseForTextAsync(CancellationToken cancellationToken)
+    {
+        if (Interlocked.Exchange(ref _closeStarted, value: 1) != 0)
+        {
+            return;
+        }
+
+        await webSocket.CloseOutputAsync(closeStatus: WebSocketCloseStatus.InvalidMessageType,
+                statusDescription: null, cancellationToken: cancellationToken)
+            .ConfigureAwait(continueOnCapturedContext: false);
+    }
 
     /// <summary>
     /// Aborts the socket.
