@@ -28,7 +28,7 @@ internal sealed class ServerHarness
     /// answer is encoded into, and that of the reason codes of a SUBSCRIBE of more than 256 filters, are back before
     /// the step that rented them returns.
     /// </summary>
-    private const int MaxBuffersPerConnection = 3;
+    public const int MaxBuffersPerConnection = 3;
 
     /// <summary>
     /// Guards <see cref="_windows"/>.

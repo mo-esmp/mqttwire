@@ -1284,7 +1284,8 @@ followed by event 21, which `OnClosed` receives as a lost connection).
      sometimes at once and sometimes later; everything is written exactly once, in order, and
      the connection ends idle. The sweep runs on a thread of its own meanwhile, and in the test
      of a close racing the senders it moves the clock, so that its deadlines pass during the
-     race.
+     race. The same senders also run against a writer that stalls, with limits small enough to
+     be reached: they are evicted, and nothing is written after the close.
 4. **Buffers.** A counting pool asserts that every rented buffer is returned exactly once
    across every way out. A second pool **overwrites every returned buffer and hands it out
    again at once**; with it, a link that holds a read or a write open is aborted, also at the
@@ -1295,6 +1296,10 @@ followed by event 21, which `OnClosed` receives as a lost connection).
    waiting packets and bytes, rented buffers, on whichever pool the server rents from; and what
    a WebSocket demands of the server on every link: one write or close at a time, nothing begun
    after its abort but the one write already decided on, and no abort after the run has ended.
+   In the stress tests a step is each thread's own: every thread looks at the connection's
+   bounds after each `TrySend`, each release of the link's writes and each sweep, while the
+   others run, and the pool counts the most buffers out at one moment at every rent; once the
+   threads have stopped and the queue has drained, every count is 0 and would show nothing.
 6. **Client:** identifiers across the wrap with identifiers still in use; a PUBACK that never
    arrives ends the connection; unknown and wrong-kind acknowledgements; a small receive
    maximum; QoS 2 in both directions; a server that grants less than was asked; option checks.

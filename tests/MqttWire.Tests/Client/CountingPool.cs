@@ -20,6 +20,11 @@ internal sealed class CountingPool : ArrayPool<byte>, IPoolCounts
     private int _faultyReturns;
 
     /// <summary>
+    /// The most buffers that were out at one moment; under <see cref="_gate"/>.
+    /// </summary>
+    private int _peakOutstanding;
+
+    /// <summary>
     /// Completes when no buffer is out, or <see langword="null"/> when no one waits; under <see cref="_gate"/>.
     /// </summary>
     private TaskCompletionSource? _noneOutstanding;
@@ -46,6 +51,22 @@ internal sealed class CountingPool : ArrayPool<byte>, IPoolCounts
             lock (_gate)
             {
                 return _rented.Count;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the most buffers that were rented and not yet returned at one moment since the pool was created. It is
+    /// counted at every rent, so no moment is missed, however short: a test whose threads run at once asserts a
+    /// bound on it that no sampling could.
+    /// </summary>
+    public int PeakOutstanding
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _peakOutstanding;
             }
         }
     }
@@ -175,6 +196,7 @@ internal sealed class CountingPool : ArrayPool<byte>, IPoolCounts
         lock (_gate)
         {
             _rented.Add(array);
+            _peakOutstanding = Math.Max(_peakOutstanding, _rented.Count);
             _largestRent = Math.Max(_largestRent, minimumLength);
         }
 
