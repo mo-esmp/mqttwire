@@ -66,7 +66,9 @@ public sealed partial class MqttWireConnection
     /// otherwise it waits behind the write in progress or for the window, unless one more would pass
     /// <see cref="MqttWireServerOptions.MaxOutgoingMessages"/> or
     /// <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>, which evicts the connection with 0x97. Allocates nothing
-    /// unless a write does not complete at once.
+    /// in the steady state, also when a write does not complete at once: such a write is awaited by an object from
+    /// the server's pool (<see cref="CompleteWrite"/>). What allocates is the first use of each pooled object and
+    /// the growth of a queue, and the fall-back for a pool that throws.
     /// </summary>
     /// <param name="topic">
     /// The topic, not the default value.
@@ -437,7 +439,7 @@ public sealed partial class MqttWireConnection
     /// Writes a piece and whatever is to be written after it, for as long as the writes complete at once; called by
     /// whoever holds the send path, outside the lock. It is a loop, not a recursion: each write that has ended
     /// returns its buffer and takes the next piece in one hold of the lock (<see cref="TryTakeNextPiece"/>). A write
-    /// that does not complete at once is handed to <see cref="CompleteWriteAsync"/>, which carries on when it has
+    /// that does not complete at once is handed to <see cref="CompleteWrite"/>, which has it carried on when it has
     /// ended, and this returns: nobody waits for the link. It never throws: a fault while it holds the send path ends
     /// the connection (<see cref="FaultSendPath"/>).
     /// </summary>
@@ -463,10 +465,10 @@ public sealed partial class MqttWireConnection
                 if (!write.IsCompleted)
                 {
                     // Stamped only for a write that stays with the link: one that completed at once needs no
-                    // deadline. The stamp is cleared by CompleteWriteAsync, which starts after this line, so it is
-                    // never left set.
+                    // deadline. The stamp is cleared by whatever ends the write, all of which starts after this
+                    // line, so it is never left set.
                     Volatile.Write(ref _writeStartedAt, _server.Time.GetTimestamp());
-                    _ = CompleteWriteAsync(write, buffer, inlineWrites);
+                    CompleteWrite(write, buffer, inlineWrites);
                     return;
                 }
 
@@ -879,15 +881,118 @@ public sealed partial class MqttWireConnection
     }
 
     /// <summary>
-    /// Awaits a write that did not complete at once, then carries the send path on: the buffer goes back, the next
-    /// piece is written, and a write that failed begins the close with <see cref="MqttCloseReason.ConnectionLost"/>.
-    /// Only this method ends such a write and returns its buffer, after the await has ended (design 6.8). It carries
-    /// on the thread that completes the write, for as long as the writes that follow complete at once. A write
-    /// that has completed by the time this looks at it is not awaited at all, so this runs on the stack of the caller
-    /// that started it: it then counts as one more of that caller's writes, so that such calls cannot nest deeper
-    /// than <see cref="InlineWrites"/> before the send path is handed to the thread pool. Here every write counts, a
-    /// piece of a PUBLISH too, because what is bounded is the depth of the stack. A fault in what follows the write
-    /// is caught by <see cref="ContinueSending"/>, so the task never fails and nothing is left unobserved.
+    /// Has the send path carried on when a write that did not complete at once has ended: the buffer goes back, the
+    /// next piece is written, and a write that failed begins the close with
+    /// <see cref="MqttCloseReason.ConnectionLost"/>. Only what this sets up ends such a write and returns its buffer,
+    /// once the write has ended (design 6.8). It allocates nothing in the steady state: the write is awaited by an
+    /// object from the server's pool (<see cref="PendingWrite"/>), taken only now that a write is in fact pending and
+    /// given back as soon as that write has ended, not by an async method, which would allocate its state and a task
+    /// for every pending write, every piece of a large PUBLISH included. The send path is then carried on by
+    /// <see cref="EndPendingWrite"/>, on the thread that completes the write, for as long as the writes that follow
+    /// complete at once.
+    /// </summary>
+    /// <remarks>
+    /// A write that has completed by the time this looks at it is not awaited at all and takes nothing from the pool:
+    /// it is ended here, on the stack of the caller that started it, and then counts as one more of that caller's
+    /// writes, so that such calls cannot nest deeper than <see cref="InlineWrites"/> before the send path is handed
+    /// to the thread pool. Here every write counts, a piece of a PUBLISH too, because what is bounded is the depth of
+    /// the stack. Should the pool throw, the write is already with the link and its buffer cannot be returned yet:
+    /// that one write is awaited by <see cref="CompleteWriteAsync"/> instead, which allocates and returns the buffer
+    /// once, after the write, all the same. Should the write refuse the registration of its continuation (a fault of
+    /// the link), the exception goes to the caller, which holds the send path and ends the connection as a fault
+    /// (<see cref="FaultSendPath"/>): the path is given up, so the run can end, and the write's buffer, which may
+    /// still be in use, is not returned by anyone but that write's own completion, if it ever comes (design 6.8,
+    /// rule 4). The pooled object then stays armed for that completion and does not go back to the pool before it.
+    /// </remarks>
+    /// <param name="write">
+    /// The write in progress.
+    /// </param>
+    /// <param name="buffer">
+    /// The rented buffer the write was given, or <see langword="null"/> for a piece of the host's memory.
+    /// </param>
+    /// <param name="inlineWrites">
+    /// How many writes that complete at once the caller that started the write still makes on its thread.
+    /// </param>
+    /// <exception cref="Exception">
+    /// The write refused the registration, or the fall-back could not be started either (out of memory); the caller,
+    /// which holds the send path, ends the connection as a fault.
+    /// </exception>
+    private void CompleteWrite(ValueTask write, byte[]? buffer, int inlineWrites)
+    {
+        if (write.IsCompleted)
+        {
+            bool failed = !HasSucceeded(write);
+            Volatile.Write(ref _writeStartedAt, value: 0);
+            ContinueSending(buffer, failed, Math.Min(inlineWrites, InlineWrites) - 1);
+            return;
+        }
+
+        PendingWrite completion;
+        try
+        {
+            completion = _server.Pools.PendingWrites.Get();
+        }
+        catch (Exception)
+        {
+            _ = CompleteWriteAsync(write, buffer, inlineWrites);
+            return;
+        }
+
+        completion.Await(this, write, buffer, inlineWrites);
+    }
+
+    /// <summary>
+    /// Ends a write that an object of the server's pool waited for; called by that object's continuation, once, when
+    /// the write has ended, with the object already cleared. In this order: the object goes back to the pool, before
+    /// anything else is written, so that the next pending write of this drain reuses it; the stamp of the write
+    /// deadline is cleared; and the send path is carried on (<see cref="ContinueSending"/>), which returns the
+    /// write's buffer and begins the close when the write failed. It runs on the thread that completed the write and
+    /// throws nothing there: a pool that refuses the object ends the connection as a fault
+    /// (<see cref="EndFaulted"/>), with the send path carried on all the same, and whatever else throws is caught by
+    /// <see cref="ContinueSending"/>.
+    /// </summary>
+    /// <param name="completion">
+    /// The object that waited, cleared.
+    /// </param>
+    /// <param name="buffer">
+    /// The rented buffer the write was given, or <see langword="null"/> for a piece of the host's memory.
+    /// </param>
+    /// <param name="failed">
+    /// Whether the write failed.
+    /// </param>
+    /// <param name="insideTheRegistration">
+    /// Whether the write completed while its continuation was being registered and the continuation is running
+    /// inside that registration, on the stack of the caller that started the write: it then counts as one more of
+    /// that caller's writes, as a write does that had completed by the time <see cref="CompleteWrite"/> looked.
+    /// </param>
+    /// <param name="inlineWrites">
+    /// How many writes that complete at once the caller that started the write still made on its thread; used only
+    /// with <paramref name="insideTheRegistration"/>.
+    /// </param>
+    internal void EndPendingWrite(PendingWrite completion, byte[]? buffer, bool failed, bool insideTheRegistration,
+        int inlineWrites)
+    {
+        try
+        {
+            _server.Pools.PendingWrites.Return(completion);
+        }
+        catch (Exception exception)
+        {
+            // The object is left to the garbage collector. This thread holds the send path, so the close finds it
+            // taken and aborts the link; the step below then gives the path up and drops what waits.
+            EndFaulted(exception);
+        }
+
+        Volatile.Write(ref _writeStartedAt, value: 0);
+        ContinueSending(buffer, failed,
+            insideTheRegistration ? Math.Min(inlineWrites, InlineWrites) - 1 : int.MaxValue);
+    }
+
+    /// <summary>
+    /// Awaits a write that did not complete at once, then carries the send path on, as <see cref="EndPendingWrite"/>
+    /// does: the fall-back of <see cref="CompleteWrite"/> for the one write whose pooled object could not be had. It
+    /// allocates its state and a task, which is why it is not the usual way. A fault in what follows the write is
+    /// caught by <see cref="ContinueSending"/>, so the task never fails and nothing is left unobserved.
     /// </summary>
     /// <param name="write">
     /// The write in progress.
@@ -920,7 +1025,9 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Awaits a WebSocket close that did not complete at once, then gives the send path up. A close that failed
-    /// aborts the link, so that the connection ends now and not at the close deadline.
+    /// aborts the link, so that the connection ends now and not at the close deadline. It is an async method, which
+    /// allocates its state and a task, deliberately: a connection closes once, at its end, so this is not a path that
+    /// steady traffic takes, unlike a pending write (<see cref="CompleteWrite"/>).
     /// </summary>
     /// <param name="close">
     /// The close in progress.

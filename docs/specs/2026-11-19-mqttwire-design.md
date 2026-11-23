@@ -702,6 +702,26 @@ instant.
   write. If the write completes at once, which is the normal case, the buffer goes back to the
   pool and nothing was allocated for this connection. If it does not, the caller returns
   anyway; the write's completion carries on.
+- **A write that does not complete at once allocates nothing either, in the steady state.**
+  Under back-pressure that is every write, and every piece of a large PUBLISH, so it is not
+  awaited by an `async` method, which would allocate its state and a task each time. It is
+  awaited by a small object taken from a pool of the server's only when a write is in fact
+  pending: the object registers one continuation with the write and, when the write has ended,
+  takes its outcome, goes back to the pool, and only then carries the send path on, so one
+  object serves all the pending writes of a drain. A write that has completed by the time it is
+  looked at takes nothing from the pool and is handled on the caller's stack, as one more of
+  that caller's 16 writes; so is one that completes at the very moment its continuation is
+  registered. Should the pool fail, that one write is awaited by an `async` method instead, so
+  its buffer is still returned once, after the write. The WebSocket close of a connection,
+  which happens once, at its end, is still awaited by an `async` method.
+- **What runs when a pending write ends does not run in the context of the caller that started
+  it.** The continuation is registered without the caller's execution context, as the hand-over
+  to the thread pool is: the drain is not the host's call. So what the completion of a write
+  reaches (the drain of what waits, the close that follows a failed write, the log line of that
+  close or of a fault, memory of the host's that is read as a payload is encoded) sees no
+  `AsyncLocal` value of the `TrySend` caller, a logging scope included; it sees what the thread
+  that completed the write has. `OnClosed` is not reached this way: it is called by the
+  connection's own run, in the context of its request, as before.
 - **A write in progress:** the message is added to what waits for this connection. Whoever
   completes the write in progress sends what has been added, by the scheduling rule below. A
   caller writes at most 16 packets on its own thread while the writes complete at once (one
@@ -710,8 +730,10 @@ instant.
   thread-pool thread.
 - **What waits is pooled per server.** The queue of waiting deliveries and the QoS exchange
   records are objects taken from a pool of the server's with the first waiting delivery or the
-  first exchange, and returned, cleared, with the last. At most 1,024 of each are retained, and
-  a queue that grew past 64 entries is not retained. An idle connection holds neither.
+  first exchange, and returned, cleared, with the last. The object that waits for a pending
+  write is taken when a write does not complete at once and returned when that write has
+  ended. At most 1,024 of each are retained, and a queue that grew past 64 entries is not
+  retained. An idle connection holds none of them.
 - **A rented encoding buffer is never larger than 64 KB.** A message whose whole packet is at
   most 16 KB is copied behind its header into one buffer and written at once. For a larger one
   the header is written from a buffer of its own and the payload is then written straight from
@@ -1513,6 +1535,10 @@ the owner there:
     the moment it is taken until its write has ended; "too large" for the option is the topic and
     the payload together. Only payloads used to be counted, so messages with long topics of their
     own and empty payloads were held without bound but for `MaxOutgoingMessages` (6.2, 6.6).
+47. A write that does not complete at once is awaited by an object pooled per server, at most
+    1,024 retained, not by an `async` method: a pending write, and each pending piece of a
+    large PUBLISH, used to allocate a state machine and a task. Its continuation runs without
+    the execution context of the caller that started the write (6.6).
 
 ## 11. Left to the builder
 

@@ -131,8 +131,8 @@ internal static class ServerLimits
     public const int MaxTopicBytes = 65_526;
 
     /// <summary>
-    /// The most idle objects of each kind (queues of waiting deliveries, exchange records) the server's pools keep
-    /// for reuse.
+    /// The most idle objects of each kind (queues of waiting deliveries, exchange records, objects that wait for a
+    /// pending write) the server's pools keep for reuse.
     /// </summary>
     public const int MaxPooledObjects = 1_024;
 

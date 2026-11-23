@@ -68,6 +68,27 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     private bool _skipWaits;
 
     /// <summary>
+    /// Whether a write stays pending on <see cref="_reusableWrite"/> until <see cref="CompletePendingWrite"/>.
+    /// </summary>
+    private bool _pendWrites;
+
+    /// <summary>
+    /// The one source every write pends on in the mode of <see cref="PendWrites"/>, or <see langword="null"/> until
+    /// that mode is first turned on, so a link that never uses it costs nothing more.
+    /// </summary>
+    private ReusableWrite? _reusableWrite;
+
+    /// <summary>
+    /// Whether a write is pending on <see cref="_reusableWrite"/>.
+    /// </summary>
+    private bool _writePending;
+
+    /// <summary>
+    /// The packet of the write that is pending on <see cref="_reusableWrite"/>.
+    /// </summary>
+    private ReadOnlyMemory<byte> _pendingWriteBuffer;
+
+    /// <summary>
     /// Whether <see cref="Abort"/> leaves a pending wait or read pending, until <see cref="Deliver"/>,
     /// <see cref="EndFromPeer"/> or <see cref="FailReads"/> ends it.
     /// </summary>
@@ -243,6 +264,20 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
             lock (_gate)
             {
                 return _held.Count > 0 ? _held.Peek().Buffer : default;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets a value indicating whether a write is pending in the mode of <see cref="PendWrites"/>.
+    /// </summary>
+    public bool IsWritePending
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _writePending;
             }
         }
     }
@@ -476,6 +511,68 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     }
 
     /// <summary>
+    /// Makes later writes stay pending, one at a time, each until <see cref="CompletePendingWrite"/> ends it. Unlike
+    /// <see cref="HoldWrites"/>, which gives every held write a task of its own, every write here pends on one source
+    /// that is reused, so a pending write allocates nothing in the link: for a test that measures what a write that
+    /// does not complete at once costs its writer. One write at a time is all a WebSocket takes; a second one begun
+    /// while one is pending is counted in <see cref="OverlappingWrites"/> and fails. Whoever awaits a write must take
+    /// its result before it begins the next, as an <c>await</c> does.
+    /// </summary>
+    public void PendWrites()
+    {
+        lock (_gate)
+        {
+            _reusableWrite ??= new ReusableWrite();
+            _pendWrites = true;
+        }
+    }
+
+    /// <summary>
+    /// Ends the write that is pending in the mode of <see cref="PendWrites"/>, if there is one; later writes still
+    /// pend. What awaits the write carries on here, on the calling thread, before this returns, whatever
+    /// synchronization context the thread has. A write that succeeds counts towards <see cref="WriteCount"/> and
+    /// <see cref="TakeWritten"/>.
+    /// </summary>
+    /// <param name="exception">
+    /// The exception the write fails with, or <see langword="null"/> to complete it successfully.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when a write was pending and has been ended; <see langword="false"/> when none was,
+    /// and nothing changed.
+    /// </returns>
+    public bool CompletePendingWrite(Exception? exception = null)
+    {
+        ReusableWrite write;
+        lock (_gate)
+        {
+            if (!_writePending || _reusableWrite is null)
+            {
+                return false;
+            }
+
+            write = _reusableWrite;
+            _writePending = false;
+            if (exception is null)
+            {
+                AppendWritten(_pendingWriteBuffer.Span);
+            }
+
+            _pendingWriteBuffer = default;
+        }
+
+        if (exception is null)
+        {
+            write.Succeed();
+        }
+        else
+        {
+            write.Fail(exception);
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Makes every later <see cref="WaitForDataAsync"/> complete at once, so that the read that follows it stays
     /// pending, holding its buffer, until data comes or the read is ended.
     /// </summary>
@@ -657,6 +754,20 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
                     return ValueTask.FromException(new OperationCanceledException());
                 }
 
+                if (_pendWrites && _reusableWrite is { } reusable)
+                {
+                    if (_writePending)
+                    {
+                        // Counted as overlapping where it began; the one source cannot carry two writes.
+                        return ValueTask.FromException(
+                            new InvalidOperationException("A write is already pending on the link."));
+                    }
+
+                    _writePending = true;
+                    _pendingWriteBuffer = packet;
+                    return new ValueTask(reusable, reusable.Version);
+                }
+
                 if (_holdWrites)
                 {
                     TaskCompletionSource completion = new();
@@ -711,7 +822,8 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     }
 
     /// <summary>
-    /// Counts a write or a close that begins: as overlapping when another has begun and not returned, or is held;
+    /// Counts a write or a close that begins: as overlapping when another has begun and not returned, or is held
+    /// or pending;
     /// and as after the abort when the link was aborted, the second and later ones on this link also in the shared
     /// checks. The caller takes the count of beginnings down again when its call returns.
     /// </summary>
@@ -720,7 +832,7 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
         bool overlapping = Interlocked.Increment(ref _beginning) > 1;
         lock (_gate)
         {
-            if (overlapping || _held.Count > 0)
+            if (overlapping || _held.Count > 0 || _writePending)
             {
                 OverlappingWrites++;
                 Checks?.NoteOverlappingWrite();
@@ -992,6 +1104,62 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
         }
 
         return take;
+    }
+
+    /// <summary>
+    /// The one source the writes of a link pend on in the mode of <see cref="PendWrites"/>: completed by the test,
+    /// with what awaits it carrying on inline, and ready for the next write as soon as its result has been taken.
+    /// </summary>
+    private sealed class ReusableWrite : IValueTaskSource
+    {
+        /// <summary>
+        /// The state of the write that pends now, or of the last one.
+        /// </summary>
+        private ManualResetValueTaskSourceCore<bool> _core = new() { RunContinuationsAsynchronously = false };
+
+        /// <summary>
+        /// Gets the version of the write that pends next, to hand out with its task.
+        /// </summary>
+        public short Version => _core.Version;
+
+        /// <summary>
+        /// Completes the pending write successfully; what awaits it carries on before this returns.
+        /// </summary>
+        public void Succeed() => _core.SetResult(result: true);
+
+        /// <summary>
+        /// Fails the pending write; what awaits it carries on before this returns.
+        /// </summary>
+        /// <param name="exception">
+        /// The exception the write throws.
+        /// </param>
+        public void Fail(Exception exception) => _core.SetException(exception);
+
+        /// <inheritdoc/>
+        public ValueTaskSourceStatus GetStatus(short token) => _core.GetStatus(token);
+
+        /// <inheritdoc/>
+        public void OnCompleted(Action<object?> continuation, object? state, short token,
+            ValueTaskSourceOnCompletedFlags flags) =>
+            _core.OnCompleted(continuation, state, token, flags);
+
+        /// <summary>
+        /// Takes the result of the write and readies the source for the next one.
+        /// </summary>
+        /// <param name="token">
+        /// The version token of the write.
+        /// </param>
+        public void GetResult(short token)
+        {
+            try
+            {
+                _core.GetResult(token);
+            }
+            finally
+            {
+                _core.Reset();
+            }
+        }
     }
 
     /// <summary>

@@ -11,7 +11,8 @@ namespace MqttWire.Tests.Server;
 /// Proves the server's hot paths allocate nothing in steady state (AGENTS "Hot Paths", design 6.6): the read loop
 /// receiving PINGREQ and PUBLISH at QoS 0, 1 and 2 with their answers, <c>TrySend</c> at QoS 0, a QoS 1 exchange, a
 /// large payload written in pieces, deliveries and answers that wait behind a held write, a delivery that waits for
-/// the client's window, and the sweep over a thousand connections. Each test runs its work
+/// the client's window, the same sends over a link that leaves every write pending, and the sweep over a thousand
+/// connections. Each test runs its work
 /// <see cref="Iterations"/> times as a warm-up, so that every buffer, pool and queue has reached its size and the JIT
 /// has done its work, then measures <see cref="Iterations"/> more as the difference of two readings of the allocated
 /// bytes of the current thread.
@@ -20,8 +21,11 @@ namespace MqttWire.Tests.Server;
 /// All measured work runs on the test thread and completes synchronously: the in-memory link runs the read loop
 /// inline and its writes complete at once, and a held write is released with the test runner's synchronization
 /// context taken off the thread (<see cref="TestConnection.CompleteHeldWrites"/>), so that what follows it runs here.
-/// A write that does not complete at once allocates the state machine that awaits it, by design; the tests that hold
-/// a write start that write outside the measurement, and measure only what is added behind it. The server rents from
+/// A write that does not complete at once allocates nothing in the server, which awaits it with a pooled object; the
+/// tests of that use a link whose pending writes share one source (<see cref="MemoryLink.PendWrites"/>) and complete
+/// each write on this thread. A write held with <see cref="MemoryLink.HoldWrites"/> has a task of its own, which the
+/// link allocates, so the tests that hold a write that way start it outside the measurement and measure only what is
+/// added behind it. The server rents from
 /// <see cref="ArrayPool{T}.Shared"/>, the handler records no calls, and the delivered packets, the expected bytes and
 /// the link are all taken before the first reading. The tests run alone, not in parallel with others. In a Debug
 /// build, which compiles every async state machine as a class, they check only what was sent and handled.
@@ -278,8 +282,8 @@ public sealed class ServerAllocationTests
     /// Proves a <c>TrySend</c> that waits behind a held write allocates nothing in an optimized build once the queue
     /// exists: the queue of waiting deliveries comes from the server's pool and goes back to it when it has been
     /// drained, so adding to it allocates nothing. Each hold of 50 deliveries is started and released outside the
-    /// measurement, since the write that is held allocates its awaiting state by design; the 1,000 measured sends are
-    /// the sum of the measurements of each hold.
+    /// measurement, since the link gives the write it holds a task of its own; the 1,000 measured sends are the sum
+    /// of the measurements of each hold.
     /// </summary>
     [Fact]
     public void TrySend_BehindAHeldWrite_AllocatesNothingOnceTheQueueExists()
@@ -303,9 +307,8 @@ public sealed class ServerAllocationTests
     /// <summary>
     /// Proves that an answer that waits behind a held write allocates nothing in an optimized build once the control
     /// buffer has been rented: a QoS 1 PUBLISH is read, handed to the host, and its PUBACK appended behind the PUBACKs
-    /// that wait. Each hold of 200 publishes is started and released outside the measurement, since the write that is
-    /// held allocates its awaiting state by design; the 1,000 measured publishes are the sum of the measurements of
-    /// each hold.
+    /// that wait. Each hold of 200 publishes is started and released outside the measurement, since the link gives the
+    /// write it holds a task of its own; the 1,000 measured publishes are the sum of the measurements of each hold.
     /// </summary>
     [Fact]
     public void Answer_BehindAHeldWrite_AllocatesNothingOnceTheControlBufferIsRented()
@@ -362,6 +365,97 @@ public sealed class ServerAllocationTests
         AssertNothingAllocated(after - before);
         link.TakeWritten().ShouldBe(expected);
         server.GetCounts().HoldsRecords.ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// Proves that a write that does not complete at once allocates nothing in an optimized build, in steady state:
+    /// a QoS 0 delivery whose write the link leaves pending is awaited by a completion object from the server's pool,
+    /// with no task and no state machine of its own, and the delivery that waited behind it is written by that
+    /// completion, pending in its turn, on the same object. Every round is two sends and the two completions of their
+    /// writes, on this thread.
+    /// </summary>
+    [Fact]
+    public void TrySend_QoS0WithEveryWritePending_AllocatesNothing()
+    {
+        // Arrange
+        (_, TestConnection connection, MqttWireConnection server) = Connect(connect: null);
+        MemoryLink link = connection.Link;
+        link.PendWrites();
+        SendPendingEach(server, link);
+        link.TakeWritten();
+        byte[] expected = Repeat(ClientPackets.PublishQoS0, 2 * Iterations);
+
+        // Act
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        SendPendingEach(server, link);
+        long after = GC.GetAllocatedBytesForCurrentThread();
+
+        // Assert
+        AssertNothingAllocated(after - before);
+        link.TakeWritten().ShouldBe(expected);
+        link.IsWritePending.ShouldBeFalse();
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
+    }
+
+    /// <summary>
+    /// Proves that a QoS 1 exchange of a delivery whose write does not complete at once allocates nothing in an
+    /// optimized build: <c>TrySend</c> with its record, the pending write awaited by a pooled completion object, the
+    /// completion of the write, and the client's PUBACK.
+    /// </summary>
+    [Fact]
+    public void TrySend_QoS1ExchangeWithEveryWritePending_AllocatesNothing()
+    {
+        // Arrange
+        (_, TestConnection connection, MqttWireConnection server) = Connect(connect: null);
+        MemoryLink link = connection.Link;
+        byte[][] pubAcks = BuildPubAcks(2 * Iterations);
+        link.PendWrites();
+        ExchangeQoS1Pending(server, link, pubAcks, first: 0);
+        link.TakeWritten();
+        byte[] expected = [.. Enumerable.Range(Iterations + 1, Iterations)
+            .SelectMany(static identifier => ServerPackets.Delivery(MqttQoS.AtLeastOnce, (ushort)identifier, "hi"u8))];
+
+        // Act
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        ExchangeQoS1Pending(server, link, pubAcks, first: Iterations);
+        long after = GC.GetAllocatedBytesForCurrentThread();
+
+        // Assert
+        AssertNothingAllocated(after - before);
+        link.TakeWritten().ShouldBe(expected);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
+    }
+
+    /// <summary>
+    /// Proves that a delivery of 200,000 bytes whose every piece is left pending by the link, the header and each of
+    /// the four pieces of the payload, allocates nothing in an optimized build: each pending piece is awaited by the
+    /// one pooled completion object, which is back in the pool before the next piece is written. The first delivery's
+    /// bytes are checked whole; the link then only counts the writes, five for each delivery.
+    /// </summary>
+    [Fact]
+    public void TrySend_LargePayloadWithEveryPiecePending_AllocatesNothing()
+    {
+        // Arrange
+        (_, TestConnection connection, MqttWireConnection server) = Connect(connect: null);
+        MemoryLink link = connection.Link;
+        byte[] payload = ServerPackets.Letters('x', LargePayloadLength);
+        link.PendWrites();
+        server.TrySend(ServerHarness.Topic, payload, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        CompleteEveryPendingWrite(link).ShouldBe(LargeDeliveryWrites);
+        link.TakeWritten().ShouldBe(ServerPackets.Delivery(payload));
+        link.DiscardsWritten = true;
+        SendLargePendingEach(server, link, payload);
+        int writesBefore = link.WriteCount;
+
+        // Act
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        SendLargePendingEach(server, link, payload);
+        long after = GC.GetAllocatedBytesForCurrentThread();
+
+        // Assert
+        AssertNothingAllocated(after - before);
+        (link.WriteCount - writesBefore).ShouldBe(LargeDeliveryWrites * Iterations);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
     }
 
     /// <summary>
@@ -527,6 +621,97 @@ public sealed class ServerAllocationTests
             server.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtLeastOnce);
             link.Deliver(pubAcks[first + i]);
         }
+    }
+
+    /// <summary>
+    /// Runs <see cref="Iterations"/> rounds of two QoS 0 deliveries over a link that leaves every write pending: the
+    /// first is handed to the link and pends, the second waits behind it, the completion of the first write writes
+    /// the second, which pends in its turn, and the completion of that leaves the send path idle.
+    /// </summary>
+    /// <param name="server">
+    /// The connection.
+    /// </param>
+    /// <param name="link">
+    /// The connection's link, in the mode of <see cref="MemoryLink.PendWrites"/>.
+    /// </param>
+    private static void SendPendingEach(MqttWireConnection server, MemoryLink link)
+    {
+        for (int i = 0; i < Iterations; i++)
+        {
+            server.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtMostOnce);
+            server.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtMostOnce);
+            link.CompletePendingWrite();
+            link.CompletePendingWrite();
+        }
+    }
+
+    /// <summary>
+    /// Runs <see cref="Iterations"/> QoS 1 exchanges of a delivery over a link that leaves every write pending:
+    /// <c>TrySend</c>, the completion of its write, then the client's PUBACK.
+    /// </summary>
+    /// <param name="server">
+    /// The connection.
+    /// </param>
+    /// <param name="link">
+    /// The connection's link, in the mode of <see cref="MemoryLink.PendWrites"/>.
+    /// </param>
+    /// <param name="pubAcks">
+    /// The PUBACK of each identifier, built beforehand; identifier <c>n</c> at index <c>n - 1</c>.
+    /// </param>
+    /// <param name="first">
+    /// The index of the PUBACK of the first exchange.
+    /// </param>
+    private static void ExchangeQoS1Pending(MqttWireConnection server, MemoryLink link, byte[][] pubAcks, int first)
+    {
+        for (int i = 0; i < Iterations; i++)
+        {
+            server.TrySend(ServerHarness.Topic, s_hi, MqttQoS.AtLeastOnce);
+            link.CompletePendingWrite();
+            link.Deliver(pubAcks[first + i]);
+        }
+    }
+
+    /// <summary>
+    /// Sends a large payload <see cref="Iterations"/> times over a link that leaves every write pending, completing
+    /// each piece of each delivery in turn.
+    /// </summary>
+    /// <param name="server">
+    /// The connection.
+    /// </param>
+    /// <param name="link">
+    /// The connection's link, in the mode of <see cref="MemoryLink.PendWrites"/>.
+    /// </param>
+    /// <param name="payload">
+    /// The payload, written in pieces from this memory.
+    /// </param>
+    private static void SendLargePendingEach(MqttWireConnection server, MemoryLink link, byte[] payload)
+    {
+        for (int i = 0; i < Iterations; i++)
+        {
+            server.TrySend(ServerHarness.Topic, payload, MqttQoS.AtMostOnce);
+            CompleteEveryPendingWrite(link);
+        }
+    }
+
+    /// <summary>
+    /// Completes the pending write of a link, and each write its completion leaves pending in its turn, until none
+    /// is pending.
+    /// </summary>
+    /// <param name="link">
+    /// The link, in the mode of <see cref="MemoryLink.PendWrites"/>.
+    /// </param>
+    /// <returns>
+    /// How many writes were completed.
+    /// </returns>
+    private static int CompleteEveryPendingWrite(MemoryLink link)
+    {
+        int completed = 0;
+        while (link.CompletePendingWrite())
+        {
+            completed++;
+        }
+
+        return completed;
     }
 
     /// <summary>

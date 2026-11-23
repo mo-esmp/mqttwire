@@ -269,7 +269,7 @@ public sealed partial class MqttWireConnection
     /// end it runs is the start of a close through the send path: the DISCONNECT handed to the link and the WebSocket
     /// close, neither awaited. It does not throw, and should it all the same, the sweep ends the connection as a
     /// fault and goes on (<see cref="MqttWireServer.Sweep"/>); it allocates only when it hands a source to the thread
-    /// pool or a write or close does not complete at once. An abort ends the link's pending reads, whose
+    /// pool or a WebSocket close does not complete at once. An abort ends the link's pending reads, whose
     /// continuations may run on the thread that aborts, as with any abort; the end of the run never does, because the
     /// run waits for the abort to return and then carries on a thread-pool thread (<see cref="TryEndRun"/>).
     /// </summary>
