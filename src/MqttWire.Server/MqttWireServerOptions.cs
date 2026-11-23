@@ -32,9 +32,12 @@ public sealed class MqttWireServerOptions
 
     /// <summary>
     /// Gets or sets the most bytes that may wait to be sent to one client. At least 65,536; the default is
-    /// 1,048,576. A client that falls further behind is disconnected with 0x97 (quota exceeded). A single message
-    /// with a larger payload is never sent: <see cref="MqttWireConnection.TrySend"/> answers
-    /// <see cref="MqttSendResult.TooLarge"/> and the connection is closed with 0x95 (packet too large).
+    /// 1,048,576. What is counted is what the server keeps alive for the client on the way out: for every message it
+    /// has taken and not yet written, the UTF-8 bytes of the topic and the bytes of the payload (for each message,
+    /// also when several share one topic or one payload), and the bytes of the acknowledgements and other control
+    /// packets that wait. A client that falls further behind is disconnected with 0x97 (quota exceeded). A single
+    /// message whose topic and payload are together larger is never sent: <see cref="MqttWireConnection.TrySend"/>
+    /// answers <see cref="MqttSendResult.TooLarge"/> and the connection is closed with 0x95 (packet too large).
     /// </summary>
     public int MaxOutgoingBytes { get; set; } = 1_048_576;
 }

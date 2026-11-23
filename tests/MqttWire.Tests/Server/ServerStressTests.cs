@@ -31,6 +31,12 @@ public sealed class ServerStressTests
     private const int PayloadLength = 8;
 
     /// <summary>
+    /// The length of the topic the stress messages are sent to, <see cref="ServerHarness.Topic"/>, in bytes, which
+    /// is counted against <see cref="MqttWireServerOptions.MaxOutgoingBytes"/> with each payload.
+    /// </summary>
+    private const int TopicLength = 3;
+
+    /// <summary>
     /// The number of rounds of <see cref="TrySendAndClose_Racing_NeverWriteAfterTheCloseAndReturnEveryBuffer"/>.
     /// </summary>
     private const int CloseRounds = 200;
@@ -50,7 +56,8 @@ public sealed class ServerStressTests
     /// ninth thread holds the link's writes and releases them again and again, get every message written exactly once
     /// and, for each thread, in the order of its calls: 40,000 PUBLISH packets, whose payloads, the sender's number and
     /// a sequence number, give each sender's 0 to 4,999 in order. Afterwards the send path is idle, nothing waits, no
-    /// byte is counted and every buffer is back. The limits are raised so that nothing is evicted. A tenth thread runs
+    /// byte is counted and every buffer is back. The limits are raised so that nothing is evicted: every message
+    /// may wait at once, each counted with its topic and its payload. A tenth thread runs
     /// the sweep without pause meanwhile, with the clock standing still, so that the sweep reads the connection while
     /// its writes begin and end and no deadline passes.
     /// </summary>
@@ -65,7 +72,7 @@ public sealed class ServerStressTests
         ServerHarness harness = ServerHarness.Create(static options =>
         {
             options.MaxOutgoingMessages = Total;
-            options.MaxOutgoingBytes = Total * PayloadLength;
+            options.MaxOutgoingBytes = Total * (TopicLength + PayloadLength);
         });
         TestConnection connection = harness.Connect();
         MqttWireConnection server = connection.Connection.ShouldNotBeNull();

@@ -125,7 +125,7 @@ come before the endpoint.
 | `MaxQoS` | `ExactlyOnce` | The highest QoS accepted from clients and used towards them: `AtLeastOnce` or `ExactlyOnce`. |
 | `MaxPublishPayloadBytes` | 65,536 | The largest payload a client may publish, from 1 to 16,777,216. |
 | `MaxOutgoingMessages` | 1,000 | How many messages may wait for one client. A client that falls further behind is disconnected. |
-| `MaxOutgoingBytes` | 1,048,576 | How many bytes may wait for one client, at least 65,536. A client that falls further behind is disconnected. |
+| `MaxOutgoingBytes` | 1,048,576 | How many bytes may wait for one client, at least 65,536: the topic and the payload of every message taken and not yet written, and the acknowledgements that wait. A client that falls further behind is disconnected. |
 
 An invalid option throws `OptionsValidationException` at start-up, and the host does not start.
 The deadlines and the other bounds are fixed.

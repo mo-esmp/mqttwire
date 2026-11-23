@@ -132,14 +132,16 @@ public sealed partial class MqttWireConnection
     /// <summary>
     /// The one hold of the lock in which <see cref="TakeDelivery"/> decides what becomes of a message: refused, to
     /// be written now by this caller (the send path taken, the message counted and its exchange record taken), or
-    /// added to what waits. Whatever can throw in it, the pool of the records or of the queues, is asked before
-    /// anything changes.
+    /// added to what waits. A message that is taken is counted in the same hold, with the bytes of its topic and of
+    /// its payload (<see cref="GetCharge"/>), whether it is written now or waits; one more that would take the count
+    /// past <see cref="MqttWireServerOptions.MaxOutgoingBytes"/> evicts. Whatever can throw in it, the pool of the
+    /// records or of the queues, is asked before anything changes.
     /// </summary>
     /// <param name="delivery">
     /// The message.
     /// </param>
     /// <param name="tooLarge">
-    /// Whether the message is too large for the client or for the options.
+    /// Whether the message is too large for the client, for the options or for MQTT (<see cref="IsTooLargeToSend"/>).
     /// </param>
     /// <param name="now">
     /// The time, a timestamp of the server's clock, for the record of a QoS 1 or 2 delivery; 0 at QoS 0.
@@ -161,7 +163,6 @@ public sealed partial class MqttWireConnection
         out ushort packetIdentifier)
     {
         MqttWireServerOptions options = _server.Options;
-        int payloadLength = delivery.Payload.Length;
         write = false;
         packetIdentifier = 0;
         lock (_sendLock)
@@ -176,27 +177,29 @@ public sealed partial class MqttWireConnection
                 return MqttSendResult.TooLarge;
             }
 
+            // The topic and the payload: the same number is taken away when the delivery's write has ended.
+            int charge = GetCharge(delivery);
             if (!_writing && _waiting is null && HasWindowRoom(delivery.QoS))
             {
                 // This caller writes the message; its record is in place before its packet is handed to the link,
                 // and is taken first, so that a pool that throws leaves the path free.
                 packetIdentifier = TakeDeliveryRecord(delivery.QoS, now);
                 _writing = true;
-                _writingBytes = payloadLength;
-                _outgoingBytes += payloadLength;
+                _writingBytes = charge;
+                _outgoingBytes += charge;
                 write = true;
                 return MqttSendResult.Taken;
             }
 
             if ((_waiting?.Count ?? 0) >= options.MaxOutgoingMessages
-                || (long)_outgoingBytes + payloadLength > options.MaxOutgoingBytes)
+                || (long)_outgoingBytes + charge > options.MaxOutgoingBytes)
             {
                 return MqttSendResult.Evicted;
             }
 
             _waiting ??= _server.Pools.Waiting.Get();
             _waiting.Enqueue(delivery);
-            _outgoingBytes += payloadLength;
+            _outgoingBytes += charge;
             return MqttSendResult.Taken;
         }
     }
@@ -238,7 +241,9 @@ public sealed partial class MqttWireConnection
 
     /// <summary>
     /// Tells whether a message is too large to send to a client, from its lengths alone and from the packet it
-    /// would really be: a payload over <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>; or a PUBLISH whose
+    /// would really be: a topic and a payload that are together over
+    /// <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>, which is what the message is charged while it is held
+    /// (<see cref="GetCharge"/>), so it could never be taken; or a PUBLISH whose
     /// Remaining Length, measured from the real length of its topic, its packet identifier at QoS 1 and 2 and its
     /// property length (<see cref="PublishCodec.MeasureRemainingLength"/>), is over the 268,435,455 that MQTT can
     /// carry; or whose whole packet, fixed header included, is over the Maximum Packet Size the client announced.
@@ -268,7 +273,7 @@ public sealed partial class MqttWireConnection
     internal static bool IsTooLargeToSend(int topicLength, int payloadLength, MqttQoS qos, int maxOutgoingBytes,
         int clientMaxPacketSize)
     {
-        if (payloadLength > maxOutgoingBytes)
+        if ((long)topicLength + payloadLength > maxOutgoingBytes)
         {
             return true;
         }
@@ -282,6 +287,24 @@ public sealed partial class MqttWireConnection
         // Within what MQTT carries, so it fits an int: the fixed header is the first byte and the length's own.
         return PacketHeader.GetLength((int)remainingLength) + remainingLength > clientMaxPacketSize;
     }
+
+    /// <summary>
+    /// Gets what a delivery is charged against <see cref="MqttWireServerOptions.MaxOutgoingBytes"/> for as long as
+    /// the connection holds it: the UTF-8 bytes of its topic and the bytes of its payload, both of which a waiting
+    /// delivery keeps alive. A topic shared by several deliveries is charged for each of them. The one number is
+    /// added when the delivery is taken, to be written now or to wait, and taken away when its write has ended
+    /// (its last piece, for a large payload); a delivery dropped by the end of the connection goes with the count,
+    /// which the Closing step clears. Called only for a delivery that is not too large to send
+    /// (<see cref="IsTooLargeToSend"/>), so the sum is at most the limit and fits an <see cref="int"/>.
+    /// </summary>
+    /// <param name="delivery">
+    /// The delivery.
+    /// </param>
+    /// <returns>
+    /// The bytes charged.
+    /// </returns>
+    private static int GetCharge(in PendingDelivery delivery) =>
+        delivery.Topic.Utf8.Length + delivery.Payload.Length;
 
     /// <summary>
     /// Sends an answer of the read path and returns at once (design 6.6). The answer is encoded into a rented buffer
@@ -754,7 +777,8 @@ public sealed partial class MqttWireConnection
     /// The step of a connection that is not Closing; called in the hold of <see cref="TakeNextStep"/>. In this
     /// order: the next piece of the large payload being written, of at most
     /// <see cref="ServerLimits.MaxEncodingBufferBytes"/>, because the pieces of one PUBLISH follow each other; then,
-    /// the delivery in progress being written whole and no longer counted, the waiting control packets, all of them
+    /// the delivery in progress being written whole and no longer counted (its topic and its payload leave the
+    /// count together, with its last piece), the waiting control packets, all of them
     /// as one piece, which so never wait behind a delivery; then the first waiting delivery when it has room in the
     /// client's window, taking its packet identifier and record in this hold, its queue going back to the pool when it
     /// was the last; and with none of them the send path is given up. When the first waiting delivery has no room,
@@ -844,7 +868,7 @@ public sealed partial class MqttWireConnection
         delivery = waiting.Peek();
         packetIdentifier = TakeDeliveryRecord(delivery.QoS, now);
         waiting.Dequeue();
-        _writingBytes = delivery.Payload.Length;
+        _writingBytes = GetCharge(delivery);
         if (waiting.Count == 0)
         {
             emptied = waiting;

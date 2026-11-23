@@ -25,7 +25,8 @@ namespace MqttWire.Server.Internal;
 /// The control packets that wait behind the write in progress.
 /// </param>
 /// <param name="OutgoingBytes">
-/// The bytes counted against <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>.
+/// The bytes counted against <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>: the topic and the payload of every
+/// delivery that waits or is being written, and the waiting control packets.
 /// </param>
 /// <param name="IsWriting">
 /// Whether the send path is taken: a write is in progress, or one is about to start.

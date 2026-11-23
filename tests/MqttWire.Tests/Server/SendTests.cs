@@ -69,7 +69,9 @@ public sealed class SendTests
         // Only the CONNACK has been written: the first message is with the link, the other two wait.
         writesWhileHeld.ShouldBe(1);
         whileHeld.WaitingDeliveries.ShouldBe(2);
-        whileHeld.OutgoingBytes.ShouldBe(6);
+
+        // Each message is counted with its topic, "a/b", and its payload of two bytes.
+        whileHeld.OutgoingBytes.ShouldBe(3 * (3 + 2));
         whileHeld.IsWriting.ShouldBeTrue();
         connection.TakeWritten().ShouldBe(
             [.. ServerPackets.Delivery("m1"u8), .. ServerPackets.Delivery("m2"u8), .. ServerPackets.Delivery("m3"u8)]);
@@ -167,7 +169,9 @@ public sealed class SendTests
 
         // Assert
         whileHeld.WaitingControlPackets.ShouldBe(1);
-        whileHeld.OutgoingBytes.ShouldBe(4);
+
+        // The message being written, its topic and its payload, and the two bytes of the PINGRESP.
+        whileHeld.OutgoingBytes.ShouldBe((3 + 2) + 2);
         connection.TakeWritten().ShouldBe([.. ServerPackets.Delivery("m1"u8), .. ClientPackets.PingResp]);
         harness.Pool.Outstanding.ShouldBe(0);
     }
@@ -195,7 +199,9 @@ public sealed class SendTests
 
         // Assert
         whileHeld.WaitingControlPackets.ShouldBe(3);
-        whileHeld.OutgoingBytes.ShouldBe(2 + 18);
+
+        // The message being written, its topic and its payload, and three UNSUBACKs of six bytes.
+        whileHeld.OutgoingBytes.ShouldBe((3 + 2) + 18);
 
         // The CONNACK, the message, and one write that holds the three UNSUBACKs.
         connection.Link.WriteCount.ShouldBe(3);
@@ -498,8 +504,8 @@ public sealed class SendTests
     }
 
     /// <summary>
-    /// Proves that <see cref="MqttWireServerOptions.MaxOutgoingBytes"/> is a hard bound on the payload bytes on the
-    /// way out, the delivery being written included: a message that would pass it evicts the connection.
+    /// Proves that <see cref="MqttWireServerOptions.MaxOutgoingBytes"/> is a hard bound on the bytes on the way out,
+    /// topics and payloads, the delivery being written included: a message that would pass it evicts the connection.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -527,12 +533,141 @@ public sealed class SendTests
         // Assert
         held.ShouldBe(MqttSendResult.Taken);
         waiting.ShouldBe(MqttSendResult.Taken);
-        bytesBefore.ShouldBe(60_000);
+        bytesBefore.ShouldBe(40_003 + 20_003);
         over.ShouldBe(MqttSendResult.Evicted);
         aborted.ShouldBeTrue();
         connection.TakeWritten().ShouldBeEmpty();
         harness.ClosedCalls().ShouldBe(["OnClosed c1 OutgoingLimitPassed"]);
         server.GetCounts().ShouldBe(ServerHarness.Idle);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that <see cref="MqttWireServerOptions.MaxOutgoingBytes"/> counts the topic of a delivery as well as its
+    /// payload, because a waiting delivery keeps both alive: 32 messages with empty payloads, each to a topic of its
+    /// own of 65,522 bytes, behind a held write at the default limit of 1,048,576. Sixteen of them are 1,048,352
+    /// bytes, so exactly 16 are taken (the one being written and 15 that wait); the 17th would make 1,113,874 and
+    /// evicts the connection, and nothing is taken after it. They used to be taken all 32, 2,096,704 bytes held
+    /// against a count of 0.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task TrySend_DistinctLongTopicsWithEmptyPayloadsBehindAHeldWrite_EvictsAtTheSeventeenth()
+    {
+        // Arrange
+        const int TopicBytes = 65_522;
+        const int Sends = 32;
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        MqttTopic[] topics = new MqttTopic[Sends];
+        for (int i = 0; i < Sends; i++)
+        {
+            byte[] utf8 = ServerPackets.Letters('t', TopicBytes);
+            utf8[0] = (byte)('A' + i);
+            topics[i] = MqttTopic.Create(utf8);
+        }
+
+        connection.Link.HoldWrites();
+        MqttSendResult[] results = new MqttSendResult[Sends];
+        ConnectionCounts atSixteen = default;
+
+        // Act
+        for (int i = 0; i < Sends; i++)
+        {
+            results[i] = server.TrySend(topics[i], ReadOnlyMemory<byte>.Empty, MqttQoS.AtMostOnce);
+            harness.AssertBounds();
+            if (i == 15)
+            {
+                atSixteen = server.GetCounts();
+            }
+        }
+
+        bool aborted = connection.Link.IsAborted;
+        connection.CompleteHeldWrites(new IOException("The socket was aborted."));
+        await connection.RunEnded();
+
+        // Assert
+        results[..16].ShouldAllBe(static result => result == MqttSendResult.Taken);
+        atSixteen.OutgoingBytes.ShouldBe(16 * TopicBytes);
+        atSixteen.OutgoingBytes.ShouldBe(1_048_352);
+        atSixteen.WaitingDeliveries.ShouldBe(15);
+        results[16].ShouldBe(MqttSendResult.Evicted);
+        results[17..].ShouldAllBe(static result => result == MqttSendResult.NotOpen);
+        aborted.ShouldBeTrue();
+        connection.TakeWritten().ShouldBeEmpty();
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 OutgoingLimitPassed"]);
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a topic shared by the deliveries that wait is counted once for each of them, with its payload,
+    /// from the moment a delivery is taken until its write has ended, and that the count is 0 again after the drain.
+    /// </summary>
+    [Fact]
+    public void TrySend_OneTopicForEveryWaitingDelivery_IsCountedForEachAndReleasedByTheDrain()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        MqttTopic topic = MqttTopic.Create("sensors/kitchen/temperature");
+        connection.Link.HoldWrites();
+
+        // Act
+        server.TrySend(topic, "m1"u8.ToArray(), MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        long written = server.GetCounts().OutgoingBytes;
+        server.TrySend(topic, "m2"u8.ToArray(), MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+        server.TrySend(topic, ReadOnlyMemory<byte>.Empty, MqttQoS.AtMostOnce).ShouldBe(MqttSendResult.Taken);
+        ConnectionCounts whileHeld = server.GetCounts();
+        harness.AssertBounds();
+        connection.CompleteHeldWrites();
+
+        // Assert: the topic is 27 bytes.
+        written.ShouldBe(27 + 2);
+        whileHeld.WaitingDeliveries.ShouldBe(2);
+        whileHeld.OutgoingBytes.ShouldBe((27 + 2) + (27 + 2) + 27);
+        server.GetCounts().OutgoingBytes.ShouldBe(0);
+        server.GetCounts().WaitingDeliveries.ShouldBe(0);
+        harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that "too large" for <see cref="MqttWireServerOptions.MaxOutgoingBytes"/> is the topic and the payload
+    /// together: behind a topic of 65,526 bytes and a limit of 65,536, a payload of 10 bytes is sent, the count going
+    /// back to 0, and one of 11 gets "too large" and closes the connection with DISCONNECT 0x95.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task TrySend_LongTopicAndPayloadTogetherOverMaxOutgoingBytes_ReturnsTooLargeAndClosesWith0x95()
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create(static options => options.MaxOutgoingBytes = 65_536);
+        TestConnection connection = harness.Connect();
+        MqttWireConnection server = connection.Connection.ShouldNotBeNull();
+        MqttTopic topic = MqttTopic.Create(ServerPackets.Letters('t', ServerLimits.MaxTopicBytes));
+
+        // Act
+        MqttSendResult atTheLimit = server.TrySend(topic, new byte[10], MqttQoS.AtMostOnce);
+        int writtenAtTheLimit = connection.TakeWritten().Length;
+        ConnectionCounts afterTheFirst = server.GetCounts();
+        MqttSendResult over = server.TrySend(topic, new byte[11], MqttQoS.AtMostOnce);
+        byte[] written = connection.TakeWritten();
+        connection.Link.EndFromPeer();
+        await connection.RunEnded();
+
+        // Assert: a fixed header of 4 bytes, the topic with its length, the property length and the payload.
+        atTheLimit.ShouldBe(MqttSendResult.Taken);
+        writtenAtTheLimit.ShouldBe(4 + 2 + ServerLimits.MaxTopicBytes + 1 + 10);
+        afterTheFirst.ShouldBe(ServerHarness.Idle);
+        over.ShouldBe(MqttSendResult.TooLarge);
+        written.ShouldBe(ServerPackets.Disconnect(MqttReasonCode.PacketTooLarge));
+        harness.ClosedCalls().ShouldBe(["OnClosed c1 MessageTooLargeToSend"]);
         harness.Pool.Outstanding.ShouldBe(0);
     }
 
@@ -565,7 +700,7 @@ public sealed class SendTests
 
         // Assert
         whileHeld.WaitingDeliveries.ShouldBe(1_000);
-        whileHeld.OutgoingBytes.ShouldBe(4_004);
+        whileHeld.OutgoingBytes.ShouldBe(1_001 * (3 + 4));
         connection.Link.IsAborted.ShouldBeFalse();
         connection.TakeWritten().ShouldBe(expected.ToArray());
         server.StateNow.ShouldBe(ConnectionState.Active);
@@ -702,10 +837,14 @@ public sealed class SendTests
 
     /// <summary>
     /// Proves that the sizing function holds a message to the client's Maximum Packet Size by the whole packet, its
-    /// fixed header included, and to <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>.
+    /// fixed header included, and to <see cref="MqttWireServerOptions.MaxOutgoingBytes"/> by its topic and its
+    /// payload together, which is what a waiting delivery keeps alive.
     /// </summary>
+    /// <param name="topicLength">
+    /// The topic's length in UTF-8 bytes, at QoS 0.
+    /// </param>
     /// <param name="payloadLength">
-    /// The payload's length, behind the topic "a/b" at QoS 0.
+    /// The payload's length.
     /// </param>
     /// <param name="maxOutgoingBytes">
     /// The limit of the options.
@@ -717,20 +856,23 @@ public sealed class SendTests
     /// Whether the message is too large to send.
     /// </param>
     [Theory]
-    [InlineData(4_087, 1_048_576, 4_096, false)]
-    [InlineData(4_088, 1_048_576, 4_096, true)]
-    [InlineData(121, 1_048_576, 129, false)]
-    [InlineData(122, 1_048_576, 129, true)]
-    [InlineData(65_536, 65_536, int.MaxValue, false)]
-    [InlineData(65_537, 65_536, int.MaxValue, true)]
-    public void IsTooLargeToSend_ClientsMaximumPacketSizeAndMaxOutgoingBytes_AreBothHeld(int payloadLength,
-        int maxOutgoingBytes, int clientMaxPacketSize, bool tooLarge)
+    [InlineData(3, 4_087, 1_048_576, 4_096, false)]
+    [InlineData(3, 4_088, 1_048_576, 4_096, true)]
+    [InlineData(3, 121, 1_048_576, 129, false)]
+    [InlineData(3, 122, 1_048_576, 129, true)]
+    [InlineData(3, 65_533, 65_536, int.MaxValue, false)]
+    [InlineData(3, 65_534, 65_536, int.MaxValue, true)]
+    [InlineData(65_526, 10, 65_536, int.MaxValue, false)]
+    [InlineData(65_526, 11, 65_536, int.MaxValue, true)]
+    [InlineData(65_526, 982_024, 1_048_576, int.MaxValue, false)]
+    [InlineData(65_526, 983_050, 1_048_576, int.MaxValue, false)]
+    [InlineData(65_526, 983_051, 1_048_576, int.MaxValue, true)]
+    [InlineData(65_526, int.MaxValue, int.MaxValue, int.MaxValue, true)]
+    public void IsTooLargeToSend_ClientsMaximumPacketSizeAndMaxOutgoingBytes_AreBothHeld(int topicLength,
+        int payloadLength, int maxOutgoingBytes, int clientMaxPacketSize, bool tooLarge)
     {
-        // Arrange
-        const int TopicLength = 3;
-
         // Act
-        bool result = MqttWireConnection.IsTooLargeToSend(TopicLength, payloadLength, MqttQoS.AtMostOnce,
+        bool result = MqttWireConnection.IsTooLargeToSend(topicLength, payloadLength, MqttQoS.AtMostOnce,
             maxOutgoingBytes, clientMaxPacketSize);
 
         // Assert
@@ -930,7 +1072,7 @@ public sealed class SendTests
         // Assert
         whileHeld.WaitingControlPackets.ShouldBe(1);
         whileHeld.WaitingDeliveries.ShouldBe(0);
-        whileHeld.OutgoingBytes.ShouldBe(4);
+        whileHeld.OutgoingBytes.ShouldBe((3 + 2) + 2);
         connection.Link.IsAborted.ShouldBeFalse();
         connection.TakeWritten().ShouldBe([.. ServerPackets.Delivery("m1"u8), .. ClientPackets.PingResp]);
         harness.Pool.Outstanding.ShouldBe(0);
@@ -1013,7 +1155,7 @@ public sealed class SendTests
 
         // Assert
         before.WaitingControlPackets.ShouldBe(16);
-        before.OutgoingBytes.ShouldBe(2 + 64_096);
+        before.OutgoingBytes.ShouldBe((3 + 2) + 64_096);
         abortedBefore.ShouldBeFalse();
         aborted.ShouldBeTrue();
         connection.TakeWritten().ShouldBeEmpty();
@@ -1024,8 +1166,9 @@ public sealed class SendTests
 
     /// <summary>
     /// Proves that the bytes of waiting answers count against <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>
-    /// with the delivery being written: with 65,536 allowed and a delivery of 60,000 bytes held, a SUBACK of 3,006
-    /// bytes waits, and a second, which would make 66,012, evicts the connection.
+    /// with the delivery being written: with 65,536 allowed and a delivery of 60,003 bytes held (its topic and a
+    /// payload of 60,000), a SUBACK of 3,006 bytes waits, and a second, which would make 66,015, evicts the
+    /// connection.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -1051,7 +1194,7 @@ public sealed class SendTests
 
         // Assert
         before.WaitingControlPackets.ShouldBe(1);
-        before.OutgoingBytes.ShouldBe(63_006);
+        before.OutgoingBytes.ShouldBe(60_003 + 3_006);
         abortedBefore.ShouldBeFalse();
         aborted.ShouldBeTrue();
         connection.TakeWritten().ShouldBeEmpty();

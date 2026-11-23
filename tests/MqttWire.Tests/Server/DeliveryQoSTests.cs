@@ -205,7 +205,9 @@ public sealed class DeliveryQoSTests
 
         // Assert
         waiting.WaitingDeliveries.ShouldBe(3);
-        waiting.OutgoingBytes.ShouldBe(6);
+
+        // Each waiting delivery is counted with its topic, "a/b", and its payload of two bytes.
+        waiting.OutgoingBytes.ShouldBe(3 * (3 + 2));
         waiting.IsWriting.ShouldBeFalse();
         fifth.ShouldBe(MqttSendResult.Evicted);
         connection.TakeWritten().ShouldBe(ServerPackets.Disconnect(MqttReasonCode.QuotaExceeded));

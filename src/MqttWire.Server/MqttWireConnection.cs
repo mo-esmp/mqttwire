@@ -154,15 +154,16 @@ public sealed partial class MqttWireConnection
     private long _writeStartedAt;
 
     /// <summary>
-    /// The bytes counted against <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>: the payloads of the waiting
-    /// deliveries and of the delivery being written, and the bytes of the waiting control packets. Guarded by
-    /// <see cref="_sendLock"/>.
+    /// The bytes counted against <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>: the topic and the payload of
+    /// each waiting delivery and of the delivery being written, and the bytes of the waiting control packets. Guarded
+    /// by <see cref="_sendLock"/>.
     /// </summary>
     private int _outgoingBytes;
 
     /// <summary>
-    /// The payload bytes of the delivery being written, which leave <see cref="_outgoingBytes"/> when its last
-    /// piece has been written; 0 when no delivery is being written. Guarded by <see cref="_sendLock"/>.
+    /// The bytes counted for the delivery being written, its topic and its payload, which leave
+    /// <see cref="_outgoingBytes"/> when its last piece has been written; 0 when no delivery is being written.
+    /// Guarded by <see cref="_sendLock"/>.
     /// </summary>
     private int _writingBytes;
 
@@ -306,7 +307,11 @@ public sealed partial class MqttWireConnection
     /// <see cref="MqttSendResult.Taken"/> when the server took the message, which means accepted, not delivered: it
     /// is written when the socket allows, and is dropped if the connection ends first. Otherwise why it did not: the
     /// connection is not open, the message is too large, or the connection was just evicted. A message that was
-    /// not taken is not queued. "Not open" changes nothing; "too large" and "evicted" also end the connection,
+    /// not taken is not queued. While the server holds a message, the bytes of its topic and of its payload count
+    /// against <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>, for each message, also when several share one
+    /// topic or one payload: a message whose topic and payload are together over that limit, or whose packet is
+    /// over what the client or MQTT accepts, is too large, and one that would take the count past the limit evicts
+    /// the connection. "Not open" changes nothing; "too large" and "evicted" also end the connection,
     /// with <see cref="MqttCloseReason.MessageTooLargeToSend"/> and <see cref="MqttCloseReason.OutgoingLimitPassed"/>.
     /// </returns>
     /// <exception cref="ArgumentException">

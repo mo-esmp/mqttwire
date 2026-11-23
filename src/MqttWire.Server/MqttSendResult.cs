@@ -17,14 +17,18 @@ public enum MqttSendResult
     NotOpen,
 
     /// <summary>
-    /// The message is larger than the client accepts, or than the server can hold for the connection; it was not
-    /// taken, and the connection is being closed with 0x95 (packet too large).
+    /// The message is larger than the client accepts (its packet is over the Maximum Packet Size the client
+    /// announced), than the server can hold for the connection (its topic and its payload are together over
+    /// <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>), or than MQTT can carry; it was not taken, and the
+    /// connection is being closed with 0x95 (packet too large).
     /// </summary>
     TooLarge,
 
     /// <summary>
-    /// The connection was just evicted because it could not keep up; the message was not taken, and the connection
-    /// is being closed with 0x97 (quota exceeded).
+    /// The connection was just evicted because it could not keep up: one more message would have passed
+    /// <see cref="MqttWireServerOptions.MaxOutgoingMessages"/>, or its topic and payload would have taken what waits
+    /// past <see cref="MqttWireServerOptions.MaxOutgoingBytes"/>. The message was not taken, and the connection is
+    /// being closed with 0x97 (quota exceeded).
     /// </summary>
     Evicted,
 }

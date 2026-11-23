@@ -256,7 +256,7 @@ value throws `OptionsValidationException`, and the host does not start):
 | `MaxQoS` | 2 | The highest QoS accepted from clients and used towards them. 1 or 2. |
 | `MaxPublishPayloadBytes` | 64 KiB | Largest payload a client may publish. From 1 byte to 16 MiB. |
 | `MaxOutgoingMessages` | 1,000 | Deliveries that may wait for one connection. At least 1. |
-| `MaxOutgoingBytes` | 1 MiB | Hard bound on what one connection holds on the way out. At least 64 KiB. |
+| `MaxOutgoingBytes` | 1 MiB | Hard bound on what one connection holds on the way out: for each message taken and not yet written, the bytes of its topic and of its payload; and the control packets that wait (6.6). At least 64 KiB. |
 
 The deadlines, the receive maximum (256) and the other bounds of 6.6 are internal constants.
 
@@ -748,11 +748,19 @@ window is stuck behind the delivery that waits for the window. So what waits is 
 
 - `MaxOutgoingMessages` counts **deliveries that are waiting**: behind a write in progress, or
   for room in a QoS window.
-- `MaxOutgoingBytes` is a **hard bound** on the payload bytes this connection holds on the way
+- `MaxOutgoingBytes` is a **hard bound** on the bytes this connection keeps alive on the way
   out: every waiting delivery, the delivery being written, and the waiting control packets.
-- **A single message larger than `MaxOutgoingBytes` is never sent.** `TrySend` says "too
-  large", and the connection is closed with `0x95`. What to log about it is the host's (it
-  knows what the message was).
+- **A delivery is counted with its topic as well as its payload:** the UTF-8 bytes of the topic
+  plus the bytes of the payload, because a delivery that waits keeps both alive, and a host may
+  give every message a topic of its own of up to 64 KB with an empty payload. The one number is
+  added when the message is taken, whether it is written at once or waits, and taken away when
+  its write has ended (with the last piece of a large payload); a delivery dropped by the end of
+  the connection leaves with the count, which is then cleared. A topic or a payload that several
+  deliveries share is counted for each of them: the server does not look at who else holds the
+  memory. So the count is never less than what the connection keeps alive, and may be more.
+- **A single message larger than `MaxOutgoingBytes` is never sent,** where "larger" is its topic
+  and its payload together. `TrySend` says "too large", and the connection is closed with
+  `0x95`. What to log about it is the host's (it knows what the message was).
 - **Nor is one that MQTT cannot carry, and that is judged from the packet the message would
   really be:** its Remaining Length, computed in 64 bits from the real length of the topic, the
   packet identifier (at QoS 1 and 2), the one byte of the property length and the payload, must
@@ -788,7 +796,7 @@ and the connection is closed with `0x95`.
 | Before CONNECT is complete | one read buffer of at most 16 KB, for at most 10 s; when packets came behind the CONNECT in it, the same buffer through Authenticating, for at most 10 s more |
 | The request given to `OnConnectAsync` | what a CONNECT of at most 16 KB decodes to: the client id, the user name, the password and the user properties as strings and objects of their own, about 150 KB when the CONNECT is nothing but short user properties; for the authentication deadline (10 s), longer only while a host that ignores its token keeps the request |
 | Read buffer while a packet is arriving | `MaxPublishPayloadBytes` + 5 KiB, for at most 10 s without a complete packet |
-| On the way out | `MaxOutgoingBytes` (1 MiB), plus one encoding buffer of at most 64 KB |
+| On the way out | `MaxOutgoingBytes` (1 MiB) of topics, payloads and waiting control packets, plus one encoding buffer of at most 64 KB |
 | QoS exchange records | 256 for what the client sends, 256 for what the server sends, a few bytes each |
 | Waiting control packets | 1,024 and 64 KB, counted in `MaxOutgoingBytes` |
 | How long a stalled connection holds any of it | the write deadline (15 s) |
@@ -1501,6 +1509,10 @@ the owner there:
     from the real topic length, the identifier and the property length, at most 268,435,455. The
     ceiling used to be 65,536 bytes below that whatever the topic, which refused payloads MQTT
     can carry when `MaxOutgoingBytes` is 256 MiB (6.6).
+46. `MaxOutgoingBytes` counts the topic of a delivery with its payload, for each delivery, from
+    the moment it is taken until its write has ended; "too large" for the option is the topic and
+    the payload together. Only payloads used to be counted, so messages with long topics of their
+    own and empty payloads were held without bound but for `MaxOutgoingMessages` (6.2, 6.6).
 
 ## 11. Left to the builder
 
