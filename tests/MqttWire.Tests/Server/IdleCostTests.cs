@@ -105,6 +105,9 @@ public sealed class IdleCostTests
         GC.KeepAlive(warmUp);
         GC.KeepAlive(baseline);
         GC.KeepAlive(connected);
+        // The scaffolding is subtracted once, not twice: the 2,000 connections do not use the 2,000 sets created
+        // above, each brings a set of its own (harness.Connect creates the link, the context and the test
+        // connection). So the last step added 2,000 sets and 2,000 connections, and the first measured 2,000 sets.
         long scaffoldingBytes = scaffoldingAlone - empty;
         return (withConnected - scaffoldingAlone - scaffoldingBytes) / Count;
     }

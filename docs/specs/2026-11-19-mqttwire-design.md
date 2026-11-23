@@ -522,8 +522,10 @@ into pieces.
 
 - Its cancellation token fires at the authentication deadline, or earlier if the socket closes
   or the server stops. At the deadline and at the stop the token is cancelled on a thread-pool
-  thread, so a host's token callback never runs on the sweep's thread or on the thread that
-  stops the server. The causes are told apart in this order: the request was aborted (nothing
+  thread, so a host's token callback does not run on the sweep's thread or on the thread that
+  stops the server. The one exception is a thread pool that cannot take the work (out of
+  memory): the token is then cancelled on the calling thread, because a token that is never
+  cancelled would leave a host that waits on it waiting for ever. The causes are told apart in this order: the request was aborted (nothing
   is written); the server is stopping (CONNACK `0x8B`); otherwise the deadline passed (CONNACK
   `0x88`).
 - If it does not answer in time, the socket is closed and MqttWire lets go of the connection.
@@ -555,6 +557,7 @@ into pieces.
    | the properties of 6.7 | as 6.7 says |
    | no Will | `0x87`, "Will messages are not supported." |
    | the client id is not empty and not longer than 256 bytes | `0x85`. An empty client id is well-formed MQTT, so the codec accepts it and this check refuses it. |
+   | the client id holds no control character (U+0001 to U+001F, U+007F to U+009F) and no line or paragraph separator (U+2028, U+2029) | `0x85`. The standard lets a receiver refuse the control characters. The client id is written into every log line of its connection (6.12) and handed to the host, so a character that ends a line is refused here and never has to be escaped afterwards. |
 
 4. `OnConnectAsync`: the host accepts or refuses. Any further rule for client ids, and all of
    authentication, is the host's.
@@ -1134,7 +1137,9 @@ an admitted connection can end with, two of which the server does not decide:
 | 22 | a host call had not returned when the server stopped; the stop does not wait for it (6.6, "When the host stops"). Not an end: the connection's end is logged with event 16 or 4 | error; the method's name |
 
 A connection whose CONNECT has not passed MqttWire's own checks has no client id yet: its line
-names the remote end point instead. An incoming packet that is too large, a topic alias, an
+names the remote end point instead. A client id that reaches a line holds no control character
+and no line separator (6.6, the checks of a CONNECT), so no client can end a line or begin a
+forged one through it, whatever the logging provider does with a structured value. An incoming packet that is too large, a topic alias, an
 unsupported QoS and a subscription identifier end with "protocol error"; so do a first packet
 that is not a CONNECT, a CONNECT the codec refuses with a code other than `0x81` (such as
 `0x84`, unsupported protocol version), and a CONNECT refused by MqttWire's own checks: `0x8C`
@@ -1347,7 +1352,8 @@ Each step ends with every test green.
 5. The link (6.5) stays internal, and so does the codec.
 6. The client is one connection per instance and does not reconnect; `PublishAsync` completes
    on the acknowledgement (6.3).
-7. Client ids: not empty and at most 256 bytes; everything else about them is the host's.
+7. Client ids: not empty, at most 256 bytes, and without control characters or line
+   separators; everything else about them is the host's.
 8. Options: `MaxQoS`, `MaxPublishPayloadBytes`, `MaxOutgoingMessages`, `MaxOutgoingBytes`
    (6.2). Internal constants: receive maximum 256 on the server and 1,024 on the client; 1,024
    waiting control packets; 5 KiB of room for topic and properties; reason strings cut to 256
@@ -1421,6 +1427,11 @@ owner:
     the send path, that starts the CONNACK's write (6.6).
 38. A connection lets go of its link and of the request's `HttpContext` when its run ends, so a
     connection object the host keeps holds nothing of the request (6.6).
+39. A client id that holds a control character or a line or paragraph separator is refused with
+    `0x85` (6.6): the id goes into every log line of its connection, and a text log that does
+    not escape it could otherwise be forged. Raised in the review of mo-esmp/mqttwire#9.
+40. When the thread pool cannot take the work that cancels a host's token (out of memory), the
+    token is cancelled on the calling thread (6.6). Raised in the same review.
 
 ## 11. Left to the builder
 

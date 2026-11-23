@@ -635,10 +635,12 @@ public sealed partial class MqttWireConnection
     /// (<see cref="s_hostCallCancelled"/>) in its place, and hands the source to the thread pool, which cancels and
     /// disposes it. When the connect phase took it first, the host has answered and nothing is done. So the source
     /// is still cancelled and disposed exactly once, and the token's callbacks (the host's, and the connect phase's
-    /// continuation with the CONNACK 0x88 and the end of the run) never run on the sweep's thread or on the thread
-    /// that stops the server. The time is written to <see cref="_stateEnteredAt"/> before the mark is set, so
-    /// whoever sees the mark reads the time of this cancellation: the sweep measures from it how long the host's
-    /// call has stayed out (<see cref="EndUnanswered"/>).
+    /// continuation with the CONNACK 0x88 and the end of the run) do not run on the sweep's thread or on the thread
+    /// that stops the server; the one exception is a thread pool that cannot take the work item (out of memory),
+    /// when the source is cancelled and disposed on the calling thread, because nothing else would. The time is
+    /// written to <see cref="_stateEnteredAt"/> before the mark is set, so whoever sees the mark reads the time of
+    /// this cancellation: the sweep measures from it how long the host's call has stayed out
+    /// (<see cref="EndUnanswered"/>).
     /// </summary>
     private void CancelAuthentication()
     {
@@ -656,12 +658,23 @@ public sealed partial class MqttWireConnection
             return;
         }
 
-        ThreadPool.UnsafeQueueUserWorkItem(static state => state.Connection.CancelOnThreadPool(state.Source),
-            (Source: source, Connection: this), preferLocal: false);
+        try
+        {
+            ThreadPool.UnsafeQueueUserWorkItem(static state => state.Connection.CancelOnThreadPool(state.Source),
+                (Source: source, Connection: this), preferLocal: false);
+        }
+        catch (OutOfMemoryException)
+        {
+            // The pool could not take the work item, and the mark is already in the field, so nothing else would
+            // cancel or dispose the source: a host that waits on its token would wait for ever. It is cancelled
+            // here, the one case in which the token's callbacks run on the calling thread.
+            CancelOnThreadPool(source);
+        }
     }
 
     /// <summary>
-    /// Cancels and disposes a cancellation source of the Authenticating state, on a thread-pool thread. A token
+    /// Cancels and disposes a cancellation source of the Authenticating state, on a thread-pool thread (or on the
+    /// thread of <see cref="CancelAuthentication"/> when the pool could not take the work item). A token
     /// callback that throws is the host's bug: it is logged as an error of <see cref="IMqttWireHandler.OnConnectAsync"/>
     /// and the token is cancelled all the same; a logging provider that throws then is swallowed by
     /// <see cref="LogEnd"/>, so the work item never fails.

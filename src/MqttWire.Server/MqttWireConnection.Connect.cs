@@ -190,12 +190,55 @@ public sealed partial class MqttWireConnection
             return MqttReasonCode.PacketTooLarge;
         }
 
-        if (connect.ClientId.IsEmpty || connect.ClientId.Length > ServerLimits.MaxClientIdBytes)
+        if (connect.ClientId.IsEmpty
+            || connect.ClientId.Length > ServerLimits.MaxClientIdBytes
+            || HasControlCharacter(connect.ClientId))
         {
             return MqttReasonCode.ClientIdentifierNotValid;
         }
 
         return MqttReasonCode.Success;
+    }
+
+    /// <summary>
+    /// Tells whether a client id holds a character that can end or forge a line where the id is written as text: a
+    /// control character (U+0001 to U+001F and U+007F to U+009F, which MQTT lets a receiver refuse) or a line or
+    /// paragraph separator (U+2028, U+2029). The client id goes into every log line of its connection and to the
+    /// host, so such an id is refused at the CONNECT and never has to be escaped afterwards. It reads the bytes
+    /// as they came and allocates nothing.
+    /// </summary>
+    /// <param name="clientId">
+    /// The client id as well-formed UTF-8, which the codec has checked: so a byte below 0x20 or equal to 0x7F is a
+    /// character of its own, 0xC2 begins a character of two bytes and 0xE2 one of three.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the client id holds such a character.
+    /// </returns>
+    private static bool HasControlCharacter(ReadOnlySpan<byte> clientId)
+    {
+        for (int i = 0; i < clientId.Length; i++)
+        {
+            byte first = clientId[i];
+            if (first < 0x20 || first == 0x7F)
+            {
+                return true;
+            }
+
+            // U+0080 to U+009F are C2 80 to C2 9F.
+            if (first == 0xC2 && i + 1 < clientId.Length && clientId[i + 1] <= 0x9F)
+            {
+                return true;
+            }
+
+            // U+2028 and U+2029 are E2 80 A8 and E2 80 A9.
+            if (first == 0xE2 && i + 2 < clientId.Length && clientId[i + 1] == 0x80
+                && (clientId[i + 2] == 0xA8 || clientId[i + 2] == 0xA9))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

@@ -81,7 +81,65 @@ public sealed class ServerConnectTests
             ServerPackets.ConnAckRefused(MqttReasonCode.MalformedPacket)
         },
         { Hex.Parse("10 81 80 01"), ServerPackets.ConnAckRefused(MqttReasonCode.PacketTooLarge) },
+        {
+            // A client id with a line feed.
+            ServerPackets.BuildConnect(flags: 0x02, properties: [], payload: ServerPackets.Field([0x61, 0x0A, 0x62])),
+            ServerPackets.ConnAckRefused(MqttReasonCode.ClientIdentifierNotValid)
+        },
+        {
+            // With a carriage return, as its last character.
+            ServerPackets.BuildConnect(flags: 0x02, properties: [], payload: ServerPackets.Field([0x61, 0x0D])),
+            ServerPackets.ConnAckRefused(MqttReasonCode.ClientIdentifierNotValid)
+        },
+        {
+            // With U+0001, the lowest control character the codec lets through.
+            ServerPackets.BuildConnect(flags: 0x02, properties: [], payload: ServerPackets.Field([0x01])),
+            ServerPackets.ConnAckRefused(MqttReasonCode.ClientIdentifierNotValid)
+        },
+        {
+            // With U+001F and with U+007F.
+            ServerPackets.BuildConnect(flags: 0x02, properties: [], payload: ServerPackets.Field([0x61, 0x1F])),
+            ServerPackets.ConnAckRefused(MqttReasonCode.ClientIdentifierNotValid)
+        },
+        {
+            ServerPackets.BuildConnect(flags: 0x02, properties: [], payload: ServerPackets.Field([0x61, 0x7F, 0x62])),
+            ServerPackets.ConnAckRefused(MqttReasonCode.ClientIdentifierNotValid)
+        },
+        {
+            // With U+0080 and with U+009F, the ends of the second block of control characters; U+0085 is the
+            // next-line character.
+            ServerPackets.BuildConnect(flags: 0x02, properties: [], payload: ServerPackets.Field([0x61, 0xC2, 0x80])),
+            ServerPackets.ConnAckRefused(MqttReasonCode.ClientIdentifierNotValid)
+        },
+        {
+            ServerPackets.BuildConnect(flags: 0x02, properties: [], payload: ServerPackets.Field([0xC2, 0x9F, 0x61])),
+            ServerPackets.ConnAckRefused(MqttReasonCode.ClientIdentifierNotValid)
+        },
+        {
+            // With the line separator U+2028 and with the paragraph separator U+2029.
+            ServerPackets.BuildConnect(flags: 0x02, properties: [], payload: ServerPackets.Field([0xE2, 0x80, 0xA8])),
+            ServerPackets.ConnAckRefused(MqttReasonCode.ClientIdentifierNotValid)
+        },
+        {
+            ServerPackets.BuildConnect(flags: 0x02, properties: [], payload: ServerPackets.Field([0x61, 0xE2, 0x80, 0xA9])),
+            ServerPackets.ConnAckRefused(MqttReasonCode.ClientIdentifierNotValid)
+        },
     };
+
+    /// <summary>
+    /// Gets client ids that hold no control character and no line separator, among them the characters next to
+    /// each one that is refused.
+    /// </summary>
+    public static TheoryData<string> PrintableClientIds { get; } =
+    [
+        "a b~",
+        "caf\u00E9",
+        "a\u00A0b",
+        "a\u2027b",
+        "a\u202Ab",
+        "\u00C2\u00E2",
+        "\U0001F600",
+    ];
 
     /// <summary>
     /// Proves that a valid CONNECT is answered with the fixed CONNACK: success, Receive Maximum 256 and no
@@ -102,6 +160,29 @@ public sealed class ServerConnectTests
         connection.Link.ClosedWith.ShouldBeNull();
         connection.Run.IsCompleted.ShouldBeFalse();
         harness.Pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves that a client id is refused only for a control character or a line separator: one that holds a space,
+    /// a tilde, a letter outside ASCII, the characters just beside the refused ones or an emoji is accepted and
+    /// is the id the server knows the connection by.
+    /// </summary>
+    /// <param name="clientId">
+    /// The client id.
+    /// </param>
+    [Theory]
+    [MemberData(nameof(PrintableClientIds))]
+    public void Connect_ClientIdWithoutControlCharacters_IsAccepted(string clientId)
+    {
+        // Arrange
+        ServerHarness harness = ServerHarness.Create();
+
+        // Act
+        harness.Connect(clientId);
+
+        // Assert
+        harness.Server.TryGetConnection(clientId, out MqttWireConnection? connection).ShouldBeTrue();
+        connection.ShouldNotBeNull().ClientId.ShouldBe(clientId);
     }
 
     /// <summary>

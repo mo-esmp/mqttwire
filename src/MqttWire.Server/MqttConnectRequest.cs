@@ -50,8 +50,10 @@ public sealed class MqttConnectRequest
     }
 
     /// <summary>
-    /// Gets the client identifier the client sent: never empty and at most 256 UTF-8 bytes. The server assigns
-    /// none: a CONNECT with an empty client identifier is refused with 0x85 before the host is asked.
+    /// Gets the client identifier the client sent: never empty, at most 256 UTF-8 bytes, and without control
+    /// characters (U+0001 to U+001F, U+007F to U+009F) or line and paragraph separators (U+2028, U+2029), so it can
+    /// be written into a line of text as it is. The server assigns none: a CONNECT with an empty client identifier,
+    /// or with one that breaks these rules, is refused with 0x85 before the host is asked.
     /// </summary>
     public string ClientId { get; }
 
