@@ -1,8 +1,22 @@
-# mqttwire
-A lean MQTT 5 connection server and client for .NET, over WebSockets. Your app decides who connects, what a subscription means, and where each message goes.
+# MqttWire
 
-MqttWire is not yet published as a package; see
-[Building a local package](#building-a-local-package).
+A lean MQTT 5 connection server and client for .NET, over WebSockets. Your app decides who
+connects, what a subscription means, and where each message goes.
+
+| Package | What it holds |
+|---|---|
+| `MqttWire.Server` | The connection server for ASP.NET Core. It depends on `MqttWire` of the same version. |
+| `MqttWire` | The client, and the opt-in reconnecting client. No dependencies. Works in Blazor WebAssembly. |
+
+```
+dotnet add package MqttWire.Server --prerelease
+dotnet add package MqttWire --prerelease
+```
+
+Both need .NET 10. This is a preview: the public API may still change until 1.0.
+[What changed](https://github.com/mo-esmp/mqttwire/blob/main/CHANGELOG.md) is in the changelog, and
+[the part of MQTT 5 that is implemented](https://github.com/mo-esmp/mqttwire/blob/main/docs/mqtt-support.md) is written down
+packet by packet and property by property.
 
 ## What it is, and what it is not
 
@@ -15,7 +29,7 @@ bounded in bytes and in time, including one that has stopped reading.
 
 Measured at 3,000 and 12,000 connections, an idle connection costs MqttWire about 600 bytes on
 top of what a bare ASP.NET Core WebSocket costs, which is about 10,800 bytes on the machine of
-[the report](docs/bench/2026-11-idle-memory.md).
+[the report](https://github.com/mo-esmp/mqttwire/blob/main/docs/bench/2026-11-idle-memory.md).
 
 What it does not do:
 
@@ -28,6 +42,9 @@ What it does not do:
   compression.
 - No raw TCP endpoint and no MQTT 3.x: MQTT 5 over WebSockets only.
 - No metrics and no limits across connections. The log says why each connection ended.
+
+The full list, with what happens to every packet and property, is in
+[docs/mqtt-support.md](https://github.com/mo-esmp/mqttwire/blob/main/docs/mqtt-support.md).
 
 ## Server
 
@@ -63,8 +80,10 @@ public sealed class EchoHandler : IMqttWireHandler
         string topic = publish.GetTopic();
         if (Subscriptions(connection).TryGetValue(topic, out MqttQoS granted))
         {
-            // publish.Payload is valid only during this call, and TrySend keeps what it is given: send a copy.
+            // Rule 1: send at no higher QoS than you granted. MqttWire keeps no record of subscriptions.
             MqttQoS qos = publish.QoS < granted ? publish.QoS : granted;
+
+            // Rule 2: publish.Payload is valid only during this call, and TrySend keeps what it is given: send a copy.
             connection.TrySend(MqttTopic.Create(topic), publish.Payload.ToArray(), qos);
         }
 
@@ -136,7 +155,7 @@ The deadlines and the other bounds are fixed.
 
 ### Sample: a group chat
 
-[`samples/GroupChat`](samples/GroupChat) is a chat with a topic per group and every member
+[`samples/GroupChat`](https://github.com/mo-esmp/mqttwire/tree/main/samples/GroupChat) is a chat with a topic per group and every member
 subscribed: an ASP.NET Core server whose handler is all of the chat's logic, and a Blazor
 WebAssembly client on the reconnecting client. It shows how a host puts many connections on one
 topic: one copy of a payload goes to every member, each at no higher QoS than it was granted,
@@ -146,7 +165,8 @@ and a member that stops reading is disconnected without delaying the others.
 dotnet run --project samples/GroupChat/GroupChat.Server
 ```
 
-Then open <http://localhost:5210> in two browser tabs.
+Then open <http://localhost:5210> in two browser tabs. The sample is in the repository, not in
+the packages.
 
 ## Client
 
@@ -212,15 +232,20 @@ signal to catch up by your own means.
 The client works in Blazor WebAssembly. There the browser supports only part of
 `ClientWebSocketOptions`: `ConfigureWebSocket` cannot set request headers, TLS or proxy settings.
 
-## Building a local package
-
-The packages are not yet published. To try them, pack them locally:
+## Building from source
 
 ```
-dotnet pack src/MqttWire -c Release -o artifacts/packages -p:Version=0.1.0-dev.2
-dotnet pack src/MqttWire.Server -c Release -o artifacts/packages -p:Version=0.1.0-dev.2
+dotnet build -c Release
+dotnet test -c Release
 ```
 
-`MqttWire` holds the client; `MqttWire.Server` holds the server and depends on `MqttWire`, so use
-the same version for both. Use a new `-dev.N` version for each pack, so that a consumer never
-restores a stale copy from the NuGet cache. `artifacts/` is not committed.
+To try a change as a package, pack both projects into a folder and add the folder as a package
+source. `MqttWire.Server` depends on exactly its own version of `MqttWire`, because it uses the
+codec inside it, so pack the two together and give each pack a new version:
+
+```
+dotnet pack src/MqttWire -c Release -o artifacts/packages -p:Version=0.1.0-dev.1
+dotnet pack src/MqttWire.Server -c Release -o artifacts/packages -p:Version=0.1.0-dev.1
+```
+
+`artifacts/` is not committed.

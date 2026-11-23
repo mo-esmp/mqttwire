@@ -3,7 +3,8 @@
   <PropertyGroup>
     <IsPackable>true</IsPackable>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Description>A lean MQTT 5 server for ASP.NET Core, over WebSockets.</Description>
+    <PackageTags>mqtt;mqtt5;websocket;aspnetcore;server</PackageTags>
+    <Description>A lean MQTT 5 connection server for ASP.NET Core, over WebSockets. It is not a broker: it handles the protocol, QoS 0, 1 and 2, limits, deadlines and shutdown for every connection, and your handler decides who connects, what a subscription means and where each message goes. An idle connection costs it about 600 bytes.</Description>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <CodeAnalysisTreatWarningsAsErrors>true</CodeAnalysisTreatWarningsAsErrors>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
@@ -20,6 +21,20 @@
   <ItemGroup>
     <ProjectReference Include="../MqttWire/MqttWire.csproj" />
   </ItemGroup>
+
+  <!--
+    The server uses MqttWire's internal codec (InternalsVisibleTo), so it works with the MqttWire of its own
+    version and no other. A project reference packs as "this version or later"; this makes it exactly this version.
+  -->
+  <Target Name="PinMqttWireToThisVersion" AfterTargets="_GetProjectReferenceVersions">
+    <ItemGroup>
+      <_PinnedProjectReference Include="@(_ProjectReferencesWithVersions)">
+        <ProjectVersion>[%(_ProjectReferencesWithVersions.ProjectVersion)]</ProjectVersion>
+      </_PinnedProjectReference>
+      <_ProjectReferencesWithVersions Remove="@(_ProjectReferencesWithVersions)" />
+      <_ProjectReferencesWithVersions Include="@(_PinnedProjectReference)" />
+    </ItemGroup>
+  </Target>
 
   <ItemGroup>
     <InternalsVisibleTo Include="MqttWire.Tests" />

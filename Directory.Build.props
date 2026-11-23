@@ -19,8 +19,8 @@
     <PackageProjectUrl>https://github.com/mo-esmp/mqttwire</PackageProjectUrl>
     <RepositoryUrl>https://github.com/mo-esmp/mqttwire</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>mqtt;mqtt5;websocket;aspnetcore</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageReleaseNotes>https://github.com/mo-esmp/mqttwire/blob/main/CHANGELOG.md</PackageReleaseNotes>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <IncludeSymbols>true</IncludeSymbols>

@@ -3,7 +3,8 @@
   <PropertyGroup>
     <IsPackable>true</IsPackable>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Description>A lean MQTT 5 connection server and client for .NET, over WebSockets.</Description>
+    <PackageTags>mqtt;mqtt5;websocket;client;blazor;wasm</PackageTags>
+    <Description>A lean MQTT 5 client for .NET over WebSockets: one connection per instance, QoS 0, 1 and 2, no stored session, with an opt-in reconnecting client. Works in Blazor WebAssembly. MqttWire.Server, the connection server for ASP.NET Core, builds on this package.</Description>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <CodeAnalysisTreatWarningsAsErrors>true</CodeAnalysisTreatWarningsAsErrors>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
