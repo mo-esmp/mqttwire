@@ -1475,7 +1475,8 @@ Each step ends with every test green.
 - The `GroupChat` sample is a server and a Blazor WebAssembly client (2026-11-22).
 - MQTT.js runs in its own Node job in CI (2026-11-22).
 - The memory target is judged on MqttWire's own state for a connection, not on what Kestrel's
-  pool keeps after a burst (2026-11-23, on the benchmark's report; 6.14).
+  pool keeps after a burst (2026-11-23, on the benchmark's first seven runs; confirmed the same
+  day on all ten, with the traffic floor and the corrected unit tests; 6.14).
 
 ## 10. Proposed by Claude (owner to check)
 

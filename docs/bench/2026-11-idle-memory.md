@@ -265,4 +265,5 @@ has had none, and what is kept is Kestrel's. There were three ways to read it:
 **On 2026-11-23 the owner chose the first.** Section 6.14 of the design records it. The
 decision was made on the seven earlier runs and the earlier unit-test figure; the three final
 runs, the traffic floor and the corrected unit tests came after it, and are why this report
-was rewritten. What the second and third would have looked at is still unmeasured (section 6).
+was rewritten. The owner confirmed the decision on the rewritten report the same day. What the
+second and third would have looked at is still unmeasured (section 6).
