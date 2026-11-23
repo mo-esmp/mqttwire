@@ -119,27 +119,21 @@ public sealed partial class MqttWireConnection
     {
         while (true)
         {
-            ConnectionState state = _state;
-            if (state == ConnectionState.Accepted)
+            switch (_state)
             {
-                if (AbortFromAccepted(CloseCause.ServerStopping))
-                {
+                case ConnectionState.Accepted when AbortFromAccepted(CloseCause.ServerStopping):
                     return;
-                }
-
                 // The CONNECT came meanwhile, or another close began: look again.
-                continue;
-            }
-
-            if (state == ConnectionState.Authenticating)
-            {
-                // The source is in its field before the move to Authenticating; when it is gone, the host has
-                // answered and the admission step refuses.
-                CancelAuthentication();
-            }
-            else if (state == ConnectionState.Active)
-            {
-                BeginClose(CloseCause.ServerStopping, MqttReasonCode.ServerShuttingDown, reasonString: null);
+                case ConnectionState.Accepted:
+                    continue;
+                case ConnectionState.Authenticating:
+                    // The source is in its field before the move to Authenticating; when it is gone, the host has
+                    // answered and the admission step refuses.
+                    CancelAuthentication();
+                    break;
+                case ConnectionState.Active:
+                    BeginClose(CloseCause.ServerStopping, MqttReasonCode.ServerShuttingDown, reasonString: null);
+                    break;
             }
 
             return;

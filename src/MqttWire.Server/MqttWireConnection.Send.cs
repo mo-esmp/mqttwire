@@ -94,7 +94,8 @@ public sealed partial class MqttWireConnection
         MqttWireServerOptions options = _server.Options;
         int payloadLength = payload.Length;
         bool tooLarge = payloadLength > options.MaxOutgoingBytes || payloadLength > MaxDeliveryPayloadBytes
-            || GetDeliverySize(topic, payloadLength, qos) > _clientMaxPacketSize;
+                                                                 || GetDeliverySize(topic, payloadLength, qos) >
+                                                                 _clientMaxPacketSize;
         long now = qos == MqttQoS.AtMostOnce ? 0 : _server.Time.GetTimestamp();
         PendingDelivery delivery = new(topic, payload, qos);
         MqttSendResult result;
@@ -112,19 +113,24 @@ public sealed partial class MqttWireConnection
             return MqttSendResult.NotOpen;
         }
 
-        // Outside the lock: a close writes or aborts, and a write may take as long as the link does.
-        if (result == MqttSendResult.TooLarge)
+        switch (result)
         {
-            BeginCloseWithStatus(CloseCause.MessageTooLargeToSend, MqttReasonCode.PacketTooLarge, reasonString: null,
-                WebSocketCloseStatus.NormalClosure, payloadLength);
-        }
-        else if (result == MqttSendResult.Evicted)
-        {
-            BeginClose(CloseCause.OutgoingLimitPassed, MqttReasonCode.QuotaExceeded, reasonString: null);
-        }
-        else if (write)
-        {
-            result = WriteTakenDelivery(delivery, packetIdentifier);
+            // Outside the lock: a close writes or aborts, and a write may take as long as the link does.
+            case MqttSendResult.TooLarge:
+                BeginCloseWithStatus(CloseCause.MessageTooLargeToSend, MqttReasonCode.PacketTooLarge,
+                    reasonString: null,
+                    WebSocketCloseStatus.NormalClosure, payloadLength);
+                break;
+            case MqttSendResult.Evicted:
+                BeginClose(CloseCause.OutgoingLimitPassed, MqttReasonCode.QuotaExceeded, reasonString: null);
+                break;
+            default:
+                if (write)
+                {
+                    result = WriteTakenDelivery(delivery, packetIdentifier);
+                }
+
+                break;
         }
 
         return result;
@@ -286,8 +292,8 @@ public sealed partial class MqttWireConnection
         int size = answer.GetSize();
         bool isPingResp = answer.Type == PacketType.PingResp;
         byte[]? buffer = null;
-        bool write = false;
-        bool evict = false;
+        bool write;
+        bool evict;
         try
         {
             buffer = pool.Rent(size);
@@ -651,7 +657,6 @@ public sealed partial class MqttWireConnection
         piece = default;
         buffer = null;
         closeStatus = default;
-        WaitingDeliveries? emptied = null;
         ControlBuffer dropped = default;
         ExchangeRecords? records = null;
         TaskCompletionSource? idle = null;
@@ -661,6 +666,7 @@ public sealed partial class MqttWireConnection
         // Closing connection takes no record and stays Closing, so it does not call the clock at all, and its step
         // (the one the fault path takes) cannot throw.
         long now = _state >= ConnectionState.Closing ? 0 : _server.Time.GetTimestamp();
+        WaitingDeliveries? emptied;
         lock (_sendLock)
         {
             if (_state >= ConnectionState.Closing)
@@ -838,7 +844,7 @@ public sealed partial class MqttWireConnection
     /// Awaits a write that did not complete at once, then carries the send path on: the buffer goes back, the next
     /// piece is written, and a write that failed begins the close with <see cref="MqttCloseReason.ConnectionLost"/>.
     /// Only this method ends such a write and returns its buffer, after the await has ended (design 6.8). It carries
-    /// on on the thread that completes the write, for as long as the writes that follow complete at once. A write
+    /// on the thread that completes the write, for as long as the writes that follow complete at once. A write
     /// that has completed by the time this looks at it is not awaited at all, so this runs on the stack of the caller
     /// that started it: it then counts as one more of that caller's writes, so that such calls cannot nest deeper
     /// than <see cref="InlineWrites"/> before the send path is handed to the thread pool. Here every write counts, a

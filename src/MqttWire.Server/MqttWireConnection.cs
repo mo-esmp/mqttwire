@@ -53,7 +53,7 @@ public sealed partial class MqttWireConnection
     /// The skip of a PUBLISH too large to be read whole; active only while such a packet is being skipped, and
     /// otherwise its default value. Changed in place, like <see cref="_readBuffer"/>, by the code that reads alone.
     /// </summary>
-    private PublishSkip _publishSkip = default;
+    private PublishSkip _publishSkip;
 
     /// <summary>
     /// When the read buffer was rented for a packet that is not complete yet, or, for a packet that follows a
@@ -129,7 +129,7 @@ public sealed partial class MqttWireConnection
     /// while one waits. A mutable struct changed in place, so the explicit empty start tells the analyzer it is
     /// meant to be assigned through its members. Guarded by <see cref="_sendLock"/>.
     /// </summary>
-    private ControlBuffer _control = default;
+    private ControlBuffer _control;
 
     /// <summary>
     /// What is left to write of the payload of the large delivery being written, a view of the host's memory; empty

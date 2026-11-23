@@ -70,7 +70,7 @@ public sealed partial class MqttWireConnection
         lock (_sendLock)
         {
             ExchangeRecords? records = _records;
-            remembered = qos == MqttQoS.ExactlyOnce && records is not null && records.ContainsIncoming(packetIdentifier);
+            remembered = qos == MqttQoS.ExactlyOnce && records?.ContainsIncoming(packetIdentifier) == true;
             passed = !remembered
                      && (records?.IncomingCount ?? 0) + _control.PublishAnswerCount >= ServerLimits.ReceiveMaximum;
         }
@@ -248,10 +248,6 @@ public sealed partial class MqttWireConnection
             case DeliveryAckOutcome.WrongKind:
                 BeginClose(CloseCause.ProtocolError, MqttReasonCode.ProtocolError, reasonString: null);
                 return false;
-
-            default:
-                // Ended or ignored: nothing to answer.
-                break;
         }
 
         return _state == ConnectionState.Active;

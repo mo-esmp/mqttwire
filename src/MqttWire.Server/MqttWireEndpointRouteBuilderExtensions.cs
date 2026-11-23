@@ -42,13 +42,15 @@ public static class MqttWireEndpointRouteBuilderExtensions
         ArgumentNullException.ThrowIfNull(endpoints);
         ArgumentNullException.ThrowIfNull(pattern);
         MqttWireServer server = endpoints.ServiceProvider.GetService<MqttWireServer>()
-            ?? throw new InvalidOperationException(
-                "The MQTT server is not registered: call services.AddMqttWireServer<THandler>() before MapMqttWire.");
+                                ?? throw new InvalidOperationException(
+                                    "The MQTT server is not registered: call services.AddMqttWireServer<THandler>() before MapMqttWire.");
 
         // Not async (plan decision 3): the request's task is the connection's run, the one async method whose state
         // lives as long as the connection.
-        RequestDelegate handle = httpContext => HandleRequest(server, httpContext);
-        return endpoints.Map(pattern, handle);
+
+        return endpoints.Map(pattern, Handle);
+
+        Task Handle(HttpContext httpContext) => HandleRequest(server, httpContext);
     }
 
     /// <summary>

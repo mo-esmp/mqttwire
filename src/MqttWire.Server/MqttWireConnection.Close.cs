@@ -270,58 +270,63 @@ public sealed partial class MqttWireConnection
     /// fault and goes on (<see cref="MqttWireServer.Sweep"/>); it allocates only when it hands a source to the thread
     /// pool or a write or close does not complete at once. An abort ends the link's pending reads, whose
     /// continuations may run on the thread that aborts, as with any abort; the end of the run never does, because the
-    /// run waits for the abort to return and then carries on on a thread-pool thread (<see cref="TryEndRun"/>).
+    /// run waits for the abort to return and then carries on a thread-pool thread (<see cref="TryEndRun"/>).
     /// </summary>
     /// <param name="now">
     /// The sweep's timestamp, from the server's clock.
     /// </param>
     internal void CheckDeadlines(long now)
     {
-        if (_state == ConnectionState.Accepted)
+        switch (_state)
         {
-            long accepted = Volatile.Read(ref _stateEnteredAt);
-            if (accepted != 0 && now - accepted >= _server.ConnectDeadlineLength)
-            {
-                AbortFromAccepted(CloseCause.ConnectTimedOut);
-            }
-        }
-        else if (_state == ConnectionState.Authenticating)
-        {
-            CheckAuthenticationDeadline(now);
-        }
-        else if (_state == ConnectionState.Active)
-        {
-            // 0 while no write is with the link: one that completed at once was never stamped.
-            long writing = Volatile.Read(ref _writeStartedAt);
-            if (writing != 0 && now - writing >= _server.WriteDeadlineLength)
-            {
-                AbortStalledWrite(writing);
-                return;
-            }
+            case ConnectionState.Accepted:
 
-            if (CheckAcknowledgementDeadline(now))
-            {
-                return;
-            }
+                long accepted = Volatile.Read(ref _stateEnteredAt);
+                if (accepted != 0 && now - accepted >= _server.ConnectDeadlineLength)
+                {
+                    AbortFromAccepted(CloseCause.ConnectTimedOut);
+                }
 
-            CheckReadDeadlines(now);
-        }
-        else if (_state == ConnectionState.Closing)
-        {
-            // 0 until the winner of the move to Closing has stamped it: that sweep skips the connection.
-            long closing = Volatile.Read(ref _closingAt);
-            if (closing != 0 && now - closing >= _server.CloseDeadlineLength)
-            {
-                AbortLink();
-            }
+                break;
 
-            // A connection ended because its host's call did not come back keeps its slot until the call returns:
-            // a stop that began since does not wait for it either.
-            if (IsHostCallCancelled && _server.IsStopping
-                && now - Volatile.Read(ref _stateEnteredAt) >= _server.CloseDeadlineLength)
-            {
-                LeaveToTheHost();
-            }
+            case ConnectionState.Authenticating:
+                CheckAuthenticationDeadline(now);
+                break;
+            case ConnectionState.Active:
+
+                // 0 while no write is with the link: one that completed at once was never stamped.
+                long writing = Volatile.Read(ref _writeStartedAt);
+                if (writing != 0 && now - writing >= _server.WriteDeadlineLength)
+                {
+                    AbortStalledWrite(writing);
+                    return;
+                }
+
+                if (CheckAcknowledgementDeadline(now))
+                {
+                    return;
+                }
+
+                CheckReadDeadlines(now);
+                break;
+            case ConnectionState.Closing:
+                // 0 until the winner of the move to Closing has stamped it: that sweep skips the connection.
+                long closing = Volatile.Read(ref _closingAt);
+                if (closing != 0 && now - closing >= _server.CloseDeadlineLength)
+                {
+                    AbortLink();
+                }
+
+                // A connection ended because its host's call did not come back keeps its slot until the call returns:
+                // a stop that began since does not wait for it either.
+                if (IsHostCallCancelled &&
+                    _server.IsStopping &&
+                    now - Volatile.Read(ref _stateEnteredAt) >= _server.CloseDeadlineLength)
+                {
+                    LeaveToTheHost();
+                }
+
+                break;
         }
     }
 

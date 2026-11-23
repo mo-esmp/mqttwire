@@ -46,7 +46,8 @@ public sealed partial class MqttWireConnection
                 return false;
             }
 
-            MqttConnectRequest? request = DecodeConnect(length, out bool announceKeepAlive, out bool sessionExpiryAsked);
+            MqttConnectRequest? request =
+                DecodeConnect(length, out bool announceKeepAlive, out bool sessionExpiryAsked);
             _readBuffer.Consume(length);
             if (request is null)
             {
@@ -77,7 +78,7 @@ public sealed partial class MqttWireConnection
                 ReasonCode = MqttReasonCode.Success,
                 SessionExpiryInterval = sessionExpiryAsked ? 0u : null,
                 ReceiveMaximum = ServerLimits.ReceiveMaximum,
-                MaximumQoS = _server.Options.MaxQoS == MqttQoS.AtLeastOnce ? (byte)1 : null,
+                MaximumQoS = _server.Options.MaxQoS == MqttQoS.AtLeastOnce ? 1 : null,
                 SubscriptionIdentifiersAvailable = false,
                 ServerKeepAlive = announceKeepAlive ? _keepAliveSeconds : null,
                 UserProperties = result.UserProperties,
@@ -145,10 +146,11 @@ public sealed partial class MqttWireConnection
         _clientMaxPacketSize = properties.TryGetInteger(PropertyId.MaximumPacketSize, out uint maximumPacketSize)
             ? (int)Math.Min(maximumPacketSize, int.MaxValue)
             : int.MaxValue;
-        _problemInformation = !properties.TryGetInteger(PropertyId.RequestProblemInformation, out uint problemInformation)
+        _problemInformation =
+            !properties.TryGetInteger(PropertyId.RequestProblemInformation, out uint problemInformation)
             || problemInformation != 0;
         sessionExpiryAsked = properties.TryGetInteger(PropertyId.SessionExpiryInterval, out uint sessionExpiry)
-            && sessionExpiry > 0;
+                             && sessionExpiry > 0;
 
         ClientId = Encoding.UTF8.GetString(connect.ClientId);
         return CreateRequest(connect);
@@ -264,7 +266,8 @@ public sealed partial class MqttWireConnection
         }
 
         IPAddress? address = RunningContext.Connection.RemoteIpAddress;
-        IPEndPoint? remoteEndPoint = address is null ? null : new IPEndPoint(address, RunningContext.Connection.RemotePort);
+        IPEndPoint? remoteEndPoint =
+            address is null ? null : new IPEndPoint(address, RunningContext.Connection.RemotePort);
         return new MqttConnectRequest(ClientId, userName, password,
             userProperties ?? (IReadOnlyList<MqttWireUserProperty>)[], remoteEndPoint, RunningContext.Request.IsHttps,
             RunningContext);
@@ -470,7 +473,8 @@ public sealed partial class MqttWireConnection
             Debug.Assert(_state <= ConnectionState.Closing, "The connection's run has not ended.");
             Debug.Assert(_waiting is null && _control.PacketCount == 0 && _remainingPayload.IsEmpty && _records is null,
                 "Nothing can wait for a connection that was never Active.");
-            Debug.Assert(_closeStatus == 0, "A close during the admission step found the path reserved and only aborted.");
+            Debug.Assert(_closeStatus == 0,
+                "A close during the admission step found the path reserved and only aborted.");
         }
     }
 
@@ -559,7 +563,7 @@ public sealed partial class MqttWireConnection
     /// </summary>
     private void ReleaseAuthentication()
     {
-        CancellationTokenSource? source = Interlocked.Exchange(ref _authentication, null);
+        CancellationTokenSource? source = Interlocked.Exchange(ref _authentication, value: null);
         if (source is not null && !ReferenceEquals(source, s_hostCallCancelled))
         {
             source.Dispose();
@@ -577,7 +581,8 @@ public sealed partial class MqttWireConnection
         _ = pending.ContinueWith(
             static (task, state) =>
             {
-                (ILogger logger, string clientId) = ((ILogger, string))state!; // The state is always this tuple, passed below.
+                (ILogger logger, string clientId) =
+                    ((ILogger, string))state!; // The state is always this tuple, passed below.
                 if (task.IsFaulted)
                 {
                     ServerLog.LateConnectResult(logger, LogLevel.Error, clientId, task.Exception?.InnerException);

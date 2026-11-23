@@ -438,14 +438,15 @@ public sealed partial class MqttWireConnection
     private PacketSize StartPacket(in PacketHeader header)
     {
         PacketSize size = JudgeSize(header);
-        if (size == PacketSize.TooLarge)
+        switch (size)
         {
-            BeginClose(CloseCause.ProtocolError, MqttReasonCode.PacketTooLarge, reasonString: null);
-        }
-        else if (size == PacketSize.Skip)
-        {
-            _publishSkip.Start(header);
-            _readBuffer.Consume(header.HeaderLength);
+            case PacketSize.TooLarge:
+                BeginClose(CloseCause.ProtocolError, MqttReasonCode.PacketTooLarge, reasonString: null);
+                break;
+            case PacketSize.Skip:
+                _publishSkip.Start(header);
+                _readBuffer.Consume(header.HeaderLength);
+                break;
         }
 
         return size;
