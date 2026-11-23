@@ -39,8 +39,9 @@ internal sealed class ChatSession : IAsyncDisposable
     private readonly Uri _endpoint;
 
     /// <summary>
-    /// The client id: the name and four random characters, so that two tabs with one name are two connections and
-    /// neither takes the other over.
+    /// The client id: a new GUID for every session, kept for all of its connections. It is made apart from the
+    /// name, so that two tabs with one name are two connections and neither takes the other over, and so that
+    /// nothing a person types can make an id the server refuses.
     /// </summary>
     private readonly string _clientId;
 
@@ -69,7 +70,7 @@ internal sealed class ChatSession : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(pageAddress);
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         Name = name;
-        _clientId = string.Create(CultureInfo.InvariantCulture, $"{name}-{Random.Shared.Next(0x10000):x4}");
+        _clientId = string.Create(CultureInfo.InvariantCulture, $"chat-{Guid.NewGuid():N}");
         _endpoint = new UriBuilder(pageAddress)
         {
             Scheme = string.Equals(pageAddress.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal) ? "wss" : "ws",

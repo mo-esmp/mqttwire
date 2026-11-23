@@ -1378,7 +1378,7 @@ reports states 2 and 3 against the idle floor for information.
 **Measured on 2026-11-23** ([the report](../bench/2026-11-idle-memory.md)), at 3,000 and 12,000
 connections, on a floor of about 10,750 bytes per connection:
 
-- **Idle,** MqttWire adds 519 to 624 bytes to the floor, in six runs. In a heap dump the types
+- **Idle,** MqttWire adds 519 to 624 bytes to the floor, in seven runs. In a heap dump the types
   that name MqttWire come to 591 bytes per connection.
 - **After activity** a connection is 841 to 1,251 bytes above the idle floor in seven runs,
   over floor + 1,024 in three of them. What activity added is Kestrel's: in the heap dumps 618

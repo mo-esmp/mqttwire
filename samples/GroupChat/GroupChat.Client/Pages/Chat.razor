@@ -15,7 +15,8 @@
 }
 else
 {
-    <p class="status" data-status="@_session.Status">
+    @* role="status" makes a screen reader announce the change from "reconnecting" to "connected". *@
+    <p class="status" role="status" data-status="@_session.Status">
         @_session.Name: @_session.Status@(_session.StatusDetail is null ? string.Empty : $" ({_session.StatusDetail})")
     </p>
 
