@@ -44,6 +44,11 @@ public sealed class IdleCostTests
     private const int MaxAttempts = 3;
 
     /// <summary>
+    /// The payload of the burst's messages, shared by all of them: 256 bytes, as in the benchmark.
+    /// </summary>
+    private static readonly byte[] s_burstPayload = new byte[256];
+
+    /// <summary>
     /// Proves that 2,000 connected, idle connections whose host keeps no state cost at most 768 bytes each beyond the
     /// test's own scaffolding.
     /// </summary>
@@ -57,7 +62,7 @@ public sealed class IdleCostTests
         // Act
         for (int attempt = 0; attempt < MaxAttempts && smallest > MaxBytesPerConnection; attempt++)
         {
-            long perConnection = MeasureBytesPerConnection();
+            long perConnection = MeasureBytesPerConnection(afterActivity: false);
             figures.Add(perConnection);
             smallest = Math.Min(smallest, perConnection);
         }
@@ -69,14 +74,44 @@ public sealed class IdleCostTests
     }
 
     /// <summary>
+    /// Proves that a connection costs MqttWire no more after activity than the bound for one that has done nothing
+    /// (design goal 2, "before and after activity alike"): 2,000 connections each publish at QoS 0 and at QoS 2 and
+    /// receive and acknowledge a burst of ten messages at QoS 1, and then keep at most 768 bytes each.
+    /// </summary>
+    [Fact]
+    public void Activity_TwoThousandConnectionsThenQuiet_KeepAtMost768BytesEach()
+    {
+        // Arrange
+        List<long> figures = [];
+        long smallest = long.MaxValue;
+
+        // Act
+        for (int attempt = 0; attempt < MaxAttempts && smallest > MaxBytesPerConnection; attempt++)
+        {
+            long perConnection = MeasureBytesPerConnection(afterActivity: true);
+            figures.Add(perConnection);
+            smallest = Math.Min(smallest, perConnection);
+        }
+
+        // Assert
+        smallest.ShouldBeLessThanOrEqualTo(MaxBytesPerConnection,
+            $"A connection that is quiet after activity cost {smallest} bytes (the smallest of {figures.Count} "
+            + $"measurements: {string.Join(", ", figures)} bytes per connection); the bound is {MaxBytesPerConnection}.");
+    }
+
+    /// <summary>
     /// Takes the measurement once, on a server of its own: a warm-up connection, then the heap with nothing more,
     /// with 2,000 sets of scaffolding, and with 2,000 connected, idle connections besides.
     /// </summary>
+    /// <param name="afterActivity">
+    /// Whether every connection, the warm-up one first, goes through <see cref="RunActivity"/> before the last
+    /// reading, so that the figure is that of a connection that is quiet after activity.
+    /// </param>
     /// <returns>
     /// The bytes per connection beyond the scaffolding; at least the true cost, more when something else allocated
     /// between the readings.
     /// </returns>
-    private static long MeasureBytesPerConnection()
+    private static long MeasureBytesPerConnection(bool afterActivity)
     {
         ServerHarness harness = ServerHarness.Create();
         harness.Handler.Connect = static (_, _) => ValueTask.FromResult(MqttConnectResult.Accept(state: null));
@@ -84,6 +119,11 @@ public sealed class IdleCostTests
         // One connection first, so that what is created once (the JIT's work, the pool's buffers, the statics) is in
         // every reading.
         TestConnection warmUp = harness.Connect("warm-up");
+        if (afterActivity)
+        {
+            RunActivity(harness, warmUp, "warm-up");
+        }
+
         ForgetCalls(harness);
         long empty = ReadHeap();
         TestConnection[] baseline = new TestConnection[Count];
@@ -99,6 +139,14 @@ public sealed class IdleCostTests
             connected[i] = harness.Connect($"c{i}");
         }
 
+        if (afterActivity)
+        {
+            for (int i = 0; i < Count; i++)
+            {
+                RunActivity(harness, connected[i], $"c{i}");
+            }
+        }
+
         ForgetCalls(harness);
         long withConnected = ReadHeap();
         harness.Server.ConnectionCount.ShouldBe(Count + 1);
@@ -110,6 +158,45 @@ public sealed class IdleCostTests
         // connection). So the last step added 2,000 sets and 2,000 connections, and the first measured 2,000 sets.
         long scaffoldingBytes = scaffoldingAlone - empty;
         return (withConnected - scaffoldingAlone - scaffoldingBytes) / Count;
+    }
+
+    /// <summary>
+    /// The activity of the benchmark (design 6.14 item 3) on one connection: it publishes one message at QoS 0 and
+    /// one at QoS 2, with the full exchange, and receives ten messages of 256 bytes at QoS 1, which it acknowledges.
+    /// The link is emptied after every step, so the test's own link never grows, and the connection is asserted to
+    /// hold nothing at the end.
+    /// </summary>
+    /// <param name="harness">
+    /// The harness.
+    /// </param>
+    /// <param name="connection">
+    /// The connected test connection.
+    /// </param>
+    /// <param name="clientId">
+    /// Its client id, by which the server finds it: the handler's own records may have been forgotten.
+    /// </param>
+    private static void RunActivity(ServerHarness harness, TestConnection connection, string clientId)
+    {
+        harness.Server.TryGetConnection(clientId, out MqttWireConnection? found).ShouldBeTrue();
+        MqttWireConnection server = found.ShouldNotBeNull();
+        connection.Deliver(ServerPackets.BuildPublish(MqttQoS.AtMostOnce, "a/b"u8, packetIdentifier: 0, properties: [], "hi"u8));
+        connection.Deliver(ServerPackets.BuildPublish(MqttQoS.ExactlyOnce, "a/b"u8, packetIdentifier: 1, properties: [], "hi"u8));
+        connection.TakeWritten().ShouldBe(ServerPackets.PubRec(1));
+        connection.Deliver(ServerPackets.PubRel(1));
+        connection.TakeWritten().ShouldBe(ServerPackets.PubComp(1));
+        for (int message = 0; message < 10; message++)
+        {
+            server.TrySend(ServerHarness.Topic, s_burstPayload, MqttQoS.AtLeastOnce).ShouldBe(MqttSendResult.Taken);
+        }
+
+        connection.TakeWritten().Length.ShouldBeGreaterThan(10 * s_burstPayload.Length);
+        for (ushort identifier = 1; identifier <= 10; identifier++)
+        {
+            connection.Deliver(ServerPackets.PubAck(identifier));
+        }
+
+        connection.TakeWritten().ShouldBeEmpty();
+        server.GetCounts().ShouldBe(ServerHarness.Idle);
     }
 
     /// <summary>

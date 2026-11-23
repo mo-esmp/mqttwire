@@ -1,0 +1,210 @@
+﻿using System.Globalization;
+using System.Text;
+
+namespace MqttWire.Bench;
+
+/// <summary>
+/// What the <c>server</c> role reports about itself at <c>/measure</c>.
+/// </summary>
+/// <param name="LiveManagedBytes">
+/// The live managed bytes after two full collections.
+/// </param>
+/// <param name="WorkingSetBytes">
+/// The working set of the process.
+/// </param>
+/// <param name="Connections">
+/// The open connections, on the floor and on MqttWire together.
+/// </param>
+/// <param name="LastSweepMicroseconds">
+/// How long MqttWire's last sweep took, in microseconds.
+/// </param>
+internal readonly record struct Measurement(
+    long LiveManagedBytes,
+    long WorkingSetBytes,
+    int Connections,
+    double LastSweepMicroseconds);
+
+/// <summary>
+/// A line through two measurements at two connection counts.
+/// </summary>
+/// <param name="PerConnection">
+/// The slope: bytes per connection. It leaves out everything that does not grow with connections.
+/// </param>
+/// <param name="Fixed">
+/// The line's value at no connections: the part that does not grow with them.
+/// </param>
+internal readonly record struct Line(double PerConnection, double Fixed);
+
+/// <summary>
+/// One state of the benchmark, measured at the small and at the large connection count.
+/// </summary>
+/// <param name="Name">
+/// The state's name, as the report prints it.
+/// </param>
+/// <param name="Small">
+/// The measurement at the small count.
+/// </param>
+/// <param name="Large">
+/// The measurement at the large count.
+/// </param>
+internal readonly record struct State(string Name, Measurement Small, Measurement Large);
+
+/// <summary>
+/// The arithmetic of design 6.14 and the report: "per connection" is a slope between two counts, and only live
+/// managed bytes decide against the target.
+/// </summary>
+internal static class Figures
+{
+    /// <summary>
+    /// The target: MqttWire adds at most this many bytes to the floor for an idle connection.
+    /// </summary>
+    public const int TargetBytesAboveFloor = 1_024;
+
+    /// <summary>
+    /// How far the slope after activity may be above the idle slope, in bytes, and still count as equal: what the
+    /// buffer pools keep after activity must not grow with connections. A slope below the idle one means that
+    /// less was kept at the large count than at the small one, which is no growth.
+    /// </summary>
+    public const int EqualSlopeBytes = 16;
+
+    /// <summary>
+    /// Fits the line through two measurements.
+    /// </summary>
+    /// <param name="smallCount">
+    /// The small connection count.
+    /// </param>
+    /// <param name="smallBytes">
+    /// The bytes measured at it.
+    /// </param>
+    /// <param name="largeCount">
+    /// The large connection count.
+    /// </param>
+    /// <param name="largeBytes">
+    /// The bytes measured at it.
+    /// </param>
+    /// <returns>
+    /// The slope, <c>(largeBytes − smallBytes) ÷ (largeCount − smallCount)</c>, and the line's value at no
+    /// connections.
+    /// </returns>
+    /// <exception cref="ArgumentException">
+    /// The two counts are the same, which gives no slope.
+    /// </exception>
+    public static Line Fit(int smallCount, long smallBytes, int largeCount, long largeBytes)
+    {
+        if (smallCount == largeCount)
+        {
+            throw new ArgumentException($"Two measurements at the same count ({smallCount}) give no slope.", nameof(largeCount));
+        }
+
+        double perConnection = (double)(largeBytes - smallBytes) / (largeCount - smallCount);
+        return new Line(perConnection, smallBytes - (perConnection * smallCount));
+    }
+
+    /// <summary>
+    /// Writes the report of one run as Markdown: a table of the states, pool retention, the echo floor's figures
+    /// for the same traffic, the sweep's time, and whether each state meets the target.
+    /// </summary>
+    /// <param name="smallCount">
+    /// The small connection count.
+    /// </param>
+    /// <param name="largeCount">
+    /// The large connection count.
+    /// </param>
+    /// <param name="floor">
+    /// The floor, idle.
+    /// </param>
+    /// <param name="echoIdle">
+    /// The echo floor, idle: a bare endpoint like the floor that can send back what it receives.
+    /// </param>
+    /// <param name="echoAfterActivity">
+    /// The echo floor after it echoed the same traffic as MqttWire's activity, then quiet.
+    /// </param>
+    /// <param name="idle">
+    /// MqttWire, connected and nothing else.
+    /// </param>
+    /// <param name="afterActivity">
+    /// MqttWire after every connection published and received a burst, then quiet.
+    /// </param>
+    /// <param name="afterChurn">
+    /// MqttWire after every connection was closed and opened again, then quiet.
+    /// </param>
+    /// <param name="met">
+    /// Set to whether all three of MqttWire's states meet the target, which is measured against the idle floor.
+    /// </param>
+    /// <returns>
+    /// The report.
+    /// </returns>
+    public static string Report(int smallCount, int largeCount, State floor, State echoIdle,
+        State echoAfterActivity, State idle, State afterActivity, State afterChurn, out bool met)
+    {
+        CultureInfo culture = CultureInfo.InvariantCulture;
+        Line floorLine = FitLive(smallCount, largeCount, floor);
+        StringBuilder report = new();
+        report.AppendLine(culture, $"Per connection is the slope between {smallCount:N0} and {largeCount:N0} connections.");
+        report.AppendLine();
+        report.AppendLine("| State | Live managed bytes per connection | Above the floor | Fixed (MB) | Working set per connection |");
+        report.AppendLine("|---|---|---|---|---|");
+        met = true;
+        foreach (State state in (ReadOnlySpan<State>)[floor, echoIdle, echoAfterActivity, idle, afterActivity, afterChurn])
+        {
+            Line live = FitLive(smallCount, largeCount, state);
+            Line workingSet = Fit(smallCount, state.Small.WorkingSetBytes, largeCount, state.Large.WorkingSetBytes);
+            bool isFloor = state == floor;
+            bool isMqttWire = state == idle || state == afterActivity || state == afterChurn;
+            double above = live.PerConnection - floorLine.PerConnection;
+            if (isMqttWire && above > TargetBytesAboveFloor)
+            {
+                met = false;
+            }
+
+            string aboveText = isFloor ? "–" : above.ToString("N0", culture);
+            report.AppendLine(culture,
+                $"| {state.Name} | {live.PerConnection:N0} | {aboveText} | {live.Fixed / 1_048_576:N1} | {workingSet.PerConnection:N0} |");
+        }
+
+        Line idleLine = FitLive(smallCount, largeCount, idle);
+        Line activityLine = FitLive(smallCount, largeCount, afterActivity);
+        double slopeDifference = activityLine.PerConnection - idleLine.PerConnection;
+        string grows = slopeDifference <= EqualSlopeBytes ? "does not grow" : "GROWS";
+        double keptSmall = (afterActivity.Small.LiveManagedBytes - idle.Small.LiveManagedBytes) / 1_048_576.0;
+        double keptLarge = (afterActivity.Large.LiveManagedBytes - idle.Large.LiveManagedBytes) / 1_048_576.0;
+        report.AppendLine();
+        report.AppendLine(culture,
+            $"- Kept after activity (live managed bytes after activity minus idle): {keptSmall:N1} MB at {smallCount:N0} connections, {keptLarge:N1} MB at {largeCount:N0}. Pool retention (the fixed part after activity minus the fixed part idle): {(activityLine.Fixed - idleLine.Fixed) / 1_024:N0} KB.");
+        report.AppendLine(culture,
+            $"- What is kept after activity {grows} with connections: the slope after activity is {slopeDifference:N0} bytes from the idle slope, and at most {EqualSlopeBytes} above it counts as equal.");
+        Line echoIdleLine = FitLive(smallCount, largeCount, echoIdle);
+        Line echoActivityLine = FitLive(smallCount, largeCount, echoAfterActivity);
+        report.AppendLine(culture,
+            $"- The same traffic on a bare endpoint: the echo floor's slope after activity is {echoActivityLine.PerConnection - echoIdleLine.PerConnection:N0} bytes from its idle slope. Against the echo floor in the same state, MqttWire is {idleLine.PerConnection - echoIdleLine.PerConnection:N0} bytes per connection above it idle and {activityLine.PerConnection - echoActivityLine.PerConnection:N0} after activity.");
+        report.AppendLine(culture,
+            $"- One sweep at {largeCount:N0} connections: {idle.Large.LastSweepMicroseconds:N0} µs idle, {afterActivity.Large.LastSweepMicroseconds:N0} µs after activity.");
+        foreach (State state in (ReadOnlySpan<State>)[idle, afterActivity, afterChurn])
+        {
+            double above = FitLive(smallCount, largeCount, state).PerConnection - floorLine.PerConnection;
+            string verdict = above <= TargetBytesAboveFloor ? "met" : "NOT met";
+            report.AppendLine(culture,
+                $"- Target (floor + {TargetBytesAboveFloor:N0} bytes), {state.Name}: {verdict} ({above:N0} bytes above the floor).");
+        }
+
+        return report.ToString();
+    }
+
+    /// <summary>
+    /// Fits the line of a state's live managed bytes.
+    /// </summary>
+    /// <param name="smallCount">
+    /// The small connection count.
+    /// </param>
+    /// <param name="largeCount">
+    /// The large connection count.
+    /// </param>
+    /// <param name="state">
+    /// The state.
+    /// </param>
+    /// <returns>
+    /// The line.
+    /// </returns>
+    private static Line FitLive(int smallCount, int largeCount, State state) =>
+        Fit(smallCount, state.Small.LiveManagedBytes, largeCount, state.Large.LiveManagedBytes);
+}
