@@ -95,18 +95,30 @@ internal struct PacketReadBuffer
     /// <param name="size">
     /// The smallest length the new array must have.
     /// </param>
-    public void Grow(ArrayPool<byte> pool, int size)
+    /// <param name="clear">
+    /// Whether every byte read into the old array is cleared before the array goes back: <see langword="true"/> for
+    /// the buffer of a CONNECT, whose password the pool would otherwise hand to its next renter;
+    /// <see langword="false"/> on the read loop of an Active connection, a hot path.
+    /// </param>
+    public void Grow(ArrayPool<byte> pool, int size, bool clear)
     {
         Debug.Assert(_array is not null, "Only a held read buffer grows.");
         byte[] bigger = pool.Rent(size);
         int count = Count;
         GetData().CopyTo(bigger);
         byte[]? old = _array;
+        int read = _end;
         _array = bigger;
         _start = 0;
         _end = count;
         if (old is not null)
         {
+            if (clear)
+            {
+                // Every read into it has ended and was counted, so nothing lies beyond what was read.
+                old.AsSpan(start: 0, read).Clear();
+            }
+
             pool.Return(old);
         }
     }
@@ -137,6 +149,20 @@ internal struct PacketReadBuffer
     public void Consume(int length) => _start += length;
 
     /// <summary>
+    /// Drops a handled packet from the start of the bytes not yet consumed, as <see cref="Consume"/> does, and
+    /// clears its bytes in the array first: for a CONNECT, so that its password is in the array no longer than the
+    /// decoding needs it, whoever sees the array next. The bytes behind the packet are left as they are.
+    /// </summary>
+    /// <param name="length">
+    /// The packet's total length.
+    /// </param>
+    public void ConsumeCleared(int length)
+    {
+        _array.AsSpan(_start, length).Clear();
+        _start += length;
+    }
+
+    /// <summary>
     /// Returns the array, if one is held, and forgets it with every byte in it, so no reference to it remains. The
     /// caller must not have a read in progress into it. Calling it when no array is held does nothing.
     /// </summary>
@@ -153,5 +179,20 @@ internal struct PacketReadBuffer
         {
             pool.Return(array);
         }
+    }
+
+    /// <summary>
+    /// Returns the array as <see cref="Return"/> does, cleared first, all of it: for the buffer of a connect phase
+    /// that ends without an Active connection, which may hold part of a CONNECT. The whole array is cleared, not
+    /// only what was counted as read, because a read that ended with an error (the link was aborted at a deadline)
+    /// may have placed bytes it never reported.
+    /// </summary>
+    /// <param name="pool">
+    /// The pool the array came from.
+    /// </param>
+    public void ReturnCleared(ArrayPool<byte> pool)
+    {
+        _array?.AsSpan().Clear();
+        Return(pool);
     }
 }

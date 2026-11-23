@@ -108,8 +108,9 @@ public sealed partial class MqttWireConnection
     /// <summary>
     /// Reads until a complete CONNECT is in the read buffer. It holds no buffer while it waits for the first byte;
     /// then it rents <see cref="ServerLimits.FirstReadBufferBytes"/> and grows them to the CONNECT's length, at most
-    /// <see cref="ServerLimits.MaxControlPacketBytes"/>. The caller returns the buffer on every way out. It uses the
-    /// pooling builder, so its state goes back to a pool once the CONNECT is read.
+    /// <see cref="ServerLimits.MaxControlPacketBytes"/>; the array a growth gives back is cleared first, because it
+    /// holds the start of the CONNECT. The caller returns the buffer on every way out, cleared. It uses the pooling
+    /// builder, so its state goes back to a pool once the CONNECT is read.
     /// </summary>
     /// <param name="link">
     /// The link.
@@ -149,7 +150,7 @@ public sealed partial class MqttWireConnection
     /// Looks at the first packet in the read buffer. A packet that is not a CONNECT, or a malformed fixed header,
     /// begins the close with WebSocket status 1002; a CONNECT longer than
     /// <see cref="ServerLimits.MaxControlPacketBytes"/> begins it with CONNACK packet too large. When the fixed header is
-    /// whole but the packet is not, the buffer grows to the packet's length.
+    /// whole but the packet is not, the buffer grows to the packet's length, and the array it leaves is cleared.
     /// </summary>
     /// <param name="length">
     /// The CONNECT's total length when the result is <see cref="ConnectFrame.Complete"/>; otherwise 0.
@@ -189,7 +190,9 @@ public sealed partial class MqttWireConnection
         {
             if (header.TotalLength > _readBuffer.Capacity)
             {
-                _readBuffer.Grow(_server.Pool, header.TotalLength);
+                // The old array holds the start of the CONNECT, which may reach into its password: cleared before
+                // the pool has it back.
+                _readBuffer.Grow(_server.Pool, header.TotalLength, clear: true);
             }
 
             return ConnectFrame.NeedMoreData;
@@ -488,7 +491,7 @@ public sealed partial class MqttWireConnection
     {
         if (size > _readBuffer.Capacity)
         {
-            _readBuffer.Grow(_server.Pool, size);
+            _readBuffer.Grow(_server.Pool, size, clear: false);
         }
         else if (_readBuffer.Count + _readBuffer.GetReadMemory().Length < size)
         {

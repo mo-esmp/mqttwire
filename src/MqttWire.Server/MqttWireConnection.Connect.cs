@@ -27,6 +27,15 @@ public sealed partial class MqttWireConnection
     /// goes back to the pool before the host is asked unless bytes lie behind the CONNECT (plan decision 8); then it
     /// is kept for the loop, which handles them after the CONNACK. Every other way out returns it.
     /// </summary>
+    /// <remarks>
+    /// No byte of the CONNECT goes back to the pool, which hands an array to its next renter as it is, the password
+    /// included (design 6.8, rule 7): the CONNECT's bytes are cleared in the buffer as soon as it has been decoded
+    /// and what the host is given has been copied out of it, whether it was accepted, refused or malformed, so a
+    /// buffer kept for the packets behind it holds none of it while the host decides; the array a growth leaves is
+    /// cleared (<see cref="FrameConnect"/>); and a phase that ends without an Active connection, which may hold
+    /// part of a CONNECT that never completed, clears the whole array before it returns it. This is the connect
+    /// phase's alone: the read loop of an Active connection clears nothing.
+    /// </remarks>
     /// <returns>
     /// <see langword="true"/> when the connection is Active and the loop is to run; <see langword="false"/> when
     /// the phase refused or lost the connection, the close has begun and no buffer is held.
@@ -48,7 +57,7 @@ public sealed partial class MqttWireConnection
 
             MqttConnectRequest? request =
                 DecodeConnect(length, out bool announceKeepAlive, out bool sessionExpiryAsked);
-            _readBuffer.Consume(length);
+            _readBuffer.ConsumeCleared(length);
             if (request is null)
             {
                 return false;
@@ -92,8 +101,8 @@ public sealed partial class MqttWireConnection
         {
             if (!active)
             {
-                // Every read has ended here, so the buffer can go back; returning one not held does nothing.
-                _readBuffer.Return(_server.Pool);
+                // Every read has ended here, so the buffer can go back, cleared; one not held does nothing.
+                _readBuffer.ReturnCleared(_server.Pool);
             }
         }
     }

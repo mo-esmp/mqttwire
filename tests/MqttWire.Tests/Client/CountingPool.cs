@@ -108,6 +108,33 @@ internal sealed class CountingPool : ArrayPool<byte>, IPoolCounts
     }
 
     /// <summary>
+    /// Tells whether any array this pool has rented and not had returned satisfies a condition, so a test can look
+    /// at what the renter holds now.
+    /// </summary>
+    /// <param name="condition">
+    /// The condition, called under the pool's lock for each array that is out; it must not rent or return.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the condition holds for at least one array that is out.
+    /// </returns>
+    public bool AnyRented(Func<byte[], bool> condition)
+    {
+        ArgumentNullException.ThrowIfNull(condition);
+        lock (_gate)
+        {
+            foreach (byte[] array in _rented)
+            {
+                if (condition(array))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Waits until every rented buffer is back, for buffers that writes running on the thread pool return after
     /// the test has moved on. It completes on the return that empties the pool; the limit of
     /// <see cref="BoundedWaits"/> is only a fail-safe, so that a leak fails the test instead of hanging the run, and

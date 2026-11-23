@@ -994,6 +994,23 @@ not announced either: whether a filter is granted is the host's answer in SUBACK
 5. **Every way out returns what is held, once:** normal completion, a refusal, an overflow, a
    deadline, an exception, an abort.
 6. **Nothing keeps a reference to a buffer it has returned.**
+7. **No byte of a CONNECT goes back to the pool.** A pool hands a returned array to its next
+   renter as it is, and a CONNECT carries the password. The host gets copies; the pooled array
+   is cleared, by the connect phase and by nothing else (the read loop of an Active connection
+   is a hot path and clears nothing):
+   - when the read buffer grows for a CONNECT longer than its first 4 KiB, the old array is
+     cleared before it is returned;
+   - when the CONNECT has been decoded and what the host is given has been copied out, its bytes
+     are cleared in the buffer, whether it was accepted, refused or malformed. Bytes of packets
+     that came behind it are kept, so a buffer held through Authenticating for them (6.6) holds
+     nothing of the CONNECT while the host decides;
+   - when the connect phase ends without an Active connection (the connect deadline, an abort,
+     the peer closing, a first packet refused), the whole array is cleared before it is
+     returned: it may hold part of a CONNECT that never completed, and a read that ended with an
+     error may have placed bytes it did not report.
+
+   The client does the same on its side: it clears the CONNECT it has written before it returns
+   that buffer.
 
 ### 6.9 The client connection
 
@@ -1456,6 +1473,10 @@ the owner there:
     not at all, with WebSocket status 1002, when the client announced less than the 5 bytes of
     the bare CONNACK. A CONNECT the codec refuses, and one over 16 KB, are answered without the
     limit, which is not known then (6.6, 6.7).
+43. The connect phase clears the bytes of a CONNECT in its pooled read buffer: in the array a
+    growth returns, at the start of the buffer once the CONNECT is decoded, and in the whole
+    array when the phase ends without an Active connection. The password used to stay in the
+    array the pool handed to its next renter (6.8, rule 7).
 
 ## 11. Left to the builder
 
