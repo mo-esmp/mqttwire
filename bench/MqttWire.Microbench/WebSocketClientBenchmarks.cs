@@ -34,16 +34,19 @@ public class WebSocketClientBenchmarks
     /// <summary>
     /// The server end of the pair.
     /// </summary>
+    // Set in [GlobalSetup], before any benchmark runs, so it is never read as null.
     private WebSocket _server = null!;
 
     /// <summary>
     /// The client end of the pair, under the client's link.
     /// </summary>
+    // Set in [GlobalSetup], before any benchmark runs, so it is never read as null.
     private WebSocket _clientSocket = null!;
 
     /// <summary>
     /// The connected client.
     /// </summary>
+    // Set in [GlobalSetup], before any benchmark runs, so it is never read as null.
     private MqttWireClient _client = null!;
 
     /// <summary>

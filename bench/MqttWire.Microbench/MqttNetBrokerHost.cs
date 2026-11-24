@@ -13,9 +13,10 @@ namespace MqttWire.Microbench;
 /// MQTTnet's broker hosted in Kestrel on a free loopback port, reachable over a WebSocket at <c>/mqtt</c> with the
 /// <c>mqtt</c> sub-protocol: the one broker both clients of <see cref="ClientComparisonBenchmarks"/> talk to, so
 /// that only the clients differ. The interleaved probe, <c>bench/MqttWire.Probe</c>, links this file and uses the
-/// same broker. It can count the publishes it receives on one topic, so that a benchmark can wait
-/// for the broker's receipt of a batch (<see cref="ExpectPublishes"/>). Disposing it stops the host and frees the
-/// port.
+/// same broker. It can count the publishes it receives on one topic, so that a benchmark can wait for the broker's
+/// receipt of a batch (<see cref="ExpectPublishes"/>); the interceptor that counts them is registered by the first
+/// <see cref="ExpectPublishes"/>, so a process that never counts does not pay for it on every publish. Disposing it
+/// stops the host and frees the port.
 /// </summary>
 internal sealed class MqttNetBrokerHost : IAsyncDisposable
 {
@@ -23,6 +24,16 @@ internal sealed class MqttNetBrokerHost : IAsyncDisposable
     /// The web application that hosts the broker.
     /// </summary>
     private readonly WebApplication _app;
+
+    /// <summary>
+    /// The broker, whose publish interceptor <see cref="ExpectPublishes"/> registers.
+    /// </summary>
+    private readonly MqttServer _server;
+
+    /// <summary>
+    /// Whether <see cref="CountPublishAsync"/> is registered as the broker's publish interceptor.
+    /// </summary>
+    private bool _counting;
 
     /// <summary>
     /// Released once when the publishes expected by <see cref="ExpectPublishes"/> have all been received, or by
@@ -48,12 +59,16 @@ internal sealed class MqttNetBrokerHost : IAsyncDisposable
     /// <param name="app">
     /// The started web application.
     /// </param>
+    /// <param name="server">
+    /// The broker the application hosts.
+    /// </param>
     /// <param name="webSocketUri">
     /// The address clients connect to.
     /// </param>
-    private MqttNetBrokerHost(WebApplication app, Uri webSocketUri)
+    private MqttNetBrokerHost(WebApplication app, MqttServer server, Uri webSocketUri)
     {
         _app = app;
+        _server = server;
         WebSocketUri = webSocketUri;
     }
 
@@ -84,15 +99,15 @@ internal sealed class MqttNetBrokerHost : IAsyncDisposable
 
         // Kestrel is listening once StartAsync returns, so the addresses feature is set and holds the bound port.
         string address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First();
-        MqttNetBrokerHost host = new(app, new Uri($"ws://{new Uri(address).Authority}/mqtt"));
-        app.Services.GetRequiredService<MqttServer>().InterceptingPublishAsync += host.CountPublishAsync;
-        return host;
+        return new MqttNetBrokerHost(app, app.Services.GetRequiredService<MqttServer>(),
+            new Uri($"ws://{new Uri(address).Authority}/mqtt"));
     }
 
     /// <summary>
     /// Starts counting the publishes the broker receives on a topic: once <paramref name="count"/> of them have
     /// arrived, <see cref="WaitForExpectedPublishesAsync"/> completes. Call it before the first publish of the batch,
-    /// and only when no earlier batch is still being counted.
+    /// and only when no earlier batch is still being counted. The first call registers the broker's publish
+    /// interceptor, which then runs for every publish the broker receives; nothing is allocated by later calls.
     /// </summary>
     /// <param name="topic">
     /// The topic to count, compared by reference first and then by value; nothing is allocated for it.
@@ -104,11 +119,24 @@ internal sealed class MqttNetBrokerHost : IAsyncDisposable
     {
         Volatile.Write(ref _remaining, count);
         _countedTopic = topic;
+        if (!_counting)
+        {
+            _counting = true;
+            _server.InterceptingPublishAsync += CountPublishAsync;
+        }
     }
 
     /// <summary>
+    /// Gets the number of publishes of the batch the broker has not received yet: 0 once the whole batch has
+    /// arrived, more when a wait of <see cref="WaitForExpectedPublishesAsync"/> was woken without it, and below zero
+    /// when more arrived than were expected.
+    /// </summary>
+    public int RemainingPublishes => Volatile.Read(ref _remaining);
+
+    /// <summary>
     /// Waits until the broker has received every publish expected by <see cref="ExpectPublishes"/>, or until
-    /// <see cref="WakePublishWaiter"/> wakes the wait; the caller tells the two apart.
+    /// <see cref="WakePublishWaiter"/> wakes the wait; the caller tells the two apart with
+    /// <see cref="RemainingPublishes"/>.
     /// </summary>
     /// <returns>
     /// A task that completes when the batch has arrived or the wait was woken.

@@ -321,6 +321,7 @@ public class ClientComparisonBenchmarks
 
         await _broker.WaitForExpectedPublishesAsync().ConfigureAwait(false);
         ThrowIfClosed(_wireClosed, "MqttWire's");
+        ThrowIfBatchIncomplete(_broker.RemainingPublishes);
     }
 
     /// <summary>
@@ -346,6 +347,7 @@ public class ClientComparisonBenchmarks
 
         await _broker.WaitForExpectedPublishesAsync().ConfigureAwait(false);
         ThrowIfClosed(_netClosed, "MQTTnet's");
+        ThrowIfBatchIncomplete(_broker.RemainingPublishes);
     }
 
     /// <summary>
@@ -612,6 +614,26 @@ public class ClientComparisonBenchmarks
         if (closed)
         {
             throw new InvalidOperationException($"{client} client lost its connection during the benchmark.");
+        }
+    }
+
+    /// <summary>
+    /// Fails a QoS 0 batch whose wait for the broker ended without the broker having received exactly the batch: the
+    /// broker's waiter is shared, so the other client's lost connection, or a wake left over from it, can end the
+    /// wait early.
+    /// </summary>
+    /// <param name="remaining">
+    /// The publishes of the batch the broker has not received; 0 when the batch arrived whole.
+    /// </param>
+    /// <exception cref="InvalidOperationException">
+    /// <paramref name="remaining"/> is not 0.
+    /// </exception>
+    private static void ThrowIfBatchIncomplete(int remaining)
+    {
+        if (remaining != 0)
+        {
+            throw new InvalidOperationException(
+                $"The wait for the broker ended with {remaining} of {QoS0Batch} publishes not received.");
         }
     }
 
