@@ -91,7 +91,8 @@ Anti-goals (failures even if it technically works):
 - `MqttWire` (codec and client) has no package dependencies. `MqttWire.Server` depends on
   `MqttWire` and on the ASP.NET Core shared framework, nothing else.
 - MQTTnet and MQTT.js are used **in the tests only**, as two independent MQTT implementations
-  that check this one.
+  that check this one. The one exception is `bench/MqttWire.Microbench`, which also measures
+  MqttWire's codec and client against MQTTnet's; no package ever depends on MQTTnet.
 
 ## 5. Approaches considered
 
@@ -143,7 +144,8 @@ mqttwire/
   tests/MqttWire.TestHost/      a small host with an exact-topic handler, shared by the interops,
                                 MQTT.js and the shared-topics test
   tests/interop-js/             MQTT.js against the test host
-  bench/MqttWire.Microbench/    BenchmarkDotNet runs of the codec and the client
+  bench/MqttWire.Microbench/    BenchmarkDotNet runs of the codec and the client, alone and
+                                against MQTTnet's
   bench/MqttWire.Bench/         the floor, the traffic floor, and idle connections on a handler that
                                 does nothing
   samples/GroupChat/            shared topics through the host (6.10): a server and a Blazor

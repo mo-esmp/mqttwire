@@ -51,23 +51,6 @@ public class CodecBenchmarks
     private const int UserPropertyValueRepeats = 20;
 
     /// <summary>
-    /// A 26-byte CONNECT with a Receive Maximum property of 1,024 and a client id, user name and password.
-    /// </summary>
-    private static readonly byte[] s_connect =
-    [
-        0x10, 0x18, 0x00, 0x04, 0x4D, 0x51, 0x54, 0x54, 0x05, 0xC2, 0x00, 0x0F, 0x03, 0x21, 0x04, 0x00,
-        0x00, 0x02, 0x63, 0x31, 0x00, 0x01, 0x75, 0x00, 0x01, 0x70,
-    ];
-
-    /// <summary>
-    /// A SUBSCRIBE with two topic filters.
-    /// </summary>
-    private static readonly byte[] s_subscribe =
-    [
-        0x82, 0x0D, 0x00, 0x01, 0x00, 0x00, 0x03, 0x61, 0x2F, 0x2B, 0x01, 0x00, 0x01, 0x78, 0x2D,
-    ];
-
-    /// <summary>
     /// The topic of the benchmark PUBLISH, in UTF-8.
     /// </summary>
     private byte[] _topic = [];
@@ -256,7 +239,7 @@ public class CodecBenchmarks
     [Benchmark]
     public int DecodeConnect()
     {
-        MqttReasonCode reason = ConnectCodec.TryDecode(s_connect, out ConnectPacket connect);
+        MqttReasonCode reason = ConnectCodec.TryDecode(BenchPackets.Connect, out ConnectPacket connect);
         connect.Properties.TryGetInteger(PropertyId.ReceiveMaximum, out uint receiveMaximum);
 
         return (int)reason + (int)receiveMaximum;
@@ -292,7 +275,7 @@ public class CodecBenchmarks
     [Benchmark]
     public int DecodeSubscribe()
     {
-        MqttReasonCode reason = SubscribeCodec.TryDecode(s_subscribe, out SubscribePacket subscribe);
+        MqttReasonCode reason = SubscribeCodec.TryDecode(BenchPackets.Subscribe, out SubscribePacket subscribe);
         int total = (int)reason;
 
         foreach (Subscription subscription in subscribe.GetSubscriptions())
