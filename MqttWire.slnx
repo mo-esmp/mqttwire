@@ -2,6 +2,7 @@
   <Folder Name="/bench/">
     <Project Path="bench/MqttWire.Bench/MqttWire.Bench.csproj" />
     <Project Path="bench/MqttWire.Microbench/MqttWire.Microbench.csproj" />
+    <Project Path="bench/MqttWire.Probe/MqttWire.Probe.csproj" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/GroupChat/GroupChat.Client/GroupChat.Client.csproj" />

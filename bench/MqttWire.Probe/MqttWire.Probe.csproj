@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+
+    <!-- Workstation GC, as an application that uses one client would run. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+  </PropertyGroup>
+
+  <!--
+    The older client to compare with is optional: given -p:BeforeAssembly=<path to MqttWire.Before.dll>, the probe
+    references it under the extern alias "before" and compiles its contestant (BEFORE). Without it, the probe runs the
+    branch's client against MQTTnet only, and the solution build needs nothing extra. See Program.cs for the commands.
+  -->
+  <PropertyGroup Condition="'$(BeforeAssembly)' != ''">
+    <DefineConstants>$(DefineConstants);BEFORE</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(BeforeAssembly)' != ''">
+    <Reference Include="MqttWire.Before">
+      <HintPath>$(BeforeAssembly)</HintPath>
+      <Aliases>before</Aliases>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Kestrel hosts MQTTnet's broker, the same one the client comparison benchmarks use. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <Compile Include="../MqttWire.Microbench/MqttNetBrokerHost.cs" Link="MqttNetBrokerHost.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- MQTTnet is the reference the probe measures MqttWire against; it never reaches a package. -->
+    <PackageReference Include="MQTTnet" />
+    <PackageReference Include="MQTTnet.Server" />
+    <PackageReference Include="MQTTnet.AspNetCore" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/MqttWire/MqttWire.csproj" />
+  </ItemGroup>
+
+</Project>

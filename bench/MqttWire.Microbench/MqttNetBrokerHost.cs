@@ -12,7 +12,8 @@ namespace MqttWire.Microbench;
 /// <summary>
 /// MQTTnet's broker hosted in Kestrel on a free loopback port, reachable over a WebSocket at <c>/mqtt</c> with the
 /// <c>mqtt</c> sub-protocol: the one broker both clients of <see cref="ClientComparisonBenchmarks"/> talk to, so
-/// that only the clients differ. It can count the publishes it receives on one topic, so that a benchmark can wait
+/// that only the clients differ. The interleaved probe, <c>bench/MqttWire.Probe</c>, links this file and uses the
+/// same broker. It can count the publishes it receives on one topic, so that a benchmark can wait
 /// for the broker's receipt of a batch (<see cref="ExpectPublishes"/>). Disposing it stops the host and frees the
 /// port.
 /// </summary>
