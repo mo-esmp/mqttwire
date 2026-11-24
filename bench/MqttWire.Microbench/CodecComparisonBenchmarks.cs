@@ -108,11 +108,13 @@ public class CodecComparisonBenchmarks
     /// <summary>
     /// MQTTnet's MQTT 5 formatter, reused for every call as a connection reuses its own.
     /// </summary>
+    // Set in [GlobalSetup], before any benchmark runs, so it is never read as null.
     private MqttPacketFormatterAdapter _formatter = null!;
 
     /// <summary>
     /// The PUBLISH that MQTTnet encodes, built once: the same packet as <see cref="_publish"/>.
     /// </summary>
+    // Set in [GlobalSetup], before any benchmark runs, so it is never read as null.
     private MqttPublishPacket _netPublish = null!;
 
     /// <summary>

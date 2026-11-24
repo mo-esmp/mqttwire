@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Runtime.CompilerServices;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;
 using MQTTnet;
@@ -15,8 +16,12 @@ namespace MqttWire.Microbench;
 /// loopback network are in every number, on both sides alike, so the ratios understate the difference between the
 /// clients themselves; <see cref="ClientBenchmarks"/> times MqttWire's client alone, over an in-memory link. Both
 /// clients publish the same 64-byte payload; MQTTnet's messages are built once, in setup, as its cheapest use is.
-/// The Allocated column counts the benchmark process only, both clients and the broker, but the broker's share is
-/// the same on both sides. The class is not sealed because BenchmarkDotNet generates a class that derives from it.
+/// Every publish's result is checked, and a failure throws, so that a refused or lost publish is never timed as a
+/// finished one; a wait for a message also ends with an exception when the client's connection has ended, so that
+/// a lost connection fails the benchmark instead of hanging it. The QoS 0 benchmarks time a batch of publishes to
+/// the broker's receipt of the whole batch, the one completion point both clients share. The Allocated column counts
+/// the benchmark process only, both clients and the broker, but the broker's share is the same on both sides. The
+/// class is not sealed because BenchmarkDotNet generates a class that derives from it.
 /// </summary>
 [MemoryDiagnoser]
 [CategoriesColumn]
@@ -24,7 +29,7 @@ namespace MqttWire.Microbench;
 public class ClientComparisonBenchmarks
 {
     /// <summary>
-    /// The category of publishing at QoS 0.
+    /// The category of publishing at QoS 0, timed to the broker's receipt.
     /// </summary>
     private const string PublishQoS0Category = "PublishQoS0";
 
@@ -57,6 +62,12 @@ public class ClientComparisonBenchmarks
     /// The number of publishes in a burst.
     /// </summary>
     private const int BurstSize = 50;
+
+    /// <summary>
+    /// The number of QoS 0 publishes in one invocation of the QoS 0 benchmarks, which wait for the broker to have
+    /// them all. Small enough that the client's outgoing limit is never near.
+    /// </summary>
+    private const int QoS0Batch = 100;
 
     /// <summary>
     /// The number of round trips in one invocation of the awaiting round-trip benchmarks.
@@ -124,8 +135,19 @@ public class ClientComparisonBenchmarks
     private readonly Task<MqttClientPublishResult>[] _netBurst = new Task<MqttClientPublishResult>[BurstSize];
 
     /// <summary>
+    /// Whether MqttWire's client has lost its connection; a waiter that wakes and sees it throws.
+    /// </summary>
+    private volatile bool _wireClosed;
+
+    /// <summary>
+    /// Whether MQTTnet's client has lost its connection; a waiter that wakes and sees it throws.
+    /// </summary>
+    private volatile bool _netClosed;
+
+    /// <summary>
     /// The connector that counts the writes of MqttWire's client.
     /// </summary>
+    // Set in [GlobalSetup], before any benchmark runs, so it is never read as null.
     private CountingLinkConnector _connector = null!;
 
     /// <summary>
@@ -141,37 +163,44 @@ public class ClientComparisonBenchmarks
     /// <summary>
     /// The broker both clients connect to.
     /// </summary>
+    // Set in [GlobalSetup], before any benchmark runs, so it is never read as null.
     private MqttNetBrokerHost _broker = null!;
 
     /// <summary>
     /// MqttWire's client, connected and subscribed to <see cref="WireEchoTopic"/>.
     /// </summary>
+    // Set in [GlobalSetup], before any benchmark runs, so it is never read as null.
     private MqttWireClient _wire = null!;
 
     /// <summary>
     /// MQTTnet's client, connected and subscribed to <see cref="NetEchoTopic"/>.
     /// </summary>
+    // Set in [GlobalSetup], before any benchmark runs, so it is never read as null.
     private IMqttClient _net = null!;
 
     /// <summary>
     /// MQTTnet's QoS 0 message to <see cref="SinkTopic"/>.
     /// </summary>
+    // Set in [GlobalSetup], before any benchmark runs, so it is never read as null.
     private MqttApplicationMessage _netSinkQoS0 = null!;
 
     /// <summary>
     /// MQTTnet's QoS 1 message to <see cref="SinkTopic"/>.
     /// </summary>
+    // Set in [GlobalSetup], before any benchmark runs, so it is never read as null.
     private MqttApplicationMessage _netSinkQoS1 = null!;
 
     /// <summary>
     /// MQTTnet's QoS 1 message to <see cref="NetEchoTopic"/>.
     /// </summary>
+    // Set in [GlobalSetup], before any benchmark runs, so it is never read as null.
     private MqttApplicationMessage _netEchoQoS1 = null!;
 
     /// <summary>
     /// Starts the broker, connects both clients with the same keep-alive, subscribes each at QoS 1 to its own echo
     /// topic, and makes one round trip with each, so that a broken setup fails here rather than hanging a
-    /// benchmark.
+    /// benchmark. The end of either client's connection is observed: it wakes that client's waits, which then
+    /// throw.
     /// </summary>
     /// <returns>
     /// A task that completes when both clients are ready.
@@ -198,7 +227,7 @@ public class ClientComparisonBenchmarks
         _wire = new MqttWireClient(
             wireOptions,
             (in _) => _wireEcho.Release(),
-            onClosed: null,
+            _ => OnWireClosed(),
             _connector,
             TimeProvider.System,
             ArrayPool<byte>.Shared);
@@ -218,6 +247,11 @@ public class ClientComparisonBenchmarks
         _net.ApplicationMessageReceivedAsync += _ =>
         {
             _netEcho.Release();
+            return Task.CompletedTask;
+        };
+        _net.DisconnectedAsync += _ =>
+        {
+            OnNetClosed();
             return Task.CompletedTask;
         };
         MqttClientOptions netOptions = new MqttClientOptionsBuilder()
@@ -265,73 +299,122 @@ public class ClientComparisonBenchmarks
     }
 
     /// <summary>
-    /// Publishes 64 bytes at QoS 0 with MqttWire's client; completes once the packet is written to the WebSocket.
+    /// Publishes <see cref="QoS0Batch"/> times 64 bytes at QoS 0 with MqttWire's client, awaiting and checking each
+    /// publish, and then waits until the broker has received them all.
     /// </summary>
     /// <returns>
-    /// The outcome.
+    /// A task that completes when the broker has the whole batch.
     /// </returns>
-    [Benchmark(Baseline = true)]
+    /// <exception cref="InvalidOperationException">
+    /// A publish failed, or the connection ended before the broker had the batch.
+    /// </exception>
+    [Benchmark(Baseline = true, OperationsPerInvoke = QoS0Batch)]
     [BenchmarkCategory(PublishQoS0Category)]
-    public ValueTask<MqttRequestResult> PublishQoS0MqttWire() => _wire.PublishAsync(SinkTopic, _payload, MqttQoS.AtMostOnce);
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    public async ValueTask PublishQoS0MqttWireAsync()
+    {
+        _broker.ExpectPublishes(SinkTopic, QoS0Batch);
+        for (int i = 0; i < QoS0Batch; i++)
+        {
+            Check(await _wire.PublishAsync(SinkTopic, _payload, MqttQoS.AtMostOnce).ConfigureAwait(false));
+        }
+
+        await _broker.WaitForExpectedPublishesAsync().ConfigureAwait(false);
+        ThrowIfClosed(_wireClosed, "MqttWire's");
+    }
 
     /// <summary>
-    /// Publishes 64 bytes at QoS 0 with MQTTnet's client; completes once the packet is written to the WebSocket.
+    /// Publishes <see cref="QoS0Batch"/> times 64 bytes at QoS 0 with MQTTnet's client, awaiting and checking each
+    /// publish, and then waits until the broker has received them all.
     /// </summary>
     /// <returns>
-    /// The outcome.
+    /// A task that completes when the broker has the whole batch.
     /// </returns>
-    [Benchmark]
+    /// <exception cref="InvalidOperationException">
+    /// A publish failed, or the connection ended before the broker had the batch.
+    /// </exception>
+    [Benchmark(OperationsPerInvoke = QoS0Batch)]
     [BenchmarkCategory(PublishQoS0Category)]
-    public Task<MqttClientPublishResult> PublishQoS0MqttNet() => _net.PublishAsync(_netSinkQoS0);
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    public async ValueTask PublishQoS0MqttNetAsync()
+    {
+        _broker.ExpectPublishes(SinkTopic, QoS0Batch);
+        for (int i = 0; i < QoS0Batch; i++)
+        {
+            Check(await _net.PublishAsync(_netSinkQoS0).ConfigureAwait(false));
+        }
+
+        await _broker.WaitForExpectedPublishesAsync().ConfigureAwait(false);
+        ThrowIfClosed(_netClosed, "MQTTnet's");
+    }
 
     /// <summary>
-    /// Publishes 64 bytes at QoS 1 with MqttWire's client and awaits the broker's PUBACK.
+    /// Publishes 64 bytes at QoS 1 with MqttWire's client, awaits the broker's PUBACK and checks it. The pooling
+    /// builder, used by its MQTTnet counterpart too, keeps the check from adding an allocation to either.
     /// </summary>
     /// <returns>
-    /// The outcome, completed by the PUBACK.
+    /// A task that completes with the PUBACK.
     /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// The publish failed.
+    /// </exception>
     [Benchmark(Baseline = true)]
     [BenchmarkCategory(PublishQoS1Category)]
-    public ValueTask<MqttRequestResult> PublishQoS1MqttWire() => _wire.PublishAsync(SinkTopic, _payload, MqttQoS.AtLeastOnce);
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    public async ValueTask PublishQoS1MqttWireAsync()
+        => Check(await _wire.PublishAsync(SinkTopic, _payload, MqttQoS.AtLeastOnce).ConfigureAwait(false));
 
     /// <summary>
-    /// Publishes 64 bytes at QoS 1 with MQTTnet's client and awaits the broker's PUBACK.
+    /// Publishes 64 bytes at QoS 1 with MQTTnet's client, awaits the broker's PUBACK and checks it.
     /// </summary>
     /// <returns>
-    /// The outcome, completed by the PUBACK.
+    /// A task that completes with the PUBACK.
     /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// The publish failed.
+    /// </exception>
     [Benchmark]
     [BenchmarkCategory(PublishQoS1Category)]
-    public Task<MqttClientPublishResult> PublishQoS1MqttNet() => _net.PublishAsync(_netSinkQoS1);
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    public async ValueTask PublishQoS1MqttNetAsync()
+        => Check(await _net.PublishAsync(_netSinkQoS1).ConfigureAwait(false));
 
     /// <summary>
-    /// Publishes 64 bytes at QoS 1 with MqttWire's client to its own echo topic, awaits the PUBACK, and then
-    /// awaits the broker's delivery of the same message back to the client, which acknowledges it.
+    /// Publishes 64 bytes at QoS 1 with MqttWire's client to its own echo topic, awaits and checks the PUBACK, and
+    /// then awaits the broker's delivery of the same message back to the client, which acknowledges it.
     /// </summary>
     /// <returns>
     /// A task that completes when the message is back.
     /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// The publish failed, or the connection ended before the message was back.
+    /// </exception>
     [Benchmark(Baseline = true)]
     [BenchmarkCategory(RoundTripQoS1Category)]
     public async ValueTask RoundTripQoS1MqttWireAsync()
     {
-        await _wire.PublishAsync(WireEchoTopic, _payload, MqttQoS.AtLeastOnce).ConfigureAwait(false);
+        Check(await _wire.PublishAsync(WireEchoTopic, _payload, MqttQoS.AtLeastOnce).ConfigureAwait(false));
         await _wireEcho.WaitAsync().ConfigureAwait(false);
+        ThrowIfClosed(_wireClosed, "MqttWire's");
     }
 
     /// <summary>
-    /// Publishes 64 bytes at QoS 1 with MQTTnet's client to its own echo topic, awaits the PUBACK, and then awaits
-    /// the broker's delivery of the same message back to the client, which acknowledges it.
+    /// Publishes 64 bytes at QoS 1 with MQTTnet's client to its own echo topic, awaits and checks the PUBACK, and
+    /// then awaits the broker's delivery of the same message back to the client, which acknowledges it.
     /// </summary>
     /// <returns>
     /// A task that completes when the message is back.
     /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// The publish failed, or the connection ended before the message was back.
+    /// </exception>
     [Benchmark]
     [BenchmarkCategory(RoundTripQoS1Category)]
     public async Task RoundTripQoS1MqttNetAsync()
     {
-        await _net.PublishAsync(_netEchoQoS1).ConfigureAwait(false);
+        Check(await _net.PublishAsync(_netEchoQoS1).ConfigureAwait(false));
         await _netEcho.WaitAsync().ConfigureAwait(false);
+        ThrowIfClosed(_netClosed, "MQTTnet's");
     }
 
     /// <summary>
@@ -426,6 +509,9 @@ public class ClientComparisonBenchmarks
     /// <returns>
     /// A task that completes when every publish is acknowledged and every echo has arrived.
     /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// A publish failed, or the connection ended before every echo had arrived.
+    /// </exception>
     private async ValueTask BurstWireAsync()
     {
         _bursts++;
@@ -436,12 +522,13 @@ public class ClientComparisonBenchmarks
 
         for (int i = 0; i < BurstSize; i++)
         {
-            await _wireBurst[i].ConfigureAwait(false);
+            Check(await _wireBurst[i].ConfigureAwait(false));
         }
 
         for (int i = 0; i < BurstSize; i++)
         {
             await _wireEcho.WaitAsync().ConfigureAwait(false);
+            ThrowIfClosed(_wireClosed, "MqttWire's");
         }
     }
 
@@ -451,6 +538,9 @@ public class ClientComparisonBenchmarks
     /// <returns>
     /// A task that completes when every publish is acknowledged and every echo has arrived.
     /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// A publish failed, or the connection ended before every echo had arrived.
+    /// </exception>
     private async Task BurstNetAsync()
     {
         for (int i = 0; i < BurstSize; i++)
@@ -460,13 +550,109 @@ public class ClientComparisonBenchmarks
 
         for (int i = 0; i < BurstSize; i++)
         {
-            await _netBurst[i].ConfigureAwait(false);
+            Check(await _netBurst[i].ConfigureAwait(false));
         }
 
         for (int i = 0; i < BurstSize; i++)
         {
             await _netEcho.WaitAsync().ConfigureAwait(false);
+            ThrowIfClosed(_netClosed, "MQTTnet's");
         }
+    }
+
+    /// <summary>
+    /// Checks the outcome of one of MqttWire's publishes.
+    /// </summary>
+    /// <param name="result">
+    /// The outcome.
+    /// </param>
+    /// <exception cref="InvalidOperationException">
+    /// The publish did not succeed: it was refused, as when the send queue is full, the connection was lost, or the
+    /// broker answered with a failure.
+    /// </exception>
+    private static void Check(MqttRequestResult result)
+    {
+        if (!result.IsSuccess)
+        {
+            throw new InvalidOperationException($"MqttWire's publish failed: {result.Status}, {result.ReasonCode}.");
+        }
+    }
+
+    /// <summary>
+    /// Checks the outcome of one of MQTTnet's publishes.
+    /// </summary>
+    /// <param name="result">
+    /// The outcome.
+    /// </param>
+    /// <exception cref="InvalidOperationException">
+    /// The broker answered with a failure.
+    /// </exception>
+    private static void Check(MqttClientPublishResult result)
+    {
+        if (!result.IsSuccess)
+        {
+            throw new InvalidOperationException($"MQTTnet's publish failed: {result.ReasonCode}.");
+        }
+    }
+
+    /// <summary>
+    /// Fails a wait that was woken by the end of the client's connection rather than by what it waited for.
+    /// </summary>
+    /// <param name="closed">
+    /// Whether the client's connection has ended.
+    /// </param>
+    /// <param name="client">
+    /// Which client, for the message.
+    /// </param>
+    /// <exception cref="InvalidOperationException">
+    /// The connection has ended.
+    /// </exception>
+    private static void ThrowIfClosed(bool closed, string client)
+    {
+        if (closed)
+        {
+            throw new InvalidOperationException($"{client} client lost its connection during the benchmark.");
+        }
+    }
+
+    /// <summary>
+    /// Releases a semaphore once, so that a waiter wakes; does nothing once it is disposed, in cleanup.
+    /// </summary>
+    /// <param name="semaphore">
+    /// The semaphore.
+    /// </param>
+    private static void Wake(SemaphoreSlim semaphore)
+    {
+        try
+        {
+            semaphore.Release();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Cleanup has run: nobody waits any more.
+        }
+    }
+
+    /// <summary>
+    /// Records that MqttWire's client lost its connection and wakes whatever waits for it: an echo, or the broker's
+    /// receipt of a QoS 0 batch. Called by the client once, when the connection ends, cleanup included.
+    /// </summary>
+    private void OnWireClosed()
+    {
+        _wireClosed = true;
+        Wake(_wireEcho);
+        _broker.WakePublishWaiter();
+    }
+
+    /// <summary>
+    /// Records that MQTTnet's client lost its connection and wakes whatever waits for it: an echo, or the broker's
+    /// receipt of a QoS 0 batch. Called by the client when the connection ends, cleanup included.
+    /// </summary>
+    private void OnNetClosed()
+    {
+        _netClosed = true;
+        Wake(_netEcho);
+        _broker.WakePublishWaiter();
     }
 
     /// <summary>

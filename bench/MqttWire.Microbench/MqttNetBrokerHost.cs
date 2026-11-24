@@ -5,13 +5,16 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using MQTTnet.AspNetCore;
+using MQTTnet.Server;
 
 namespace MqttWire.Microbench;
 
 /// <summary>
 /// MQTTnet's broker hosted in Kestrel on a free loopback port, reachable over a WebSocket at <c>/mqtt</c> with the
 /// <c>mqtt</c> sub-protocol: the one broker both clients of <see cref="ClientComparisonBenchmarks"/> talk to, so
-/// that only the clients differ. Disposing it stops the host and frees the port.
+/// that only the clients differ. It can count the publishes it receives on one topic, so that a benchmark can wait
+/// for the broker's receipt of a batch (<see cref="ExpectPublishes"/>). Disposing it stops the host and frees the
+/// port.
 /// </summary>
 internal sealed class MqttNetBrokerHost : IAsyncDisposable
 {
@@ -19,6 +22,24 @@ internal sealed class MqttNetBrokerHost : IAsyncDisposable
     /// The web application that hosts the broker.
     /// </summary>
     private readonly WebApplication _app;
+
+    /// <summary>
+    /// Released once when the publishes expected by <see cref="ExpectPublishes"/> have all been received, or by
+    /// <see cref="WakePublishWaiter"/>.
+    /// </summary>
+    private readonly SemaphoreSlim _received = new(0);
+
+    /// <summary>
+    /// The topic whose publishes are counted, or <see langword="null"/> before the first
+    /// <see cref="ExpectPublishes"/>.
+    /// </summary>
+    private volatile string? _countedTopic;
+
+    /// <summary>
+    /// The number of publishes on <see cref="_countedTopic"/> still expected; below zero once more arrived than
+    /// were expected.
+    /// </summary>
+    private int _remaining;
 
     /// <summary>
     /// Creates the host around a started web application.
@@ -62,7 +83,72 @@ internal sealed class MqttNetBrokerHost : IAsyncDisposable
 
         // Kestrel is listening once StartAsync returns, so the addresses feature is set and holds the bound port.
         string address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First();
-        return new MqttNetBrokerHost(app, new Uri($"ws://{new Uri(address).Authority}/mqtt"));
+        MqttNetBrokerHost host = new(app, new Uri($"ws://{new Uri(address).Authority}/mqtt"));
+        app.Services.GetRequiredService<MqttServer>().InterceptingPublishAsync += host.CountPublishAsync;
+        return host;
+    }
+
+    /// <summary>
+    /// Starts counting the publishes the broker receives on a topic: once <paramref name="count"/> of them have
+    /// arrived, <see cref="WaitForExpectedPublishesAsync"/> completes. Call it before the first publish of the batch,
+    /// and only when no earlier batch is still being counted.
+    /// </summary>
+    /// <param name="topic">
+    /// The topic to count, compared by reference first and then by value; nothing is allocated for it.
+    /// </param>
+    /// <param name="count">
+    /// The number of publishes in the batch.
+    /// </param>
+    public void ExpectPublishes(string topic, int count)
+    {
+        Volatile.Write(ref _remaining, count);
+        _countedTopic = topic;
+    }
+
+    /// <summary>
+    /// Waits until the broker has received every publish expected by <see cref="ExpectPublishes"/>, or until
+    /// <see cref="WakePublishWaiter"/> wakes the wait; the caller tells the two apart.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the batch has arrived or the wait was woken.
+    /// </returns>
+    public Task WaitForExpectedPublishesAsync() => _received.WaitAsync();
+
+    /// <summary>
+    /// Wakes a wait of <see cref="WaitForExpectedPublishesAsync"/> that would otherwise never end, because the
+    /// client that publishes the batch has lost its connection. Does nothing once the host is disposed.
+    /// </summary>
+    public void WakePublishWaiter()
+    {
+        try
+        {
+            _received.Release();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The host is stopped: nobody waits any more.
+        }
+    }
+
+    /// <summary>
+    /// Counts a publish the broker received, when it is on the counted topic, and releases the waiter when it is the
+    /// last one expected.
+    /// </summary>
+    /// <param name="args">
+    /// The publish.
+    /// </param>
+    /// <returns>
+    /// A completed task; the publish goes on as the broker handles it.
+    /// </returns>
+    private Task CountPublishAsync(InterceptingPublishEventArgs args)
+    {
+        if (string.Equals(args.ApplicationMessage.Topic, _countedTopic, StringComparison.Ordinal)
+            && Interlocked.Decrement(ref _remaining) == 0)
+        {
+            _received.Release();
+        }
+
+        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -75,5 +161,6 @@ internal sealed class MqttNetBrokerHost : IAsyncDisposable
     {
         await _app.StopAsync().ConfigureAwait(false);
         await _app.DisposeAsync().ConfigureAwait(false);
+        _received.Dispose();
     }
 }
