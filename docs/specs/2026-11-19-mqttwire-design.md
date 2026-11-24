@@ -1147,8 +1147,8 @@ The inside of `MqttWireClient`.
 - **The client cannot have the server's deadlock, and must keep it that way.** Nothing on the
   client waits for a QoS window. So the answers go out in the order their packets arrived, and
   the publishes in the order they were made; a publish made from `OnMessage` may go out ahead of
-  answers that still wait, and an acknowledgement never stands behind something that is waiting for the
-  server.
+  answers that still wait, and an acknowledgement never stands behind something that is waiting
+  for the server.
 - It must not block a thread (Blazor WebAssembly). A plain send lock or queue is fine: a client
   has one connection and does not need the server's "only while there is work" machinery.
 
