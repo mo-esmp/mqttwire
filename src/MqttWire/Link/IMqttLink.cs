@@ -3,7 +3,8 @@ using System.Net.WebSockets;
 namespace MqttWire.Link;
 
 /// <summary>
-/// The transport below the MQTT code: a stream of bytes in, and one binary message per packet out.
+/// The transport below the MQTT code: a stream of bytes in, and one binary message per write out, which holds one
+/// MQTT packet or several.
 /// </summary>
 /// <remarks>
 /// One reader and one writer at a time. Read and write failures surface as the exceptions the
@@ -38,16 +39,18 @@ internal interface IMqttLink
     ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Writes one packet as one binary message.
+    /// Writes the bytes as one binary message. One write can hold several MQTT packets, one after the other, as the
+    /// answers the read loop writes together do; the peer reads them as one stream of bytes.
     /// </summary>
     /// <param name="packet">
-    /// The encoded packet; it must stay valid until the returned task completes.
+    /// The encoded packet, or several encoded packets one after the other; it must stay valid until the returned
+    /// task completes.
     /// </param>
     /// <param name="cancellationToken">
     /// Cancels the write.
     /// </param>
     /// <returns>
-    /// A task that completes when the packet has been handed to the transport.
+    /// A task that completes when the bytes have been handed to the transport.
     /// </returns>
     ValueTask WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken cancellationToken);
 

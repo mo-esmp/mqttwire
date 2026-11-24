@@ -16,7 +16,10 @@ packets. What each side writes:
 - **The server** writes acknowledgements that wait together as one message, and a PUBLISH whose
   packet is over 16,384 bytes as several messages: its header, then its payload in pieces of at
   most 65,536 bytes. A client must not assume one packet per message.
-- **The client** writes one packet per message.
+- **The client** writes one packet per message in `0.1.0-preview.1`. From the next release it
+  writes each publish and each request in a message of its own, and the answers it owes
+  (PUBACK, PUBREC, PUBREL, PUBCOMP) that wait together as one message. A server must not
+  assume one packet per message either.
 
 After a refusing CONNACK or a DISCONNECT, the WebSocket is closed with status 1000.
 
