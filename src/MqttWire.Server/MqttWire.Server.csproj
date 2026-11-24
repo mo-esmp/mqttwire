@@ -3,7 +3,8 @@
   <PropertyGroup>
     <IsPackable>true</IsPackable>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Description>A lean MQTT 5 server for ASP.NET Core, over WebSockets.</Description>
+    <PackageTags>mqtt;mqtt5;websocket;aspnetcore;server</PackageTags>
+    <Description>A lean MQTT 5 connection server for ASP.NET Core, over WebSockets. It is not a broker: it handles the protocol, QoS 0, 1 and 2, limits, deadlines and shutdown for every connection, and your handler decides who connects, what a subscription means and where each message goes. An idle connection costs it about 600 bytes above a bare ASP.NET Core WebSocket.</Description>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <CodeAnalysisTreatWarningsAsErrors>true</CodeAnalysisTreatWarningsAsErrors>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
@@ -20,6 +21,51 @@
   <ItemGroup>
     <ProjectReference Include="../MqttWire/MqttWire.csproj" />
   </ItemGroup>
+
+  <!--
+    The server uses MqttWire's internal codec (InternalsVisibleTo), so it works with the MqttWire of its own
+    version and no other. A project reference packs as "this version or later"; this makes it exactly this version.
+  -->
+  <Target Name="PinMqttWireToThisVersion" AfterTargets="_GetProjectReferenceVersions">
+    <ItemGroup>
+      <_PinnedProjectReference Include="@(_ProjectReferencesWithVersions)">
+        <ProjectVersion>[%(_ProjectReferencesWithVersions.ProjectVersion)]</ProjectVersion>
+      </_PinnedProjectReference>
+      <_ProjectReferencesWithVersions Remove="@(_ProjectReferencesWithVersions)" />
+      <_ProjectReferencesWithVersions Include="@(_PinnedProjectReference)" />
+    </ItemGroup>
+  </Target>
+
+  <!--
+    The target above rests on an item and a target that are internal to the pack targets. Should a later SDK
+    rename either, it would do nothing and the package would say "this version or later" again, without a word.
+    So the manifest that was written is read back, and a pack whose dependency is not the exact version fails.
+
+    The manifest is taken from what pack says it wrote (NuGetPackOutput), not from a path built here: NuspecOutputPath
+    may be anywhere, with or without a trailing slash, and the file's name carries the version as NuGet normalizes
+    it ("0.2" is "0.2.0", and build metadata after "+" is dropped). For the same reason the dependency is compared
+    with the version the manifest itself states, not with $(PackageVersion); the manifest keeps build metadata in
+    its own version and a dependency never has any, so the metadata is left out of the comparison.
+  -->
+  <Target Name="CheckMqttWireIsPinned" AfterTargets="GenerateNuspec">
+    <ItemGroup>
+      <_PackedManifest Include="@(NuGetPackOutput)"
+                       Condition="'%(Extension)' == '.nuspec' And !$([System.String]::Copy('%(Filename)').EndsWith('.symbols'))" />
+    </ItemGroup>
+    <Error Condition="'@(_PackedManifest->Count())' != '1'"
+           Text="The check that MqttWire.Server depends on exactly its own version of MqttWire expected one packed manifest and found these: '@(_PackedManifest)'. See the target CheckMqttWireIsPinned." />
+    <XmlPeek XmlInputPath="@(_PackedManifest)" Query="//*[local-name()='metadata']/*[local-name()='version']/text()">
+      <Output TaskParameter="Result" PropertyName="_PackedVersion" />
+    </XmlPeek>
+    <XmlPeek XmlInputPath="@(_PackedManifest)" Query="//*[local-name()='dependency'][@id='MqttWire']/@version">
+      <Output TaskParameter="Result" ItemName="_PackedMqttWireVersion" />
+    </XmlPeek>
+    <PropertyGroup>
+      <_PackedVersionWithoutMetadata>$(_PackedVersion.Split('+')[0])</_PackedVersionWithoutMetadata>
+    </PropertyGroup>
+    <Error Condition="'$(_PackedVersionWithoutMetadata)' == '' Or '@(_PackedMqttWireVersion)' != '[$(_PackedVersionWithoutMetadata)]'"
+           Text="MqttWire.Server must depend on exactly its own version of MqttWire, '[$(_PackedVersionWithoutMetadata)]', but its packed manifest says '@(_PackedMqttWireVersion)'. See the target PinMqttWireToThisVersion." />
+  </Target>
 
   <ItemGroup>
     <InternalsVisibleTo Include="MqttWire.Tests" />

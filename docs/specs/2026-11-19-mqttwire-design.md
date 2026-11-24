@@ -4,6 +4,7 @@ Date: 2026-11-19
 Status: final design (v6), approved by the owner on 2026-11-19
 Updated on 2026-11-22 to the server as built in step 3 (mo-esmp/mqttwire#6).
 Updated on 2026-11-23 to the rest of step 3: MQTT.js, the sample and the benchmark.
+Updated on 2026-11-23 to step 4, the preview package (mo-esmp/mqttwire#7).
 Moved to the `mqttwire` repository on 2026-11-20.
 Companion: [GrainWire on MqttWire](2026-11-19-grainwire-on-mqttwire-design.md), the first host.
 History: this design is v5 of ["GrainWire: its own minimal MQTT 5 implementation"](2026-11-19-minimal-mqtt-design.md),
@@ -147,8 +148,8 @@ mqttwire/
                                 does nothing
   samples/GroupChat/            shared topics through the host (6.10): a server and a Blazor
                                 WebAssembly client
-  docs/                         this design; the benchmark's report (docs/bench); (step 4) "the part
-                                of MQTT 5 that is implemented"
+  docs/                         this design; the benchmark's report (docs/bench); mqtt-support.md,
+                                "the part of MQTT 5 that is implemented"
 ```
 
 ### 6.2 Public API: the server
@@ -1420,6 +1421,9 @@ sat there would be closed during the run.
   stated scope.
 - **Versions:** semantic versioning; the two packages always carry the same version. The first
   release is a preview (`0.1.0-preview.1`), and the public API may still change until 1.0.
+  `MqttWire.Server` depends on exactly its own version of `MqttWire`, not on "that version or
+  later": it uses the codec through `InternalsVisibleTo` (6.1), and internals may change
+  between any two versions. `CHANGELOG.md` says what changed in each release.
 - **Conformance and security fixes are the owner's own.** Fuzz findings become fixed tests. The
   versions of MQTTnet and MQTT.js that the tests run against are pinned, and raising them is a
   deliberate change.
@@ -1477,6 +1481,9 @@ Each step ends with every test green.
 - The memory target is judged on MqttWire's own state for a connection, not on what Kestrel's
   pool keeps after a burst (2026-11-23, on the benchmark's first seven runs; confirmed the same
   day on all ten, with the traffic floor and the corrected unit tests; 6.14).
+- The preview `0.1.0-preview.1` is published on nuget.org, with a git tag `v0.1.0-preview.1`
+  and a GitHub pre-release once the step is merged; step 4 has no plan of its own, its issue
+  is the plan (2026-11-23, the open questions of mo-esmp/mqttwire#7).
 
 ## 10. Proposed by Claude (owner to check)
 
@@ -1630,6 +1637,21 @@ Decided while the rest of step 3 was built (2026-11-23), not yet seen by the own
     every failed attempt to reconnect, which a page cannot turn off; the application logs
     nothing.
 
+Decided while the preview package was made in step 4 (2026-11-23), not yet seen by the owner:
+
+53. `MqttWire.Server` packs its dependency on `MqttWire` as exactly its own version (6.15). A
+    project reference packs as "this version or later", which would let a later `MqttWire`,
+    with other internals, be loaded under an older server. The target that does it rests on
+    internals of the pack targets, so the packed manifest is read back and a pack whose
+    dependency is not the exact version fails; CI packs both packages on every run.
+54. The two packages share one README, the repository's, whose links are absolute so that they
+    work on nuget.org; each package has its own description and tags.
+55. Two public members are not named in 6.3 and have been there since step 2:
+    `MqttWireClient.IsConnected`, and `MqttConnectAck.Exception`, the network error behind a
+    connect that could not reach the server. Section 8 asks that the public API be what 6.2
+    and 6.3 describe and nothing more; these two are small and of use to a caller, and are left
+    for the owner to keep or remove before 1.0.
+
 ## 11. Left to the builder
 
 What was left here, and what step 3 decided:
@@ -1682,3 +1704,10 @@ tests, which a CI job of their own runs); the `GroupChat` sample in a browser, o
 the run); and the benchmark, whose report is
 [docs/bench/2026-11-idle-memory.md](../bench/2026-11-idle-memory.md). Not run: the benchmark
 on Linux or on a machine that is not virtual, and the sample in any other browser.
+
+The preview package (step 4) was checked on 2026-11-23 from outside the repository: both
+packages were packed into an empty folder, and a project with a package cache of its own
+restored them from that folder alone. The three code blocks of the README compiled against
+them as they are, and the `GroupChat` sample, with its project references turned into package
+references, built and ran: two browser tabs exchanged messages. Not checked: a restore from
+nuget.org itself, which exists only once the packages are published.
