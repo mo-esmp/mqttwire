@@ -17,18 +17,18 @@ public sealed class PendingAnswersTests
     {
         // Arrange
         CountingPool pool = new();
-        PendingAnswers answers = new(pool);
+        PendingAnswers answers = new();
 
         // Act
-        answers.Add(PacketType.PubAck, 1, MqttReasonCode.Success);
+        answers.Add(pool, PacketType.PubAck, 1, MqttReasonCode.Success);
         int afterFirst = pool.Outstanding;
-        answers.Add(PacketType.PubAck, 2, MqttReasonCode.Success);
+        answers.Add(pool, PacketType.PubAck, 2, MqttReasonCode.Success);
 
         // Assert
         afterFirst.ShouldBe(1);
         pool.Outstanding.ShouldBe(1);
         pool.LargestRent.ShouldBe(80);
-        answers.Release();
+        answers.Release(pool);
     }
 
     /// <summary>
@@ -40,10 +40,10 @@ public sealed class PendingAnswersTests
     {
         // Arrange
         CountingPool pool = new();
-        PendingAnswers answers = new(pool);
-        answers.Add(PacketType.PubAck, 1, MqttReasonCode.Success);
-        answers.Add(PacketType.PubRec, 7, MqttReasonCode.Success);
-        answers.Add(PacketType.PubComp, 7, MqttReasonCode.PacketIdentifierNotFound);
+        PendingAnswers answers = new();
+        answers.Add(pool, PacketType.PubAck, 1, MqttReasonCode.Success);
+        answers.Add(pool, PacketType.PubRec, 7, MqttReasonCode.Success);
+        answers.Add(pool, PacketType.PubComp, 7, MqttReasonCode.PacketIdentifierNotFound);
 
         // Act
         byte[] buffer = answers.Take(out int length);
@@ -62,17 +62,17 @@ public sealed class PendingAnswersTests
     {
         // Arrange
         CountingPool pool = new();
-        PendingAnswers answers = new(pool);
-        answers.Add(PacketType.PubAck, 1, MqttReasonCode.Success);
+        PendingAnswers answers = new();
+        answers.Add(pool, PacketType.PubAck, 1, MqttReasonCode.Success);
         byte[] taken = answers.Take(out _);
         pool.Return(taken);
 
         // Act
-        answers.Add(PacketType.PubAck, 2, MqttReasonCode.Success);
+        answers.Add(pool, PacketType.PubAck, 2, MqttReasonCode.Success);
 
         // Assert
         pool.Outstanding.ShouldBe(1);
-        answers.Release();
+        answers.Release(pool);
     }
 
     /// <summary>
@@ -84,8 +84,8 @@ public sealed class PendingAnswersTests
     {
         // Arrange
         CountingPool pool = new();
-        PendingAnswers answers = new(pool);
-        answers.Add(PacketType.PubAck, 1, MqttReasonCode.Success);
+        PendingAnswers answers = new();
+        answers.Add(pool, PacketType.PubAck, 1, MqttReasonCode.Success);
 
         // Act
         for (int i = 0; i < ClientLimits.AnswerPacketBound - 2; i++)
@@ -99,7 +99,7 @@ public sealed class PendingAnswersTests
         // Assert
         beforeLast.ShouldBeFalse();
         answers.MustWriteBeforeNextPacket.ShouldBeTrue();
-        answers.Release();
+        answers.Release(pool);
     }
 
     /// <summary>
@@ -110,14 +110,14 @@ public sealed class PendingAnswersTests
     {
         // Arrange
         CountingPool pool = new();
-        PendingAnswers answers = new(pool);
+        PendingAnswers answers = new();
         for (int i = 0; i < 20; i++)
         {
             answers.CountPacket();
         }
 
         // Act
-        answers.Add(PacketType.PubAck, 1, MqttReasonCode.Success);
+        answers.Add(pool, PacketType.PubAck, 1, MqttReasonCode.Success);
         for (int i = 0; i < ClientLimits.AnswerPacketBound - 2; i++)
         {
             answers.CountPacket();
@@ -125,7 +125,46 @@ public sealed class PendingAnswersTests
 
         // Assert
         answers.MustWriteBeforeNextPacket.ShouldBeFalse();
-        answers.Release();
+        answers.Release(pool);
+    }
+
+    /// <summary>
+    /// Proves the bytes of a full buffer fit in the byte that counts them.
+    /// </summary>
+    [Fact]
+    public void AnswerBufferBytes_FullBuffer_FitsInAByte()
+    {
+        // Arrange
+        int full = ClientLimits.AnswerBufferBytes;
+
+        // Act
+        bool fits = full <= byte.MaxValue;
+
+        // Assert
+        fits.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// Proves sixteen answers of the largest size, a full buffer, are handed over whole.
+    /// </summary>
+    [Fact]
+    public void Take_FullBufferOfLargestAnswers_ReturnsEveryByte()
+    {
+        // Arrange
+        CountingPool pool = new();
+        PendingAnswers answers = new();
+        for (int i = 0; i < ClientLimits.AnswerPacketBound; i++)
+        {
+            answers.Add(pool, PacketType.PubComp, (ushort)(i + 1), MqttReasonCode.PacketIdentifierNotFound);
+        }
+
+        // Act
+        byte[] buffer = answers.Take(out int length);
+
+        // Assert
+        length.ShouldBe(ClientLimits.AnswerBufferBytes);
+        buffer.AsSpan(length - ClientLimits.MaxAnswerBytes, ClientLimits.MaxAnswerBytes).SequenceEqual(Hex.Parse("70 03 00 10 92")).ShouldBeTrue();
+        pool.Return(buffer);
     }
 
     /// <summary>
@@ -136,13 +175,13 @@ public sealed class PendingAnswersTests
     {
         // Arrange
         CountingPool pool = new();
-        PendingAnswers answers = new(pool);
-        answers.Release();
-        answers.Add(PacketType.PubAck, 1, MqttReasonCode.Success);
+        PendingAnswers answers = new();
+        answers.Release(pool);
+        answers.Add(pool, PacketType.PubAck, 1, MqttReasonCode.Success);
 
         // Act
-        answers.Release();
-        answers.Release();
+        answers.Release(pool);
+        answers.Release(pool);
 
         // Assert
         pool.Outstanding.ShouldBe(0);

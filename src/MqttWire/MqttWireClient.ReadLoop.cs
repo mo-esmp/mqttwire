@@ -99,7 +99,7 @@ public sealed partial class MqttWireClient
             // Only a bug in the client gets here. Release the link, the answers waiting and the keep-alive timer,
             // and fail whoever waits, rather than hang them.
             link.Abort();
-            _answers.Release();
+            _answers.Release(_pool);
             ITimer? keepAliveTimer;
             lock (_gate)
             {
@@ -391,7 +391,7 @@ public sealed partial class MqttWireClient
             return false;
         }
 
-        _answers.Add(reply.Type, reply.PacketIdentifier, reply.ReasonCode);
+        _answers.Add(_pool, reply.Type, reply.PacketIdentifier, reply.ReasonCode);
         return true;
     }
 
@@ -410,7 +410,7 @@ public sealed partial class MqttWireClient
     {
         if (_phase >= Phase.Closing)
         {
-            _answers.Release();
+            _answers.Release(_pool);
             return new ValueTask<bool>(false);
         }
 

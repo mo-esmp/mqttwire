@@ -39,8 +39,8 @@ internal static class ClientLimits
     public const int MaxIncomingQoS2 = 1024;
 
     /// <summary>
-    /// The most answers the read loop keeps before it writes them, and the most packets it handles between the
-    /// oldest waiting answer and the write.
+    /// The most answers the read loop keeps before it writes them. It writes before it handles the sixteenth packet
+    /// after the one whose answer waits longest, so at most fifteen packets pass in between.
     /// </summary>
     public const int AnswerPacketBound = 16;
 

@@ -198,7 +198,7 @@ public sealed partial class MqttWireClient
         _receive.Clear();
 
         // Answers still waiting are not sent once the end is recorded; their buffer goes back here.
-        _answers.Release();
+        _answers.Release(_pool);
 
         // The link has ended; aborting it now only releases the socket under it.
         link.Abort();

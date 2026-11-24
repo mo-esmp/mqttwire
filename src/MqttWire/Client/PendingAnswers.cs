@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using MqttWire.Codec;
 
 namespace MqttWire.Client;
@@ -9,10 +10,14 @@ namespace MqttWire.Client;
 /// after the other in one pooled buffer, so that they go out in a single write. The buffer is rented when the first
 /// answer is added and handed over by <see cref="Take"/>. Used by the read loop only; not thread-safe.
 /// </summary>
-/// <param name="pool">
-/// The pool the buffer is rented from.
-/// </param>
-internal sealed class PendingAnswers(ArrayPool<byte> pool)
+/// <remarks>
+/// A mutable struct, so that it lives inline in the client and constructing a client allocates nothing for it; it
+/// holds no pool either, and the members that rent or return take the client's. It must be used in place, from a
+/// field that is not <see langword="readonly"/>, and never copied: a copy would hold the same buffer, and both could
+/// return it. The default value holds no answer.
+/// </remarks>
+[StructLayout(LayoutKind.Auto)]
+internal struct PendingAnswers
 {
     /// <summary>
     /// The rented buffer, or <see langword="null"/> when no answer waits.
@@ -20,31 +25,41 @@ internal sealed class PendingAnswers(ArrayPool<byte> pool)
     private byte[]? _buffer;
 
     /// <summary>
-    /// The number of bytes of encoded answers in <see cref="_buffer"/>.
+    /// The number of bytes of encoded answers in <see cref="_buffer"/>, at most
+    /// <see cref="ClientLimits.AnswerBufferBytes"/>; a byte, like the two counts, so the struct adds little to the
+    /// client it lives in.
     /// </summary>
-    private int _length;
+    private byte _length;
 
     /// <summary>
     /// The number of packets counted by <see cref="CountPacket"/> since the oldest waiting answer was added.
     /// </summary>
-    private int _packets;
+    private byte _packets;
+
+    /// <summary>
+    /// The number of answers waiting, at most <see cref="ClientLimits.AnswerPacketBound"/>.
+    /// </summary>
+    private byte _count;
 
     /// <summary>
     /// Gets the number of answers waiting.
     /// </summary>
-    public int Count { get; private set; }
+    public readonly int Count => _count;
 
     /// <summary>
     /// Gets a value that tells whether the answers must be written before the next packet is handled: some answer
     /// waits and <see cref="ClientLimits.AnswerPacketBound"/> minus one packets have been counted since the oldest
     /// one was added. It bounds how long an answer waits and keeps the buffer from overflowing.
     /// </summary>
-    public bool MustWriteBeforeNextPacket => Count > 0 && _packets >= ClientLimits.AnswerPacketBound - 1;
+    public readonly bool MustWriteBeforeNextPacket => _count > 0 && _packets >= ClientLimits.AnswerPacketBound - 1;
 
     /// <summary>
     /// Encodes an answer after the ones waiting, renting the buffer for the first. Adding to a full buffer is a
     /// client bug: it is asserted in debug builds and has no other path.
     /// </summary>
+    /// <param name="pool">
+    /// The pool the buffer is rented from when this is the first answer; the one <see cref="Release"/> is given.
+    /// </param>
     /// <param name="type">
     /// The answer's packet type.
     /// </param>
@@ -54,17 +69,20 @@ internal sealed class PendingAnswers(ArrayPool<byte> pool)
     /// <param name="reasonCode">
     /// The reason code; a success is written without the reason byte.
     /// </param>
-    public void Add(PacketType type, ushort packetIdentifier, MqttReasonCode reasonCode)
+    public void Add(ArrayPool<byte> pool, PacketType type, ushort packetIdentifier, MqttReasonCode reasonCode)
     {
-        Debug.Assert(Count < ClientLimits.AnswerPacketBound, "The answers must be written before the buffer is full.");
+        Debug.Assert(_count < ClientLimits.AnswerPacketBound, "The answers must be written before the buffer is full.");
         _buffer ??= pool.Rent(minimumLength: ClientLimits.AnswerBufferBytes);
-        _length += AckCodec.Write(
+        int written = AckCodec.Write(
             destination: _buffer.AsSpan(start: _length),
             type: type,
             packetIdentifier: packetIdentifier,
             reasonCode: reasonCode,
             reasonString: null);
-        Count++;
+
+        // At most AnswerPacketBound answers of at most MaxAnswerBytes each: the sum fits in a byte.
+        _length = (byte)(_length + written);
+        _count++;
     }
 
     /// <summary>
@@ -73,7 +91,7 @@ internal sealed class PendingAnswers(ArrayPool<byte> pool)
     /// </summary>
     public void CountPacket()
     {
-        if (Count > 0)
+        if (_count > 0)
         {
             _packets++;
         }
@@ -100,7 +118,7 @@ internal sealed class PendingAnswers(ArrayPool<byte> pool)
         _buffer = null;
         _length = 0;
         _packets = 0;
-        Count = 0;
+        _count = 0;
         return buffer;
     }
 
@@ -108,13 +126,16 @@ internal sealed class PendingAnswers(ArrayPool<byte> pool)
     /// Returns the buffer if one is held, and forgets the answers in it. Does nothing when none is held, so it can
     /// be called again, and from the end of the read loop whatever the way out.
     /// </summary>
-    public void Release()
+    /// <param name="pool">
+    /// The pool the buffer was rented from, the one <see cref="Add"/> was given.
+    /// </param>
+    public void Release(ArrayPool<byte> pool)
     {
         byte[]? buffer = _buffer;
         _buffer = null;
         _length = 0;
         _packets = 0;
-        Count = 0;
+        _count = 0;
         if (buffer is not null)
         {
             pool.Return(array: buffer);
