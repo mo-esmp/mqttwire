@@ -137,8 +137,9 @@ things the loop asks of the link: the wait for data, and the read.
 - **A failed write** ends the connection inside `SendAsync`, as today; the read loop sees the
   phase on its next turn.
 - **When the connection ends,** answers that still wait are not sent, and their buffer goes back
-  to the pool when the read loop finishes the connection. `SendAsync` already refuses everything
-  but a DISCONNECT once the end is recorded.
+  to the pool at the next write attempt once the end has begun, or when the read loop finishes the
+  connection, whichever comes first. The read loop records no new answer once the end has begun.
+  `SendAsync` already refuses everything but a DISCONNECT once the end is recorded.
 - **The receive maximum is enforced as today:** a new QoS 1 or 2 PUBLISH ends the connection
   with `0x93` while 1,024 QoS 2 identifiers wait for their PUBREL. An answer that waits does not
   count as a place taken. The client could now see a server that sends one delivery too many

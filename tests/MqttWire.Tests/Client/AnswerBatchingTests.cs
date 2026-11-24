@@ -330,6 +330,35 @@ public sealed class AnswerBatchingTests
         readPending.ShouldBeTrue();
         harness.Closed.Single().Reason.ShouldBe(MqttClientCloseReason.WriteFailed);
         pool.Outstanding.ShouldBe(0);
+        pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves a write of answers that fails while the link's wait is pending ends the connection as a failed write,
+    /// and the read loop finishes only after that wait has ended, with every buffer back exactly once.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Read_AnswerWriteFailsWhileWaitPends_EndsWithWriteFailedAfterTheWaitEnds()
+    {
+        // Arrange
+        CountingPool pool = new();
+        ClientHarness harness = await ConnectAsync(pool: pool);
+        harness.Link.HoldReadsOnAbort();
+        harness.Link.FailWrites(new IOException());
+
+        // Act
+        harness.Link.Deliver(PublishQoS1(1));
+        int closedWhileWaitPends = harness.Closed.Count;
+        harness.Link.EndFromPeer();
+
+        // Assert
+        closedWhileWaitPends.ShouldBe(0);
+        harness.Closed.Single().Reason.ShouldBe(MqttClientCloseReason.WriteFailed);
+        pool.Outstanding.ShouldBe(0);
+        pool.FaultyReturns.ShouldBe(0);
     }
 
     /// <summary>
@@ -354,6 +383,7 @@ public sealed class AnswerBatchingTests
         harness.Closed.ShouldBe([new MqttClientCloseInfo(MqttClientCloseReason.ProtocolError, MqttReasonCode.PacketTooLarge, null, null)]);
         writes.ShouldBeEmpty();
         pool.Outstanding.ShouldBe(0);
+        pool.FaultyReturns.ShouldBe(0);
     }
 
     /// <summary>
@@ -368,20 +398,29 @@ public sealed class AnswerBatchingTests
     {
         // Arrange
         MqttWireClient? client = null;
-        ClientHarness harness = await ConnectAsync((in message) => _ = client?.PublishAsync("x", s_hi, MqttQoS.AtMostOnce));
+        List<Task<MqttRequestResult>> publishes = [];
+        ClientHarness harness = await ConnectAsync((in message) =>
+        {
+            if (client is not null)
+            {
+                publishes.Add(client.PublishAsync("x", s_hi, MqttQoS.AtMostOnce).AsTask());
+            }
+        });
         client = harness.Client;
         List<byte[]> writes = CaptureWrites(harness.Link);
 
         // Act
         harness.Link.Deliver(PublishesQoS1(2));
+        MqttRequestResult[] results = await Task.WhenAll(publishes).Within("the publishes");
 
         // Assert
         writes.ShouldBe([s_publishXQoS0, s_publishXQoS0, PubAcks(1, 2)]);
+        results.Length.ShouldBe(2);
     }
 
     /// <summary>
-    /// Proves a dispose begun by <c>OnMessage</c> while its PUBACK is still to be recorded writes only the
-    /// DISCONNECT, and returns every buffer once the dispose completes.
+    /// Proves a dispose begun by the <c>OnMessage</c> of a second QoS 1 PUBLISH, while the PUBACK of the first
+    /// waits, writes only the DISCONNECT, and returns every buffer exactly once when the dispose completes.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -393,12 +432,22 @@ public sealed class AnswerBatchingTests
         CountingPool pool = new();
         MqttWireClient? client = null;
         Task? dispose = null;
-        ClientHarness harness = await ConnectAsync((in _) => dispose = client?.DisposeAsync().AsTask(), pool);
+        int messages = 0;
+        ClientHarness harness = await ConnectAsync(
+            (in _) =>
+            {
+                messages++;
+                if (messages == 2)
+                {
+                    dispose = client?.DisposeAsync().AsTask();
+                }
+            },
+            pool);
         client = harness.Client;
         List<byte[]> writes = CaptureWrites(harness.Link);
 
         // Act
-        harness.Link.Deliver(PublishQoS1(1));
+        harness.Link.Deliver(PublishesQoS1(2));
         byte[][] written = [.. writes];
         harness.Link.EndFromPeer();
         await dispose.ShouldNotBeNull().Within("the dispose");
@@ -407,6 +456,7 @@ public sealed class AnswerBatchingTests
         written.ShouldBe([ClientPackets.Disconnect]);
         writes.Count.ShouldBe(1);
         pool.Outstanding.ShouldBe(0);
+        pool.FaultyReturns.ShouldBe(0);
     }
 
     /// <summary>

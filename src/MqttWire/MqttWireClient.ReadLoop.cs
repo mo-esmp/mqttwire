@@ -368,13 +368,20 @@ public sealed partial class MqttWireClient
     /// client's lock.
     /// </summary>
     /// <returns>
-    /// <see langword="true"/> when the answer waits to be written. <see langword="false"/> when it is over the
-    /// server's Maximum Packet Size: it is not recorded, and the connection ends with
+    /// <see langword="true"/> when the answer waits to be written. <see langword="false"/> when it is not recorded:
+    /// either the end has already begun, so no answer is owed any more and the connection ends as it was recorded;
+    /// or it is over the server's Maximum Packet Size, and the connection ends with
     /// <see cref="MqttClientCloseReason.ProtocolError"/> and 0x95, aborting the link, unless another reason ended it
-    /// first. The answers already waiting stay, for the end of the connection to return.
+    /// first. The answers already waiting stay, for the next write attempt or the end of the connection to return.
     /// </returns>
     private bool TryAddAnswer()
     {
+        if (_phase >= Phase.Closing)
+        {
+            // The end has begun: nothing is written but a DISCONNECT, so the answer is not kept.
+            return false;
+        }
+
         Reply reply = _reply;
         if (!FitsServerMaximumPacketSize(AckCodec.GetSize(reply.ReasonCode, null)))
         {
@@ -390,7 +397,8 @@ public sealed partial class MqttWireClient
     /// <summary>
     /// Writes every answer waiting as one WebSocket message through the send lock. The buffer is handed to
     /// <see cref="SendAsync"/>, which returns it to the pool whatever the outcome, so afterwards no answer waits.
-    /// Called by the read loop only, and only while an answer waits.
+    /// Once the end has begun nothing but a DISCONNECT is written, so the answers are dropped and their buffer
+    /// returned without taking the send lock. Called by the read loop only, and only while an answer waits.
     /// </summary>
     /// <returns>
     /// <see langword="true"/> when the link took them. <see langword="false"/> when they were dropped because the
@@ -399,6 +407,12 @@ public sealed partial class MqttWireClient
     /// </returns>
     private ValueTask<bool> WriteAnswersAsync()
     {
+        if (_phase >= Phase.Closing)
+        {
+            _answers.Release();
+            return new ValueTask<bool>(false);
+        }
+
         byte[] answers = _answers.Take(out int length);
         return SendAsync(answers, length, SendKind.Other);
     }

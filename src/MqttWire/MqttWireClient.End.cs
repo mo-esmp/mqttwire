@@ -169,9 +169,9 @@ public sealed partial class MqttWireClient
 
     /// <summary>
     /// Finishes the connection once the read loop has stopped: stops the close deadline and the keep-alive timer,
-    /// completes what is in flight, returns the read buffer, drops the answers still waiting and returns their buffer,
-    /// releases the link, and then reports the end once: to
-    /// <c>OnClosed</c> for a connection that connected, to the connect otherwise.
+    /// completes what is in flight, returns the read buffer, drops the answers still waiting and returns their
+    /// buffer, releases the link, and then reports the end once: to <c>OnClosed</c> for a connection that connected,
+    /// to the connect otherwise.
     /// </summary>
     /// <param name="link">
     /// The link, which has ended.
