@@ -6,8 +6,9 @@ namespace MqttWire.Link;
 /// <summary>
 /// An <see cref="IMqttLink"/> over a <see cref="WebSocket"/>: each write is one binary message, which holds one
 /// packet or several, and incoming messages are read as one continuous stream of bytes. Once the link has started
-/// its one close frame, writes are dropped: nothing may follow the close frame, and a send after it would fail
-/// and make the caller abort the link during the close handshake.
+/// its one close frame, a write that begins is dropped: nothing may follow the close frame, and a send after it
+/// would fail and make the caller abort the link during the close handshake. A send that began just before the close
+/// started can still go out after the close frame; see <see cref="WriteAsync"/>.
 /// </summary>
 /// <param name="webSocket">
 /// The connected socket, which this link uses but does not dispose.
@@ -131,10 +132,15 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
     /// completes at once. The read loop writes the answers it owes while a read is not complete, and a read that met
     /// a text message is not complete while its close with 1003 is being sent; nothing may follow a close frame, and
     /// a send after it fails, which would make the caller abort the link during the close handshake. A send that
-    /// fails because the close started meanwhile, which the socket's own send order can put first, is dropped the
-    /// same way. A send that completes at once returns the socket's task as it is, so the common write builds no
-    /// state machine.
+    /// starts after the close frame went out and fails for it, synchronously or later, is dropped the same way.
     /// </summary>
+    /// <remarks>
+    /// One narrow race is left: a write can pass the check just before the close starts. The socket stays
+    /// <see cref="WebSocketState.Open"/> until the close frame is written, so that send queues behind the close frame
+    /// and goes out after it without failing; the peer then sees a binary message after the close. The window is a
+    /// few instructions wide and needs a peer that sends a text message. A send that completes at once returns the
+    /// socket's task as it is, so the common write builds no state machine.
+    /// </remarks>
     /// <param name="packet">
     /// The encoded packets.
     /// </param>
@@ -142,8 +148,8 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
     /// Cancels the write.
     /// </param>
     /// <returns>
-    /// A task that completes when the message has been sent, or when the write was dropped because the link's close
-    /// has started.
+    /// A task that completes when the message has been sent, or, without sending it, when the write was dropped
+    /// because the link's close has started.
     /// </returns>
     /// <exception cref="WebSocketException">
     /// The socket failed while this link had not started its close.
@@ -163,7 +169,7 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
         }
         catch (Exception) when (Volatile.Read(location: ref _closeStarted) != 0)
         {
-            // The close started after the check above and the socket refused the send: the write is dropped.
+            // The close started after the check above and the socket refused the send at once: the write is dropped.
             return ValueTask.CompletedTask;
         }
 
@@ -226,8 +232,9 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
 
     /// <summary>
     /// Awaits a send that did not complete at once, and drops its failure when this link's close started
-    /// meanwhile, for the reason <see cref="WriteAsync"/> gives. It uses the pooling builder, so a send that
-    /// suspends allocates nothing in steady state.
+    /// meanwhile, for the reason <see cref="WriteAsync"/> gives. A send queued behind the close frame that the socket
+    /// does not fail is not dropped: it goes out after the close (see <see cref="WriteAsync"/>). It uses the pooling
+    /// builder, so a send that suspends allocates nothing in steady state.
     /// </summary>
     /// <param name="sending">
     /// The socket's send.
@@ -245,7 +252,7 @@ internal sealed class WebSocketLink(WebSocket webSocket) : IMqttLink
         }
         catch (Exception) when (Volatile.Read(location: ref _closeStarted) != 0)
         {
-            // The close frame went out first and the send after it failed: the write is dropped.
+            // The close frame went out first and the socket failed the send after it: the write is dropped.
         }
     }
 

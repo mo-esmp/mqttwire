@@ -50,7 +50,9 @@ internal interface IMqttLink
     /// Cancels the write.
     /// </param>
     /// <returns>
-    /// A task that completes when the bytes have been handed to the transport.
+    /// A task that completes when the bytes have been handed to the transport, or, once the link's own close has
+    /// started, without sending them: nothing may follow a close frame, so such a link drops the write and reports
+    /// success.
     /// </returns>
     ValueTask WriteAsync(ReadOnlyMemory<byte> packet, CancellationToken cancellationToken);
 

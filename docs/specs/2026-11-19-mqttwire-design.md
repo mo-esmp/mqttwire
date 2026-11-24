@@ -481,10 +481,13 @@ Rules for the WebSocket implementation, both sides:
   was in progress, in which case the close rule of 6.6 aborts the link and the peer may see a
   reset instead.
 - A link starts at most one close frame, whichever side closes first. Once it has started it,
-  the client's link drops what is written to it: nothing may follow a close frame, and a send
-  after it would fail and abort the link during the close handshake. The client's read loop
-  writes the answers it owes while a read is not complete, and the read that met a text message
-  is not complete while its close with 1003 is being sent.
+  the client's link drops a write that begins, and a send that the socket fails because the close
+  frame went out first: nothing may follow a close frame, and a send after it would fail and
+  abort the link during the close handshake. The client's read loop writes the answers it owes
+  while a read is not complete, and the read that met a text message is not complete while its
+  close with 1003 is being sent. A send already queued while the close frame is being written can
+  still follow it: the socket stays open until the frame is out, so the send does not fail. The
+  window is a few instructions wide and needs a peer that sends a text message; it is left open.
 - An empty binary message carries no bytes and does not end the wait for data: the wait goes
   on. What the link cannot see is a frame whose header has arrived and whose payload the peer
   withholds: the wait ends and the read that follows waits, which on the server is bounded by

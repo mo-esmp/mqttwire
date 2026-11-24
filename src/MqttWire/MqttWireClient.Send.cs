@@ -25,7 +25,9 @@ public sealed partial class MqttWireClient
     /// credentials cleared, when the write ends, whatever the outcome.
     /// </param>
     /// <returns>
-    /// <see langword="true"/> when the link took the packet. <see langword="false"/> when it was not written
+    /// <see langword="true"/> when the link took the packet. A link whose own close has started takes it without
+    /// sending it (<see cref="IMqttLink.WriteAsync"/>), so <see langword="true"/> does not promise that the packet was
+    /// sent. <see langword="false"/> when it was not written
     /// because the end had begun, or the write failed; a failed write ends the connection with
     /// <see cref="MqttClientCloseReason.WriteFailed"/> and aborts the link.
     /// </returns>

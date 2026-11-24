@@ -498,8 +498,8 @@ public sealed class WebSocketLinkTests
 
     /// <summary>
     /// Proves a write that starts while the link's own close with 1003 still waits behind a write in progress
-    /// completes at once without failing and sends nothing: the peer reads the first message whole and then the
-    /// close, and no second binary message.
+    /// completes at once without failing, so it does not queue behind the close: the peer reads the first message
+    /// whole and then the close. What would follow the close the peer cannot read, so the test does not look for it.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -529,7 +529,6 @@ public sealed class WebSocketLinkTests
         bool completedAtOnce = secondWrite.IsCompletedSuccessfully;
         byte[] buffer = new byte[256_000];
         int received = 0;
-        int binaryMessages = 0;
         WebSocketReceiveResult result;
         do
         {
@@ -537,10 +536,6 @@ public sealed class WebSocketLinkTests
                 .ReceiveAsync(new ArraySegment<byte>(buffer, received, buffer.Length - received), CancellationToken.None)
                 .Within("The peer's receive");
             received += result.Count;
-            if (result.MessageType == WebSocketMessageType.Binary && result.EndOfMessage)
-            {
-                binaryMessages++;
-            }
         }
         while (result.MessageType == WebSocketMessageType.Binary);
 
@@ -549,7 +544,6 @@ public sealed class WebSocketLinkTests
 
         // Assert
         completedAtOnce.ShouldBeTrue();
-        binaryMessages.ShouldBe(1);
         received.ShouldBe(message.Length);
         result.MessageType.ShouldBe(WebSocketMessageType.Close);
         result.CloseStatus.ShouldBe(WebSocketCloseStatus.InvalidMessageType);
@@ -557,8 +551,8 @@ public sealed class WebSocketLinkTests
     }
 
     /// <summary>
-    /// Proves a send that passed the link's check and then fails because the link's close started meanwhile, as when
-    /// the socket puts the close frame first, completes the write without failing.
+    /// Proves the link drops a pending send's failure once its close has started: the scripted socket fails the send
+    /// after the link's close frame went out, and the write completes without failing.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -567,13 +561,14 @@ public sealed class WebSocketLinkTests
     public async Task WriteAsync_SendFailsAfterTheCloseStarted_CompletesWithoutFailing()
     {
         // Arrange
-        using HeldSendWebSocket socket = new();
+        TaskCompletionSource send = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        using ScriptedSendWebSocket socket = new() { Send = () => new ValueTask(send.Task) };
         WebSocketLink link = new(socket);
         ValueTask write = link.WriteAsync(new byte[] { 0x40, 0x02, 0x00, 0x01 }, CancellationToken.None);
         await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
 
         // Act
-        socket.FailSend(new WebSocketException(WebSocketError.InvalidState));
+        send.SetException(new WebSocketException(WebSocketError.InvalidState));
 
         // Assert
         await Should.NotThrowAsync(write.AsTask().Within("The write"));
@@ -582,7 +577,7 @@ public sealed class WebSocketLinkTests
     }
 
     /// <summary>
-    /// Proves a failed send surfaces as the write's failure while the link has not started its close.
+    /// Proves a pending send's failure surfaces as the write's failure while the link has not started its close.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -591,15 +586,72 @@ public sealed class WebSocketLinkTests
     public async Task WriteAsync_SendFailsBeforeAnyClose_ThrowsTheFailure()
     {
         // Arrange
-        using HeldSendWebSocket socket = new();
+        TaskCompletionSource send = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        using ScriptedSendWebSocket socket = new() { Send = () => new ValueTask(send.Task) };
         WebSocketLink link = new(socket);
         ValueTask write = link.WriteAsync(new byte[] { 0x40, 0x02, 0x00, 0x01 }, CancellationToken.None);
 
         // Act
-        socket.FailSend(new WebSocketException(WebSocketError.ConnectionClosedPrematurely));
+        send.SetException(new WebSocketException(WebSocketError.ConnectionClosedPrematurely));
 
         // Assert
         await Should.ThrowAsync<WebSocketException>(write.AsTask().Within("The write"));
+    }
+
+    /// <summary>
+    /// Proves the link drops a send that the socket refuses at once, by throwing, when the link's close started after
+    /// the write's check: the write completes at once without failing.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task WriteAsync_SendThrowsAtOnceAfterTheCloseStarted_CompletesWithoutFailing()
+    {
+        // Arrange
+        using ScriptedSendWebSocket socket = new();
+        WebSocketLink link = new(socket);
+        ValueTask close = default;
+        socket.Send = () =>
+        {
+            // The close starts between the link's check and the socket's refusal.
+            close = link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
+            throw new WebSocketException(WebSocketError.InvalidState);
+        };
+
+        // Act
+        ValueTask write = link.WriteAsync(new byte[] { 0x40, 0x02, 0x00, 0x01 }, CancellationToken.None);
+
+        // Assert
+        write.IsCompletedSuccessfully.ShouldBeTrue();
+        await close;
+        socket.Sends.ShouldBe(1);
+        socket.Closes.ShouldBe(1);
+    }
+
+    /// <summary>
+    /// Proves a send that the socket refuses at once, by throwing, surfaces as the write's failure while the link has
+    /// not started its close.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task WriteAsync_SendThrowsAtOnceBeforeAnyClose_ThrowsTheFailure()
+    {
+        // Arrange
+        using ScriptedSendWebSocket socket = new()
+        {
+            Send = () => throw new WebSocketException(WebSocketError.ConnectionClosedPrematurely),
+        };
+        WebSocketLink link = new(socket);
+
+        // Act
+        Func<Task> write = async () => await link.WriteAsync(new byte[] { 0x40, 0x02, 0x00, 0x01 }, CancellationToken.None);
+
+        // Assert
+        await Should.ThrowAsync<WebSocketException>(write);
+        socket.Closes.ShouldBe(0);
     }
 
     /// <summary>

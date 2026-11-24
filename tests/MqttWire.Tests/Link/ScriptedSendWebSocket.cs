@@ -3,16 +3,16 @@ using System.Net.WebSockets;
 namespace MqttWire.Tests.Link;
 
 /// <summary>
-/// A <see cref="WebSocket"/> whose sends wait until the test ends them, with success or a failure, and whose close
-/// frame goes out at once. It lets a test start the close of a link while a send that passed the link's checks is
-/// still pending, the order the socket's own send lock can produce but a real socket does not let a test hold.
+/// A <see cref="WebSocket"/> whose sends do what the test scripts in <see cref="Send"/>, such as stay pending until the
+/// test fails them or throw at once, and whose close frame goes out at once. It lets a test put the start of the
+/// link's close and the failure of a send in an order of its choosing; it does not model what a real socket does.
 /// </summary>
-internal sealed class HeldSendWebSocket : WebSocket
+internal sealed class ScriptedSendWebSocket : WebSocket
 {
     /// <summary>
-    /// The pending send, which <see cref="FailSend"/> ends.
+    /// Gets or sets what a send does; by default it completes at once.
     /// </summary>
-    private readonly TaskCompletionSource _send = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public Func<ValueTask> Send { get; set; } = () => ValueTask.CompletedTask;
 
     /// <summary>
     /// Gets the number of sends started.
@@ -45,15 +45,7 @@ internal sealed class HeldSendWebSocket : WebSocket
     public override string SubProtocol => "mqtt";
 
     /// <summary>
-    /// Ends the pending send with the given failure.
-    /// </summary>
-    /// <param name="exception">
-    /// The failure the send ends with.
-    /// </param>
-    public void FailSend(Exception exception) => _send.SetException(exception);
-
-    /// <summary>
-    /// Starts a send that waits until <see cref="FailSend"/> ends it.
+    /// Counts the send and does what <see cref="Send"/> scripts.
     /// </summary>
     /// <param name="buffer">
     /// The bytes, which are not kept.
@@ -68,17 +60,20 @@ internal sealed class HeldSendWebSocket : WebSocket
     /// Not observed.
     /// </param>
     /// <returns>
-    /// The pending send.
+    /// The task <see cref="Send"/> returns.
     /// </returns>
+    /// <exception cref="Exception">
+    /// Whatever <see cref="Send"/> throws.
+    /// </exception>
     public override ValueTask SendAsync(ReadOnlyMemory<byte> buffer, WebSocketMessageType messageType,
         bool endOfMessage, CancellationToken cancellationToken)
     {
         Sends++;
-        return new ValueTask(_send.Task);
+        return Send();
     }
 
     /// <summary>
-    /// Starts a send that waits until <see cref="FailSend"/> ends it.
+    /// Counts the send and does what <see cref="Send"/> scripts.
     /// </summary>
     /// <param name="buffer">
     /// The bytes, which are not kept.
@@ -93,8 +88,11 @@ internal sealed class HeldSendWebSocket : WebSocket
     /// Not observed.
     /// </param>
     /// <returns>
-    /// The pending send.
+    /// The task <see cref="Send"/> returns.
     /// </returns>
+    /// <exception cref="Exception">
+    /// Whatever <see cref="Send"/> throws.
+    /// </exception>
     public override Task SendAsync(ArraySegment<byte> buffer, WebSocketMessageType messageType, bool endOfMessage,
         CancellationToken cancellationToken) => SendAsync(buffer.AsMemory(), messageType, endOfMessage, cancellationToken).AsTask();
 
