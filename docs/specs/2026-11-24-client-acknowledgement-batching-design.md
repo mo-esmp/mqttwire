@@ -3,8 +3,9 @@
 A change to the inside of `MqttWireClient`. It amends section 6.9 of
 [the design](2026-11-19-mqttwire-design.md), which stays the authority for everything else.
 
-Status: proposed on 24 November 2026 and revised the same day after
-[its review](2026-11-24-client-acknowledgement-batching-review.md); for the owner to approve.
+Status: approved by the owner and implemented on 2026-11-24; see
+[the plan](../plans/2026-11-24-client-answer-batching-plan.md). It was revised the same day after
+[its review](2026-11-24-client-acknowledgement-batching-review.md).
 Section 11 says what the review changed.
 
 ## 1. Intent

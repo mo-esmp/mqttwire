@@ -1119,6 +1119,12 @@ The inside of `MqttWireClient`.
   DISCONNECT `0x94`. The client announces a receive maximum of 1,024: a new QoS 1 or 2
   PUBLISH while 1,024 QoS 2 identifiers wait for their PUBREL ends the connection with `0x93`
   before it is handed on; a repeat of a remembered identifier takes no new place.
+- **Answers** (PUBACK, PUBREC, PUBCOMP, and the PUBREL for the client's own QoS 2 publishes) are
+  recorded in a pooled buffer and written as one WebSocket message when the read loop would
+  wait for the link, its wait for data or its read, or before it handles the sixteenth packet
+  after the one whose answer waits longest. They go out in the order their packets arrived.
+  When the connection ends, answers still waiting are not sent. See
+  [the client writes its answers when it runs out of input](2026-11-24-client-acknowledgement-batching-design.md).
 - **Keep-alive:** one timer per client, ticking every half interval. On a tick the client sends
   a PINGREQ if nothing was sent for half the interval, so the time between packets never
   exceeds the keep-alive, as MQTT requires. One PINGREQ waits at a time: no second is queued
@@ -1139,8 +1145,9 @@ The inside of `MqttWireClient`.
   - each close is bounded by a close timeout of 2 seconds, then the link is aborted;
   - a timeout, or a failed read or write, aborts the link without a DISCONNECT.
 - **The client cannot have the server's deadlock, and must keep it that way.** Nothing on the
-  client waits for a QoS window. So everything the client writes goes out in the order it was
-  produced, and an acknowledgement never stands behind something that is waiting for the
+  client waits for a QoS window. So the answers go out in the order their packets arrived, and
+  the publishes in the order they were made; a publish made from `OnMessage` may go out ahead of
+  answers that still wait, and an acknowledgement never stands behind something that is waiting for the
   server.
 - It must not block a thread (Blazor WebAssembly). A plain send lock or queue is fine: a client
   has one connection and does not need the server's "only while there is work" machinery.

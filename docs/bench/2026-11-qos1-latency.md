@@ -1,41 +1,103 @@
 # QoS 1 latency in MqttWire and MQTTnet
 
-MqttWire completed a QoS 1 publish **7.471 µs faster** than MQTTnet in the supplied BenchmarkDotNet run. The ordering reversed when each client published to its own subscription and waited for the message callback as well as the broker’s PUBACK. MqttWire took **7.564 µs longer** in that case. A follow-up probe reversed the ordering again, so the measurements do not establish a consistent round-trip disadvantage.
+The client's read loop used to wait for the write of its own PUBACK before it read the next packet. That wait was the cause of the QoS 1 round-trip gap to MQTTnet. The read loop now records its answers and writes them together when it would wait for the link (see [the design](../specs/2026-11-24-client-acknowledgement-batching-design.md)). With a blocking caller, the round trip now takes 0.68 to 0.78 of its former time, and 0.69 to 0.87 of MQTTnet's. A burst of 50 publishes costs 0.61 to 0.76 of its former time per message. A caller that awaits its round trip sees no difference beyond this VM's noise, but allocates about 220 B more per operation. [#13](https://github.com/mo-esmp/mqttwire/issues/13) tracks that allocation.
 
-## Benchmark results
+## Cause
 
-Both clients sent a 64-byte payload over a loopback WebSocket to the same MQTTnet broker implementation. The publish-only case used a topic with no subscribers. The self-echo case subscribed at QoS 1. Allocations include the client and the in-process broker. [Benchmark setup and methods](../../bench/MqttWire.Microbench/ClientComparisonBenchmarks.cs)
+MqttWire invoked the callback on its read loop and then awaited the PUBACK write before it processed another packet. If the echoed PUBLISH arrived first, the broker's PUBACK for the original publish sat behind that write. MQTTnet 5.2.0.1603 queues the echoed PUBLISH for a separate worker, so its receive loop can dispatch the broker's PUBACK while the worker handles the echo. [MqttWire inbound publish handler](../../src/MqttWire/MqttWireClient.Receive.cs) · [MqttWire read loop](../../src/MqttWire/MqttWireClient.ReadLoop.cs) · [MQTTnet receive worker](https://github.com/dotnet/MQTTnet/blob/14463d1ef9f1f119514185c1832905b91bff827d/Source/MQTTnet/MqttClient.cs#L614-L630)
 
-| Operation | MqttWire mean | MQTTnet mean | MqttWire allocated/op | MQTTnet allocated/op |
-| --- | ---: | ---: | ---: | ---: |
-| Publish and await the broker’s PUBACK | 86.198 µs | 93.669 µs | 1,464 B | 3,519 B |
-| Publish and await both PUBACK and the echo callback | 108.264 µs | 100.700 µs | 2,341 B | 6,421 B |
+The cause is confirmed. Moving the PUBACK write off the read loop, with the number of writes unchanged, was 13 to 25 µs faster with a blocking caller, in four runs of four.
 
-BenchmarkDotNet flagged both MqttWire QoS 1 latency distributions as bimodal. The round-trip standard deviations were 7.643 µs for MqttWire and 5.943 µs for MQTTnet.
+## Method
 
-## Why the echo can change latency
+All numbers come from one noisy VM (Apple Silicon, 10 cores, .NET 10.0.15, BenchmarkDotNet 0.15.8, default job). Both clients talk over a loopback WebSocket to the same in-process MQTTnet broker, with a 64-byte payload. Each burst is 50 QoS 1 publishes started together. The awaiting categories repeat the round trip (100 times) or the burst (10 times) and await them. "Blocking" means the caller blocks on the round trip.
 
-A self-echo involves two acknowledgements. The broker acknowledges the original publish, and the subscribing client acknowledges the echoed publish. The benchmark ends once the original publish completes and the echo callback has signalled. The broker’s receipt of the client’s acknowledgement falls outside that completion condition.
+"Before" is commit 9aea873 and "after" is commit d7640a3. Allocations count the whole process, broker included.
 
-MqttWire invokes the callback on its read loop and then awaits the acknowledgement write before processing another packet. If the echoed PUBLISH arrives first, the broker’s PUBACK for the original publish can sit behind that write. MQTTnet 5.2.0.1603 queues the echoed PUBLISH for a separate worker, which lets its receive loop dispatch the broker’s PUBACK while the worker handles the echo. This difference gives packet arrival order a way to affect the measured latency. [MqttWire inbound publish handler](../../src/MqttWire/MqttWireClient.Receive.cs) · [MqttWire read loop](../../src/MqttWire/MqttWireClient.ReadLoop.cs) · [MQTTnet receive worker](https://github.com/dotnet/MQTTnet/blob/14463d1ef9f1f119514185c1832905b91bff827d/Source/MQTTnet/MqttClient.cs#L614-L630)
+## After: the client with the answer batching
 
-## Follow-up timing probe
+### ClientBenchmarks.ReceiveQoS1 (in-memory link)
 
-The probe rotated scenario order across 60 measured rounds of 1,000 sequential operations per scenario. All outgoing publishes used QoS 1.
+| Method      | Mean     | Allocated |
+|------------ |---------:|----------:|
+| ReceiveQoS1 | 118.7 ns |         - |
 
-| Scenario | MqttWire mean | MQTTnet mean |
-| --- | ---: | ---: |
-| Publish with no subscriber | 88.5 µs | 97.4 µs |
-| Echo delivered at QoS 1 | 104.2 µs | 112.2 µs |
-| Echo delivered at QoS 0 | 95.9 µs | 101.8 µs |
+Before: 159.7 ns, also with no allocation.
 
-For the QoS 1 echo, MqttWire’s callback ran before the publishing caller resumed in 100% of samples, compared with 79.7% for MQTTnet. These application timestamps show a scheduling difference. They do not record packet arrival order, write duration, or lock contention, so the specific cause of the original 7.564 µs gap remains unconfirmed.
+### Client comparison (loopback WebSocket, same MQTTnet broker)
 
-The original run and the probe source were in the local scratchpad when this report was written. [BenchmarkDotNet log](<C:/Users/mohsenesmailpour/AppData/Local/Temp/claude/25b444182b2a2d7f/3fc2315f-ba8d-4a53-8c30-a1d61c757d9b/scratchpad/bdn-full.log>) · [Probe source](<C:/Users/mohsenesmailpour/AppData/Local/Temp/claude/25b444182b2a2d7f/3fc2315f-ba8d-4a53-8c30-a1d61c757d9b/scratchpad/qos1probe/Program.cs>)
+| Method                             | Categories            | Mean      | Error    | StdDev    | Median    | Ratio | RatioSD | Gen0   | Gen1   | Allocated | Alloc Ratio |
+|----------------------------------- |---------------------- |----------:|---------:|----------:|----------:|------:|--------:|-------:|-------:|----------:|------------:|
+| BurstQoS1MqttWireAsync             | BurstQoS1             |  28.57 us | 1.087 us |  3.136 us |  28.40 us |  1.01 |    0.16 | 0.4688 |      - |    2161 B |        1.00 |
+| BurstQoS1MqttNetAsync              | BurstQoS1             |  58.15 us | 1.210 us |  3.531 us |  57.94 us |  2.06 |    0.25 | 1.4063 |      - |    6033 B |        2.79 |
+|                                    |                       |           |          |           |           |       |         |        |        |           |             |
+| BurstQoS1AwaitingMqttWireAsync     | BurstQoS1Awaiting     |  26.45 us | 0.915 us |  2.670 us |  26.39 us |  1.01 |    0.14 | 0.5000 |      - |    2159 B |        1.00 |
+| BurstQoS1AwaitingMqttNetAsync      | BurstQoS1Awaiting     |  60.81 us | 1.753 us |  5.059 us |  60.49 us |  2.32 |    0.30 | 1.3750 | 0.1250 |    6086 B |        2.82 |
+|                                    |                       |           |          |           |           |       |         |        |        |           |             |
+| PublishQoS0MqttWire                | PublishQoS0           |  11.44 us | 0.331 us |  0.954 us |  11.50 us |  1.01 |    0.12 | 0.1678 |      - |     696 B |        1.00 |
+| PublishQoS0MqttNet                 | PublishQoS0           |  20.40 us | 0.406 us |  1.140 us |  20.21 us |  1.80 |    0.18 | 0.2136 |      - |     898 B |        1.29 |
+|                                    |                       |           |          |           |           |       |         |        |        |           |             |
+| PublishQoS1MqttWire                | PublishQoS1           | 110.89 us | 3.448 us |  9.781 us | 108.07 us |  1.01 |    0.12 | 0.2441 |      - |    1464 B |        1.00 |
+| PublishQoS1MqttNet                 | PublishQoS1           | 116.03 us | 4.672 us | 13.177 us | 115.29 us |  1.05 |    0.15 | 0.7324 |      - |    3515 B |        2.40 |
+|                                    |                       |           |          |           |           |       |         |        |        |           |             |
+| RoundTripQoS1MqttWireAsync         | RoundTripQoS1         | 136.66 us | 7.091 us | 20.907 us | 129.20 us |  1.02 |    0.21 | 0.4883 |      - |    2357 B |        1.00 |
+| RoundTripQoS1MqttNetAsync          | RoundTripQoS1         | 160.06 us | 6.013 us | 17.635 us | 152.07 us |  1.20 |    0.22 | 1.4648 |      - |    6422 B |        2.72 |
+|                                    |                       |           |          |           |           |       |         |        |        |           |             |
+| RoundTripQoS1AwaitingMqttWireAsync | RoundTripQoS1Awaiting |  94.03 us | 2.449 us |  6.866 us |  93.15 us |  1.01 |    0.10 | 0.4688 |      - |    2502 B |        1.00 |
+| RoundTripQoS1AwaitingMqttNetAsync  | RoundTripQoS1Awaiting | 111.79 us | 3.082 us |  8.386 us | 109.96 us |  1.20 |    0.12 | 1.5625 |      - |    6770 B |        2.71 |
+
+BenchmarkDotNet flagged two MqttWire distributions here as multimodal or bimodal: `BurstQoS1MqttWireAsync` and `BurstQoS1AwaitingMqttWireAsync`. The "before" table below was noisier still (standard deviations up to 27 µs), so the means of the two tables are not a reliable comparison. The probe below is the comparison to read.
+
+### Allocation per operation, before and after
+
+| Category              |  Before |   After | Change |
+| --------------------- | ------: | ------: | -----: |
+| RoundTripQoS1         | 2339 B  | 2357 B  |  +18 B |
+| RoundTripQoS1Awaiting | 2280 B  | 2502 B  | +222 B |
+| BurstQoS1             | 2211 B  | 2161 B  |  -50 B |
+| BurstQoS1Awaiting     | 2157 B  | 2159 B  |   +2 B |
+| PublishQoS1           | 1464 B  | 1464 B  |      0 |
+
+### Writes per burst
+
+MqttWire made 100 link writes per burst of 50 before (one PUBLISH and one PUBACK each). It now makes about 57.5: the 50 publishes and 7 to 8 writes for the answers. The two benchmark processes printed 57.8 and 57.5.
+
+## Probe: medians, before and after
+
+An interleaved probe ran before, after and MQTTnet in rotating order, 30 rounds of 1,000 operations per scenario, and took the median of the rounds. Values are microseconds per operation; burst rows are per message. Three runs.
+
+| Scenario            | Run | Before |  After | MQTTnet | After/before | After/MQTTnet |
+| ------------------- | --: | -----: | -----: | ------: | -----------: | ------------: |
+| Blocking round trip |   1 |  165.2 |  112.1 |   162.7 |         0.68 |          0.69 |
+|                     |   2 |  165.0 |  128.8 |   147.9 |         0.78 |          0.87 |
+|                     |   3 |  167.2 |  124.1 |   152.9 |         0.74 |          0.81 |
+| Awaiting round trip |   1 |   75.9 |   93.3 |   135.1 |         1.23 |          0.69 |
+|                     |   2 |   84.5 |   82.1 |   105.0 |         0.97 |          0.78 |
+|                     |   3 |  104.1 |  102.7 |    88.4 |         0.99 |          1.16 |
+| Blocking burst      |   1 |   34.5 |   26.2 |    66.1 |         0.76 |          0.40 |
+|                     |   2 |   43.8 |   27.2 |    55.4 |         0.62 |          0.49 |
+|                     |   3 |   41.2 |   29.3 |    56.8 |         0.71 |          0.52 |
+| Awaiting burst      |   1 |   37.7 |   24.3 |    59.0 |         0.65 |          0.41 |
+|                     |   2 |   44.1 |   26.8 |    57.9 |         0.61 |          0.46 |
+|                     |   3 |   38.3 |   26.2 |    62.6 |         0.68 |          0.42 |
+
+What the probe shows:
+
+* **Blocking round trip:** faster than before and than MQTTnet in all three runs.
+* **Bursts:** 0.61 to 0.76 of before per message, in all three runs and for both caller styles. The writes fell from 100 to about 57.5 per burst, not to half.
+* **Awaiting round trip:** mixed. Run 1 was 23% slower than before; runs 2 and 3 were equal. A second probe (20 rounds of 2,000 operations, three runs) gave after/before 1.01, 1.07 and 0.97. There is no latency difference beyond this VM's noise.
+
+## The awaiting round trip allocates more
+
+`ReceiveQoS1` still allocates nothing. The awaiting round trip allocates about 222 B more per operation in BenchmarkDotNet (2,280 to 2,502 B) and about 228 B more in the second probe. Plain publishes show no change.
+
+The cause is measured. A caller that awaits its round trip publishes again as soon as the broker's PUBACK arrives, so its next publish takes the send lock first. The read loop's batched PUBACK then finds the lock held and waits for it asynchronously. Contended sends per operation went from 0.000 to about 0.98. The sends per operation did not change (2.000 both before and after). A counter-instrumented scratch build of both commits, driven by the second probe, took these counts. The blocking caller meets the lock far less (about 0.3 contended sends per operation) and allocates 18 to 33 B more.
+
+Pooling the async builder of `SendAsync` removes only about 95 of the roughly 230 B and does not change the contention. The rest is probably the waiter that `SemaphoreSlim.WaitAsync` allocates on a contended wait; that part is inferred, not measured. The fix is left to [#13](https://github.com/mo-esmp/mqttwire/issues/13), "Make the client's send lock allocation-free". The send lock is outside the batching design (section 7, item 3).
 
 ## Before: the client of `main`
 
-Measured on commit 9aea873, before the answer batching, on a noisy VM (Apple Silicon, 10 cores, .NET 10.0.15, BenchmarkDotNet 0.15.8, default job). The burst and awaiting categories are new in this run; each burst is 50 QoS 1 publishes started together, and the awaiting categories repeat the round trip (100 times) or the burst (10 times).
+Measured on commit 9aea873, before the answer batching, with the setup above.
 
 ### ClientBenchmarks.ReceiveQoS1 (in-memory link)
 
@@ -65,8 +127,7 @@ Measured on commit 9aea873, before the answer batching, on a noisy VM (Apple Sil
 | RoundTripQoS1AwaitingMqttWireAsync | RoundTripQoS1Awaiting | 147.63 us |  9.114 us | 26.872 us | 149.63 us |   1.04 |    0.29 | 0.4688 |      - |    2280 B |        1.00 |
 | RoundTripQoS1AwaitingMqttNetAsync  | RoundTripQoS1Awaiting | 201.29 us | 12.901 us | 38.038 us | 197.19 us |   1.42 |    0.40 | 1.2500 |      - |    6797 B |        2.98 |
 
-// * Warnings *
-MinIterationTime
+BenchmarkDotNet warned about `MinIterationTime` for `PublishQoS0MqttWire`: its fastest iteration took 785.5 µs, and BenchmarkDotNet recommends at least 100 ms per iteration (the default minimum iteration time) because shorter iterations make the timing less precise. The categories are compared within the same run, so the warning does not change the comparison.
 
 ### Writes per burst
 
