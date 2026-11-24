@@ -505,7 +505,7 @@ public sealed class WebSocketLinkTests
     /// A task that completes when the test has run.
     /// </returns>
     [Fact]
-    public async Task WriteAsync_WhileTheTextCloseWaitsBehindAWrite_SendsNothingAndCompletes()
+    public async Task WriteAsync_WhileTheTextCloseWaitsBehindAWrite_CompletesAtOnceWithoutQueueing()
     {
         // Arrange
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
