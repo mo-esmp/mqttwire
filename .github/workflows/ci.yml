@@ -25,6 +25,8 @@ jobs:
       # Packs both packages, which also checks that MqttWire.Server depends on exactly its own version of MqttWire.
       - run: dotnet pack src/MqttWire --no-build -c Release -o artifacts/packages
       - run: dotnet pack src/MqttWire.Server --no-build -c Release -o artifacts/packages
+      # The same check where the manifest is somewhere else and NuGet normalizes the version ("0.2" is "0.2.0").
+      - run: dotnet pack src/MqttWire.Server --no-build -c Release -o artifacts/pack-check -p:NuspecOutputPath=obj/pack-check -p:PackageVersion=0.2
 
   interop-js:
     runs-on: ubuntu-latest

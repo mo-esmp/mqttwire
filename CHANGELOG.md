@@ -17,14 +17,20 @@ The first release. .NET 10 only.
 - **Registration and mapping:** `AddMqttWireServer<THandler>` and `MapMqttWire`. The four
   options of `MqttWireServerOptions` are checked when the host starts.
 - **QoS 0, 1 and 2 in both directions,** as complete exchanges inside one connection.
-- **Sending never waits:** `MqttWireConnection.TrySend` returns at once and copies neither the
-  topic nor the payload, so one payload goes to any number of connections.
+- **Sending never waits:** `MqttWireConnection.TrySend` returns at once. It keeps the topic and
+  the payload it is given, so a host can hand one payload to any number of connections without
+  a copy of its own. When a message is written, a packet of at most 16,384 bytes is copied into
+  a pooled buffer, once for each connection; a larger payload is written from the host's
+  memory, in pieces.
 - **Every connection is bounded** in bytes and in time: two outgoing limits that disconnect a
   client that falls behind, a limit on what a client may publish, and fixed deadlines for the
   CONNECT, the host's answer, a partial packet, the keep-alive, a write, an acknowledgement and
   the close.
 - **A bounded stop:** when the host stops, every connection is closed with `0x8B` and the
-  server waits until all have ended.
+  server waits until all have ended. Two exceptions: a connection with a write in progress is
+  aborted and gets no `0x8B`; and a host whose `OnConnectAsync` blocks its calling thread is
+  not waited for, so the stop can complete while that call still runs and still holds its
+  connection's slot, its request and, if packets came behind the CONNECT, a read buffer.
 - **One log line for the end of every connection,** with its reason.
 - **An idle connection holds no buffer, no queue, no timer and no QoS record.** Measured, it
   costs about 600 bytes on top of a bare ASP.NET Core WebSocket

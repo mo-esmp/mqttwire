@@ -8,10 +8,20 @@ connects, what a subscription means, and where each message goes.
 | `MqttWire.Server` | The connection server for ASP.NET Core. It depends on `MqttWire` of the same version. |
 | `MqttWire` | The client, and the opt-in reconnecting client. No dependencies. Works in Blazor WebAssembly. |
 
+In an ASP.NET Core host, add the server. It brings `MqttWire` with it:
+
 ```
 dotnet add package MqttWire.Server --prerelease
+```
+
+In a client, whether a console application, a service or a Blazor WebAssembly application, add
+the client only:
+
+```
 dotnet add package MqttWire --prerelease
 ```
+
+`MqttWire.Server` needs ASP.NET Core, so it cannot be added to a Blazor WebAssembly project.
 
 Both need .NET 10. Keep the two on the same version: `MqttWire.Server` works only with the
 `MqttWire` of its own version, and says so in its dependency. This is a preview: the public API may still change until 1.0.
@@ -113,8 +123,10 @@ public sealed class EchoHandler : IMqttWireHandler
 - MqttWire keeps no record of subscriptions: remembering them, and sending at no higher QoS than
   you granted, is the handler's.
 - `TrySend` returns at once, whatever the network does: `Taken`, `NotOpen`, `TooLarge` or
-  `Evicted`. It does not copy the topic or the payload, so one payload can go to any number of
-  connections; do not change it afterwards. Keep an `MqttTopic` you send to often.
+  `Evicted`. It keeps the topic and the payload you give it and does not copy them when it takes
+  the message, so one payload can be handed to any number of connections; do not change it
+  afterwards. When a message is written, a packet of at most 16,384 bytes is copied once into a
+  pooled buffer, for each connection; a larger payload is written from your memory, in pieces. Keep an `MqttTopic` you send to often.
 - `MqttWireServer` (from dependency injection; your handler may take it in its constructor)
   finds a connection by client id with `TryGetConnection` and counts the connections with
   `ConnectionCount`. Both include a

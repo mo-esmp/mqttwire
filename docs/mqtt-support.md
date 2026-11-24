@@ -101,7 +101,7 @@ over).
 | PUBLISH, QoS 2 | Handed to the host once. PUBREC: success, or the host's refusal. A repeated identifier that is still remembered is answered with PUBREC success again and not handed on, whatever its DUP flag says. |
 | PUBLISH above the server's highest QoS | DISCONNECT `0x9B` (QoS not supported). The CONNACK announced Maximum QoS 1 in that case. |
 | PUBLISH with a payload over the server's limit | Refused with `0x97` (quota exceeded), "The message is too large.": a PUBACK at QoS 1, a failing PUBREC at QoS 2, nothing at QoS 0. The connection stays open. The host is not called. |
-| PUBLISH whose whole packet is over 16 times the payload limit | DISCONNECT `0x95` (packet too large). |
+| PUBLISH too large to be read at all (below) | DISCONNECT `0x95` (packet too large). |
 | PUBREL | PUBCOMP. For an identifier that is not remembered, PUBCOMP `0x92` (packet identifier not found). |
 | PUBACK, PUBREC, PUBCOMP | They end, or move on, the exchange of a message the server sent (section 4). |
 | SUBSCRIBE | The host is asked once per filter. SUBACK carries one reason code per filter, and the reason string of the host's first refusal. A grant is the lowest of what the host granted, what the client asked for and the server's highest QoS. A filter that is not a valid MQTT filter gets `0x8F` (topic filter invalid) without the host being asked. Subscription options (No Local, Retain As Published, Retain Handling) are read and have no effect, except that No Local on a `$share/` filter is a protocol error (`0x82`), as MQTT says. |
@@ -114,6 +114,22 @@ over).
 | Any packet other than PUBLISH over 16,384 bytes | DISCONNECT `0x95` (packet too large). |
 
 Where MQTT names a more specific reason code than `0x81` or `0x82`, that one is used.
+
+**How large a PUBLISH may be.** The server judges a PUBLISH from its Remaining Length, which
+covers the topic, the packet identifier, the properties and the payload, in this order:
+
+1. **Up to the payload limit plus 5,120 bytes: read whole,** then judged exactly. A payload
+   over the limit is refused with `0x97`; anything else goes to the host. The 5,120 bytes are
+   room for the topic and the properties.
+2. **Above that, up to 16 times the payload limit: skipped.** The packet is not buffered; it is
+   discarded as it arrives, and then refused with `0x97` like the first.
+3. **Above both: DISCONNECT `0x95`.**
+
+The first step comes first whatever the limit is. So a connection can make the server buffer a
+PUBLISH of up to the payload limit plus 5,120 bytes, however small the limit: with a limit of 1
+byte, a PUBLISH with a 20-byte topic and a 1-byte payload is read and accepted. And with a
+limit below 342 bytes there is no second step, because 16 times the limit is then less than
+the limit plus 5,120.
 
 **Reason codes the server sends on its own account,** besides those above:
 
@@ -150,8 +166,10 @@ both.
   the wrong kind for a known identifier is a protocol error (`0x82`).
 - **A phase of an exchange that the client does not complete within 30 seconds** ends the
   connection with `0x82`.
-- A message the server has taken from the host is delivered even if the client unsubscribes
-  meanwhile.
+- **Unsubscribing does not cancel a message the server has already taken from the host.**
+  `TrySend` answering `Taken` means accepted, not delivered: the message is written when the
+  socket allows, also after an UNSUBSCRIBE, and it is dropped if the connection closes or is
+  evicted first. It is not a delivery receipt.
 
 The client (`MqttWireClient`) follows the same rules from its side: it announces a Receive
 Maximum of 1,024, honours the server's, never has more than 1,024 publishes in flight, and
@@ -277,8 +295,9 @@ A client that falls further behind than the two outgoing limits allow is disconn
 | Receive Maximum announced to clients | 256 |
 | Messages in flight to a client at QoS 1 and 2 | the client's Receive Maximum, at most 256 |
 | Any packet other than PUBLISH | 16,384 bytes |
-| A PUBLISH read whole | the payload limit plus 5,120 bytes for the topic and the properties |
-| A PUBLISH skipped and refused with `0x97` | up to 16 times the payload limit |
+| A PUBLISH read whole into a buffer | a Remaining Length of up to the payload limit plus 5,120 bytes, however small the limit |
+| A PUBLISH skipped unbuffered and refused with `0x97` | a Remaining Length above that, up to 16 times the payload limit |
+| A PUBLISH that ends the connection with `0x95` | a Remaining Length above both |
 | Client id | 1 to 256 bytes, no control character |
 | Maximum Packet Size a client may announce | at least 4,096 |
 | Keep-alive | what the client asks for, at most 60 seconds |
@@ -312,8 +331,16 @@ fixed.
 | Acknowledgement | 30 s for each phase of a QoS 1 or 2 exchange | Close, `0x82`. |
 | Close | 2 s from the decision to close | The link is aborted. |
 
-When the host stops, every connection is closed with `0x8B` within the close deadline, and the
-server waits until all have ended.
+**When the host stops,** a new WebSocket request gets HTTP 503, every connection is closed with
+`0x8B` within the close deadline, and the server waits until all have ended. Two exceptions:
+
+- **A connection with a write in progress** is aborted and gets no `0x8B`, like every close
+  that meets a write in progress.
+- **A host whose `OnConnectAsync` blocks its calling thread and ignores its token** is not
+  waited for. Two seconds after the token was cancelled the server aborts that connection's
+  link, logs the call (event 22) and stops waiting for it. The stop then completes while the
+  call is still running, and what only that call's return releases stays alive until then: the
+  connection's slot, its request, and a read buffer if packets came behind the CONNECT.
 
 **The client:**
 
@@ -323,6 +350,10 @@ server waits until all have ended.
 | Keep-alive | The Server Keep Alive from the CONNACK when there is one, else `KeepAlive`. A PINGREQ is sent when nothing was sent for half the interval. | A PINGRESP that does not come within one interval ends the connection. |
 | Acknowledgement | Twice the keep-alive interval for the oldest unanswered request | The connection is treated as lost. |
 | Close | 2 s | The link is aborted. |
+
+**When the CONNACK sets Server Keep Alive to 0,** the client sends no PINGREQ and has no ping
+deadline. The acknowledgement deadline stays, at twice the client's own `KeepAlive`: with a
+`KeepAlive` of 10 seconds, an unanswered publish at QoS 1 ends the connection after 20.
 
 The reconnecting client (`MqttWireReconnectingClient`) makes a new connection for every
 attempt. By default it waits 500 ms before the first retry and doubles the wait up to 15
