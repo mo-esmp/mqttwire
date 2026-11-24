@@ -4,6 +4,21 @@ What changed in each release of the packages `MqttWire` and `MqttWire.Server`. T
 carry the same version. Versions follow [semantic versioning](https://semver.org); until 1.0
 the public API may change between previews, and such a change is listed here as breaking.
 
+## Unreleased
+
+### MqttWire
+
+- **The client writes the acknowledgements it owes that wait together in one WebSocket
+  message.** The PUBACK, PUBREC, PUBREL and PUBCOMP it decides on while it handles what has
+  arrived go out in one write, before it waits for more and at the latest before the sixteenth
+  packet after the oldest of them. A server must not assume one packet per message
+  ([docs/mqtt-support.md](docs/mqtt-support.md)).
+- **The client's WebSocket link sends nothing once its own close has started,** as when a text
+  message from the server makes it close with 1003: a write that begins then is dropped, rather
+  than failing and aborting the link during the close handshake.
+- **Receiving at QoS 1 and 2 takes fewer writes:** a run of incoming messages is acknowledged in
+  one write instead of one write each.
+
 ## 0.1.0-preview.1 (2026-11-23)
 
 The first release. .NET 10 only.
