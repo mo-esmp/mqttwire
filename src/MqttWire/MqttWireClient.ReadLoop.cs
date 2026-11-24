@@ -234,7 +234,8 @@ public sealed partial class MqttWireClient
                     step = EndStep.None;
                     if (!TryAddAnswer())
                     {
-                        // Over the server's Maximum Packet Size: the end has begun, and the read loop sees it.
+                        // The end had already begun, or the answer is over the server's Maximum Packet Size and
+                        // the end has begun now: either way the read loop sees it.
                         return EndStep.None;
                     }
                 }
