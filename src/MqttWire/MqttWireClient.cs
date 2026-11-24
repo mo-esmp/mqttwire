@@ -63,6 +63,12 @@ public sealed partial class MqttWireClient : IAsyncDisposable
     private readonly ReceiveBuffer _receive;
 
     /// <summary>
+    /// The answers the read loop has recorded and not yet written; read-loop state only. Their buffer is returned
+    /// when they are written, or when the connection is finished.
+    /// </summary>
+    private readonly PendingAnswers _answers;
+
+    /// <summary>
     /// The password as UTF-8, or <see langword="null"/>.
     /// </summary>
     private readonly byte[]? _password;
@@ -160,7 +166,8 @@ public sealed partial class MqttWireClient : IAsyncDisposable
     private long _pendingPublishBytes;
 
     /// <summary>
-    /// The acknowledgement the read loop sends after the packet it has just handled; read-loop state only.
+    /// The answer the packet being handled asks for, noted by its handler and recorded behind the answers waiting
+    /// once the handler has returned; read-loop state only.
     /// </summary>
     private Reply _reply;
 
@@ -288,6 +295,7 @@ public sealed partial class MqttWireClient : IAsyncDisposable
         _time = timeProvider;
         _pool = pool;
         _receive = new ReceiveBuffer(pool, options.MaxIncomingPacketBytes);
+        _answers = new PendingAnswers(pool);
         _password = options.Password is null ? null : Encoding.UTF8.GetBytes(options.Password);
     }
 

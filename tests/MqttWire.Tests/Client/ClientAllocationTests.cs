@@ -97,6 +97,44 @@ public sealed class ClientAllocationTests
     }
 
     /// <summary>
+    /// Proves receiving seventeen QoS 1 PUBLISHes in one read, handing each on and writing their PUBACKs in two
+    /// writes, sixteen and then one, allocates nothing in an optimized build: the answers wait in a pooled buffer.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Receive_BurstOfSeventeenQoS1_AllocatesNothing()
+    {
+        // Arrange
+        byte[] burst = new byte[17 * ClientPackets.PublishQoS1.Length];
+        for (int id = 1; id <= 17; id++)
+        {
+            int start = (id - 1) * ClientPackets.PublishQoS1.Length;
+            ClientPackets.PublishQoS1.CopyTo(burst, start);
+            burst[start + 8] = (byte)id;
+        }
+
+        int messages = 0;
+        ClientHarness harness = await ConnectAsync((in _) => messages++);
+        MemoryLink link = harness.Link;
+        link.DiscardsWritten = true;
+        link.Deliver(burst);
+        int writesBefore = link.WriteCount;
+
+        // Act
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        DeliverEach(link, burst);
+        long after = GC.GetAllocatedBytesForCurrentThread();
+
+        // Assert
+        AssertNothingAllocated(after - before);
+        messages.ShouldBe(17 * (Iterations + 1));
+        link.WriteCount.ShouldBe(writesBefore + (2 * Iterations));
+        harness.Client.IsConnected.ShouldBeTrue();
+    }
+
+    /// <summary>
     /// Proves the whole QoS 2 exchange from the server, PUBLISH answered with PUBREC and PUBREL answered with
     /// PUBCOMP, allocates nothing in an optimized build: the identifier is remembered and forgotten in a table
     /// sized once, and both answers go over the uncontended send path.
