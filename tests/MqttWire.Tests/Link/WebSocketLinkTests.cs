@@ -466,6 +466,143 @@ public sealed class WebSocketLinkTests
     }
 
     /// <summary>
+    /// Proves a write after a text message made the link start its close with 1003 completes without failing and
+    /// sends nothing: the peer receives the close frame and no binary message.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task WriteAsync_AfterATextMessageClosedTheLink_SendsNothingAndCompletes()
+    {
+        // Arrange
+        (WebSocket client, WebSocket server) = WebSocketPair.Create();
+        using WebSocket clientSocket = client;
+        using WebSocket serverSocket = server;
+        WebSocketLink link = new(clientSocket);
+        await serverSocket.SendAsync("x"u8.ToArray(), WebSocketMessageType.Text, true, CancellationToken.None);
+        byte[] buffer = new byte[16];
+        (await link.ReadAsync(buffer, CancellationToken.None)).ShouldBe(0);
+
+        // Act
+        ValueTask write = link.WriteAsync(new byte[] { 0x40, 0x02, 0x00, 0x01 }, CancellationToken.None);
+        bool completedAtOnce = write.IsCompletedSuccessfully;
+        await write;
+        WebSocketReceiveResult first = await serverSocket.ReceiveAsync(buffer, CancellationToken.None).Within("The peer's receive");
+
+        // Assert
+        completedAtOnce.ShouldBeTrue();
+        first.MessageType.ShouldBe(WebSocketMessageType.Close);
+        first.CloseStatus.ShouldBe(WebSocketCloseStatus.InvalidMessageType);
+    }
+
+    /// <summary>
+    /// Proves a write that starts while the link's own close with 1003 still waits behind a write in progress
+    /// completes at once without failing and sends nothing: the peer reads the first message whole and then the
+    /// close, and no second binary message.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task WriteAsync_WhileTheTextCloseWaitsBehindAWrite_SendsNothingAndCompletes()
+    {
+        // Arrange
+        (WebSocket client, WebSocket server) = WebSocketPair.Create();
+        using WebSocket clientSocket = client;
+        using WebSocket serverSocket = server;
+        WebSocketLink link = new(clientSocket);
+        byte[] message = new byte[200_000];
+
+        // More than the pipe takes before its reader reads, so the write stays pending.
+        ValueTask firstWrite = link.WriteAsync(message, CancellationToken.None);
+        firstWrite.IsCompleted.ShouldBeFalse();
+        await serverSocket.SendAsync("x"u8.ToArray(), WebSocketMessageType.Text, true, CancellationToken.None);
+
+        // The wait sees the text message, so the read starts the link's own close, which waits behind the write.
+        await link.WaitForDataAsync(CancellationToken.None);
+        Task<int> read = link.ReadAsync(new byte[16], CancellationToken.None).AsTask();
+        read.IsCompleted.ShouldBeFalse();
+
+        // Act
+        ValueTask secondWrite = link.WriteAsync(new byte[] { 0x40, 0x02, 0x00, 0x01 }, CancellationToken.None);
+        bool completedAtOnce = secondWrite.IsCompletedSuccessfully;
+        byte[] buffer = new byte[256_000];
+        int received = 0;
+        int binaryMessages = 0;
+        WebSocketReceiveResult result;
+        do
+        {
+            result = await serverSocket
+                .ReceiveAsync(new ArraySegment<byte>(buffer, received, buffer.Length - received), CancellationToken.None)
+                .Within("The peer's receive");
+            received += result.Count;
+            if (result.MessageType == WebSocketMessageType.Binary && result.EndOfMessage)
+            {
+                binaryMessages++;
+            }
+        }
+        while (result.MessageType == WebSocketMessageType.Binary);
+
+        await firstWrite;
+        await secondWrite.AsTask().Within("The second write");
+
+        // Assert
+        completedAtOnce.ShouldBeTrue();
+        binaryMessages.ShouldBe(1);
+        received.ShouldBe(message.Length);
+        result.MessageType.ShouldBe(WebSocketMessageType.Close);
+        result.CloseStatus.ShouldBe(WebSocketCloseStatus.InvalidMessageType);
+        (await read).ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves a send that passed the link's check and then fails because the link's close started meanwhile, as when
+    /// the socket puts the close frame first, completes the write without failing.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task WriteAsync_SendFailsAfterTheCloseStarted_CompletesWithoutFailing()
+    {
+        // Arrange
+        using HeldSendWebSocket socket = new();
+        WebSocketLink link = new(socket);
+        ValueTask write = link.WriteAsync(new byte[] { 0x40, 0x02, 0x00, 0x01 }, CancellationToken.None);
+        await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
+
+        // Act
+        socket.FailSend(new WebSocketException(WebSocketError.InvalidState));
+
+        // Assert
+        await Should.NotThrowAsync(write.AsTask().Within("The write"));
+        socket.Sends.ShouldBe(1);
+        socket.Closes.ShouldBe(1);
+    }
+
+    /// <summary>
+    /// Proves a failed send surfaces as the write's failure while the link has not started its close.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task WriteAsync_SendFailsBeforeAnyClose_ThrowsTheFailure()
+    {
+        // Arrange
+        using HeldSendWebSocket socket = new();
+        WebSocketLink link = new(socket);
+        ValueTask write = link.WriteAsync(new byte[] { 0x40, 0x02, 0x00, 0x01 }, CancellationToken.None);
+
+        // Act
+        socket.FailSend(new WebSocketException(WebSocketError.ConnectionClosedPrematurely));
+
+        // Assert
+        await Should.ThrowAsync<WebSocketException>(write.AsTask().Within("The write"));
+    }
+
+    /// <summary>
     /// Proves a normal close is seen by the peer as status 1000.
     /// </summary>
     /// <returns>
