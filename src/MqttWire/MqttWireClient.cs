@@ -63,6 +63,14 @@ public sealed partial class MqttWireClient : IAsyncDisposable
     private readonly ReceiveBuffer _receive;
 
     /// <summary>
+    /// The answers the read loop has recorded and not yet written; read-loop state only. Their buffer is rented from
+    /// <see cref="_pool"/> and returned when they are written, or when the connection is finished. A mutable struct,
+    /// kept inline so that a client allocates nothing for it: not <see langword="readonly"/>, so its members change
+    /// this field and not a copy, and never passed or returned by value.
+    /// </summary>
+    private PendingAnswers _answers;
+
+    /// <summary>
     /// The password as UTF-8, or <see langword="null"/>.
     /// </summary>
     private readonly byte[]? _password;
@@ -160,7 +168,8 @@ public sealed partial class MqttWireClient : IAsyncDisposable
     private long _pendingPublishBytes;
 
     /// <summary>
-    /// The acknowledgement the read loop sends after the packet it has just handled; read-loop state only.
+    /// The answer the packet being handled asks for, noted by its handler and recorded behind the answers waiting
+    /// once the handler has returned; read-loop state only.
     /// </summary>
     private Reply _reply;
 
@@ -288,6 +297,9 @@ public sealed partial class MqttWireClient : IAsyncDisposable
         _time = timeProvider;
         _pool = pool;
         _receive = new ReceiveBuffer(pool, options.MaxIncomingPacketBytes);
+
+        // Holds no answer and no buffer: a struct inline in the client, so this allocates nothing.
+        _answers = new PendingAnswers();
         _password = options.Password is null ? null : Encoding.UTF8.GetBytes(options.Password);
     }
 

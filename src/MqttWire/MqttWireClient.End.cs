@@ -169,8 +169,9 @@ public sealed partial class MqttWireClient
 
     /// <summary>
     /// Finishes the connection once the read loop has stopped: stops the close deadline and the keep-alive timer,
-    /// completes what is in flight, returns the read buffer, releases the link, and then reports the end once: to
-    /// <c>OnClosed</c> for a connection that connected, to the connect otherwise.
+    /// completes what is in flight, returns the read buffer, drops the answers still waiting and returns their
+    /// buffer, releases the link, and then reports the end once: to <c>OnClosed</c> for a connection that connected,
+    /// to the connect otherwise.
     /// </summary>
     /// <param name="link">
     /// The link, which has ended.
@@ -195,6 +196,9 @@ public sealed partial class MqttWireClient
         keepAliveTimer?.Dispose();
         CompleteInFlightRequests();
         _receive.Clear();
+
+        // Answers still waiting are not sent once the end is recorded; their buffer goes back here.
+        _answers.Release(_pool);
 
         // The link has ended; aborting it now only releases the socket under it.
         link.Abort();

@@ -6,7 +6,17 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Kestrel hosts MQTTnet's broker for the client comparison. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" />
+
+    <!-- MQTTnet is the reference the comparison benchmarks measure MqttWire against; it never reaches a package. -->
+    <PackageReference Include="MQTTnet" />
+    <PackageReference Include="MQTTnet.Server" />
+    <PackageReference Include="MQTTnet.AspNetCore" />
   </ItemGroup>
 
   <ItemGroup>

@@ -91,7 +91,8 @@ Anti-goals (failures even if it technically works):
 - `MqttWire` (codec and client) has no package dependencies. `MqttWire.Server` depends on
   `MqttWire` and on the ASP.NET Core shared framework, nothing else.
 - MQTTnet and MQTT.js are used **in the tests only**, as two independent MQTT implementations
-  that check this one.
+  that check this one. The one exception is `bench/MqttWire.Microbench`, which also measures
+  MqttWire's codec and client against MQTTnet's; no package ever depends on MQTTnet.
 
 ## 5. Approaches considered
 
@@ -143,7 +144,8 @@ mqttwire/
   tests/MqttWire.TestHost/      a small host with an exact-topic handler, shared by the interops,
                                 MQTT.js and the shared-topics test
   tests/interop-js/             MQTT.js against the test host
-  bench/MqttWire.Microbench/    BenchmarkDotNet runs of the codec and the client
+  bench/MqttWire.Microbench/    BenchmarkDotNet runs of the codec and the client, alone and
+                                against MQTTnet's
   bench/MqttWire.Bench/         the floor, the traffic floor, and idle connections on a handler that
                                 does nothing
   samples/GroupChat/            shared topics through the host (6.10): a server and a Blazor
@@ -478,7 +480,17 @@ Rules for the WebSocket implementation, both sides:
   server it ends the connection as a lost connection; the peer sees 1003 unless a server write
   was in progress, in which case the close rule of 6.6 aborts the link and the peer may see a
   reset instead.
-- A link starts at most one close frame, whichever side closes first.
+- A link starts at most one close frame, whichever side closes first. Once it has started it,
+  the client's link drops a write that begins, and a send that the socket fails because the close
+  frame went out first: nothing may follow a close frame, and a send after it would fail and
+  abort the link during the close handshake. The client's read loop writes the answers it owes
+  while a read is not complete, and the read that met a text message is not complete while its
+  close with 1003 is being sent. A send already queued while the close frame is being written can
+  still follow it: the socket stays open until the frame is out, so the send does not fail. The
+  window is a few instructions wide and needs a peer that sends a text message; it is left open.
+  The server's link drops nothing: a write after its close goes to the socket, where it fails or
+  stays pending, so the close rule of 6.6 still sees a peer that is not taking data and aborts the
+  link instead of waiting for it to drain.
 - An empty binary message carries no bytes and does not end the wait for data: the wait goes
   on. What the link cannot see is a frame whose header has arrived and whose payload the peer
   withholds: the wait ends and the read that follows waits, which on the server is bounded by
@@ -1117,6 +1129,12 @@ The inside of `MqttWireClient`.
   DISCONNECT `0x94`. The client announces a receive maximum of 1,024: a new QoS 1 or 2
   PUBLISH while 1,024 QoS 2 identifiers wait for their PUBREL ends the connection with `0x93`
   before it is handed on; a repeat of a remembered identifier takes no new place.
+- **Answers** (PUBACK, PUBREC, PUBCOMP, and the PUBREL for the client's own QoS 2 publishes) are
+  recorded in a pooled buffer and written as one WebSocket message when the read loop would
+  wait for the link, its wait for data or its read, or before it handles the sixteenth packet
+  after the one whose answer waits longest. They go out in the order their packets arrived.
+  When the connection ends, answers still waiting are not sent. See
+  [the client writes its answers when it runs out of input](2026-11-24-client-acknowledgement-batching-design.md).
 - **Keep-alive:** one timer per client, ticking every half interval. On a tick the client sends
   a PINGREQ if nothing was sent for half the interval, so the time between packets never
   exceeds the keep-alive, as MQTT requires. One PINGREQ waits at a time: no second is queued
@@ -1137,9 +1155,10 @@ The inside of `MqttWireClient`.
   - each close is bounded by a close timeout of 2 seconds, then the link is aborted;
   - a timeout, or a failed read or write, aborts the link without a DISCONNECT.
 - **The client cannot have the server's deadlock, and must keep it that way.** Nothing on the
-  client waits for a QoS window. So everything the client writes goes out in the order it was
-  produced, and an acknowledgement never stands behind something that is waiting for the
-  server.
+  client waits for a QoS window. So the answers go out in the order their packets arrived, and
+  the publishes in the order they were made; a publish made from `OnMessage` may go out ahead of
+  answers that still wait, and an acknowledgement never stands behind something that is waiting
+  for the server.
 - It must not block a thread (Blazor WebAssembly). A plain send lock or queue is fine: a client
   has one connection and does not need the server's "only while there is work" machinery.
 

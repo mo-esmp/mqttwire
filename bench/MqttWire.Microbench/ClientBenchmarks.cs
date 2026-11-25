@@ -39,11 +39,13 @@ public class ClientBenchmarks
     /// <summary>
     /// The server end of the client's link.
     /// </summary>
+    // Set in [GlobalSetup], before any benchmark runs, so it is never read as null.
     private LoopbackLink _link = null!;
 
     /// <summary>
     /// The connected client.
     /// </summary>
+    // Set in [GlobalSetup], before any benchmark runs, so it is never read as null.
     private MqttWireClient _client = null!;
 
     /// <summary>

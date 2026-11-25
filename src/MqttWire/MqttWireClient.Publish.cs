@@ -283,7 +283,7 @@ public sealed partial class MqttWireClient
     /// The DISCONNECT's reason code when the result is <see cref="EndStep.DisconnectAndClose"/>.
     /// </param>
     /// <returns>
-    /// <see cref="EndStep.None"/> to carry on; <see cref="EndStep.SendReply"/> for a PUBREL to send;
+    /// <see cref="EndStep.None"/> to carry on; <see cref="EndStep.RecordAnswer"/> for a PUBREL to send;
     /// <see cref="EndStep.DisconnectAndClose"/> for a malformed acknowledgement, or one of the wrong kind for its
     /// identifier (0x82), which leaves the record for the end of the connection to complete.
     /// </returns>

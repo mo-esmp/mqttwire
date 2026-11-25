@@ -22,9 +22,17 @@ public sealed partial class MqttWireClient
         None,
 
         /// <summary>
-        /// Send the acknowledgement in <see cref="_reply"/>, then carry on handling the buffered packets.
+        /// Returned by a packet's handler only: the packet is answered with the answer in <see cref="_reply"/>, which
+        /// <see cref="HandleBuffered"/> records behind the answers waiting before it carries on with the next packet.
         /// </summary>
-        SendReply,
+        RecordAnswer,
+
+        /// <summary>
+        /// Returned by <see cref="HandleBuffered"/> only: the answers waiting must be written before the next packet
+        /// is handled (<see cref="PendingAnswers.MustWriteBeforeNextPacket"/>); write them, then carry on handling
+        /// the buffered packets.
+        /// </summary>
+        WriteAnswers,
 
         /// <summary>
         /// This read loop recorded the end: close the link without a DISCONNECT.
@@ -46,7 +54,8 @@ public sealed partial class MqttWireClient
 
     /// <summary>
     /// The read loop: waits for data holding no buffer, reads, handles every whole packet, until the link ends.
-    /// Then it finishes the connection.
+    /// Then it finishes the connection. When the wait does not complete at once, the answers waiting are written
+    /// first, so that no answer waits while the loop does; the wait is awaited once, whatever that write did.
     /// </summary>
     /// <param name="link">
     /// The link.
@@ -65,7 +74,15 @@ public sealed partial class MqttWireClient
                 bool reading = true;
                 while (reading)
                 {
-                    await link.WaitForDataAsync(CancellationToken.None).ConfigureAwait(false);
+                    ValueTask waiting = link.WaitForDataAsync(CancellationToken.None);
+                    if (!waiting.IsCompleted && _answers.Count > 0)
+                    {
+                        // The loop is about to wait: what it owes goes out first. The write does not throw; a failed
+                        // one ends the connection, and the wait already started is still awaited, just below.
+                        await WriteAnswersAsync().ConfigureAwait(false);
+                    }
+
+                    await waiting.ConfigureAwait(false);
                     reading = await ReadAndHandleAsync(link).ConfigureAwait(false);
                 }
             }
@@ -79,9 +96,10 @@ public sealed partial class MqttWireClient
         }
         catch (Exception ex)
         {
-            // Only a bug in the client gets here. Release the link and the keep-alive timer, and fail whoever
-            // waits, rather than hang them.
+            // Only a bug in the client gets here. Release the link, the answers waiting and the keep-alive timer,
+            // and fail whoever waits, rather than hang them.
             link.Abort();
+            _answers.Release(_pool);
             ITimer? keepAliveTimer;
             lock (_gate)
             {
@@ -98,10 +116,11 @@ public sealed partial class MqttWireClient
     }
 
     /// <summary>
-    /// Reads once into the receive buffer and handles every whole packet in it, sending the acknowledgement a
-    /// packet asks for before the next packet is handled. Once the end has begun, what is read is dropped
-    /// unhandled, until the server ends the link or the close deadline aborts it. It uses the pooling builder, so
-    /// a call that suspends allocates nothing in steady state.
+    /// Reads once into the receive buffer and handles every whole packet in it, recording the answer a packet asks
+    /// for behind the ones waiting. The answers are written when the read does not complete at once, before the loop
+    /// waits for it, and before the sixteenth packet after the oldest of them is handled. Once the end has begun,
+    /// what is read is dropped unhandled, until the server ends the link or the close deadline aborts it. It uses
+    /// the pooling builder, so a call that suspends allocates nothing in steady state.
     /// </summary>
     /// <param name="link">
     /// The link.
@@ -115,7 +134,16 @@ public sealed partial class MqttWireClient
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<bool> ReadAndHandleAsync(IMqttLink link)
     {
-        int read = await link.ReadAsync(_receive.GetReadMemory(), CancellationToken.None).ConfigureAwait(false);
+        ValueTask<int> reading = link.ReadAsync(_receive.GetReadMemory(), CancellationToken.None);
+        if (!reading.IsCompleted && _answers.Count > 0)
+        {
+            // A wait that completed does not mean the read will: the start of a message can come without the rest.
+            // The write does not throw, and the read already started is still awaited, just below, so the memory it
+            // was given stays the read's until it has ended.
+            await WriteAnswersAsync().ConfigureAwait(false);
+        }
+
+        int read = await reading.ConfigureAwait(false);
         if (read == 0)
         {
             _receive.Clear();
@@ -138,11 +166,11 @@ public sealed partial class MqttWireClient
             }
 
             EndStep step = HandleBuffered(out MqttReasonCode disconnect);
-            if (step == EndStep.SendReply)
+            if (step == EndStep.WriteAnswers)
             {
-                // Awaited before the next packet is handled, so the acknowledgements go out in the order the
-                // packets came (MQTT 4.6). A failed write ends the connection, which the next turn sees.
-                await SendReplyAsync().ConfigureAwait(false);
+                // Awaited before the next packet is handled, so the answers go out in the order the packets came
+                // (MQTT 4.6). A failed write ends the connection, which the next turn sees.
+                await WriteAnswersAsync().ConfigureAwait(false);
                 continue;
             }
 
@@ -160,21 +188,29 @@ public sealed partial class MqttWireClient
     }
 
     /// <summary>
-    /// Frames and handles every whole packet in the receive buffer, until one asks for a reply or ends the
-    /// connection.
+    /// Frames and handles every whole packet in the receive buffer, recording the answer a packet asks for behind
+    /// the ones waiting, until the answers must be written or the end begins. An answer over the server's Maximum
+    /// Packet Size is not recorded: it ends the connection.
     /// </summary>
     /// <param name="disconnect">
     /// The DISCONNECT's reason code when the result is <see cref="EndStep.DisconnectAndClose"/>.
     /// </param>
     /// <returns>
-    /// <see cref="EndStep.None"/> when every whole packet is handled; <see cref="EndStep.SendReply"/> when the
-    /// packet just handled, already consumed, asks for the reply in <see cref="_reply"/>; otherwise what this read
-    /// loop, which recorded the end, does next.
+    /// <see cref="EndStep.None"/> when every whole packet is handled, or the end has begun;
+    /// <see cref="EndStep.WriteAnswers"/> when the answers waiting must be written before the next packet is
+    /// handled; otherwise what this read loop, which recorded the end, does next. Never
+    /// <see cref="EndStep.RecordAnswer"/>.
     /// </returns>
     private EndStep HandleBuffered(out MqttReasonCode disconnect)
     {
         while (true)
         {
+            if (_answers.MustWriteBeforeNextPacket)
+            {
+                disconnect = MqttReasonCode.Success;
+                return EndStep.WriteAnswers;
+            }
+
             FrameStatus status = _receive.TryFrame(out PacketHeader header);
             if (status == FrameStatus.NeedMoreData)
             {
@@ -185,11 +221,24 @@ public sealed partial class MqttWireClient
             EndStep step;
             if (status == FrameStatus.Done)
             {
+                _answers.CountPacket();
                 ReadOnlySpan<byte> packet = _receive.GetPacket(header);
                 step = _phase == Phase.Connecting
                     ? HandleConnAck(header, packet, out disconnect)
                     : HandlePacket(header, packet, out disconnect);
                 _receive.Consume(header.TotalLength);
+                if (step == EndStep.RecordAnswer)
+                {
+                    // Recorded once the handler has returned, so nothing is rented or encoded under the client's
+                    // lock.
+                    step = EndStep.None;
+                    if (!TryAddAnswer())
+                    {
+                        // The end had already begun, or the answer is over the server's Maximum Packet Size and
+                        // the end has begun now: either way the read loop sees it.
+                        return EndStep.None;
+                    }
+                }
             }
             else
             {
@@ -224,8 +273,8 @@ public sealed partial class MqttWireClient
     /// The DISCONNECT's reason code when the result is <see cref="EndStep.DisconnectAndClose"/>.
     /// </param>
     /// <returns>
-    /// <see cref="EndStep.None"/> to carry on; <see cref="EndStep.SendReply"/> when the packet is answered with the
-    /// reply in <see cref="_reply"/>; <see cref="EndStep.Close"/> for a DISCONNECT from the server this call
+    /// <see cref="EndStep.None"/> to carry on; <see cref="EndStep.RecordAnswer"/> when the packet is answered with
+    /// the answer in <see cref="_reply"/>; <see cref="EndStep.Close"/> for a DISCONNECT from the server this call
     /// recorded; <see cref="EndStep.DisconnectAndClose"/> for a malformed packet or one the server may not send.
     /// </returns>
     private EndStep HandlePacket(in PacketHeader header, ReadOnlySpan<byte> packet, out MqttReasonCode disconnect)
@@ -292,8 +341,9 @@ public sealed partial class MqttWireClient
     }
 
     /// <summary>
-    /// Records the acknowledgement the read loop sends once the packet being handled is consumed, before it
-    /// handles the next one.
+    /// Notes in <see cref="_reply"/> the answer the packet being handled asks for. It only notes it, so a handler may
+    /// call it while holding the client's lock; <see cref="HandleBuffered"/> records it behind the answers waiting
+    /// once the handler has returned and the packet is consumed.
     /// </summary>
     /// <param name="type">
     /// PUBACK, PUBREC, PUBREL or PUBCOMP.
@@ -305,39 +355,71 @@ public sealed partial class MqttWireClient
     /// Its reason code; a success is written without one.
     /// </param>
     /// <returns>
-    /// <see cref="EndStep.SendReply"/>, for the handler to return.
+    /// <see cref="EndStep.RecordAnswer"/>, for the handler to return.
     /// </returns>
     private EndStep RecordReply(PacketType type, ushort packetIdentifier, MqttReasonCode reasonCode)
     {
         _reply = new Reply(type, packetIdentifier, reasonCode);
-        return EndStep.SendReply;
+        return EndStep.RecordAnswer;
     }
 
     /// <summary>
-    /// Encodes the acknowledgement in <see cref="_reply"/> into a rented buffer and sends it through the send lock.
+    /// Encodes the answer in <see cref="_reply"/> behind the answers waiting, renting their buffer for the first,
+    /// unless the server's Maximum Packet Size does not allow it. Called by the read loop only, never under the
+    /// client's lock.
     /// </summary>
     /// <returns>
-    /// <see langword="true"/> when the link took it; <see langword="false"/> when the end had begun, or the write
-    /// failed and ended the connection.
+    /// <see langword="true"/> when the answer waits to be written. <see langword="false"/> when it is not recorded:
+    /// either the end has already begun, so no answer is owed any more and the connection ends as it was recorded;
+    /// or it is over the server's Maximum Packet Size, and the connection ends with
+    /// <see cref="MqttClientCloseReason.ProtocolError"/> and 0x95, aborting the link, unless another reason ended it
+    /// first. The answers already waiting stay, for the next write attempt or the end of the connection to return.
     /// </returns>
-    private ValueTask<bool> SendReplyAsync()
+    private bool TryAddAnswer()
     {
-        Reply reply = _reply;
-        int size = AckCodec.GetSize(reply.ReasonCode, null);
-        if (!FitsServerMaximumPacketSize(size))
+        if (_phase >= Phase.Closing)
         {
-            // MQTT cannot go on without this acknowledgement, and the server may not be sent it (MQTT-3.2.2-15).
+            // The end has begun: nothing is written but a DISCONNECT, so the answer is not kept.
+            return false;
+        }
+
+        Reply reply = _reply;
+        if (!FitsServerMaximumPacketSize(AckCodec.GetSize(reply.ReasonCode, null)))
+        {
+            // MQTT cannot go on without this answer, and the server may not be sent it (MQTT-3.2.2-15).
             EndOverServerMaximumPacketSize();
+            return false;
+        }
+
+        _answers.Add(_pool, reply.Type, reply.PacketIdentifier, reply.ReasonCode);
+        return true;
+    }
+
+    /// <summary>
+    /// Writes every answer waiting as one WebSocket message through the send lock. The buffer is handed to
+    /// <see cref="SendAsync"/>, which returns it to the pool whatever the outcome, so afterwards no answer waits.
+    /// Once the end has begun nothing but a DISCONNECT is written, so the answers are dropped and their buffer
+    /// returned without taking the send lock. Called by the read loop only, and only while an answer waits.
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> when the link took them. <see langword="false"/> when they were dropped because the
+    /// end had begun, or the write failed and ended the connection with
+    /// <see cref="MqttClientCloseReason.WriteFailed"/>, aborting the link. It does not throw.
+    /// </returns>
+    private ValueTask<bool> WriteAnswersAsync()
+    {
+        if (_phase >= Phase.Closing)
+        {
+            _answers.Release(_pool);
             return new ValueTask<bool>(false);
         }
 
-        byte[] packet = _pool.Rent(size);
-        int length = AckCodec.Write(packet, reply.Type, reply.PacketIdentifier, reply.ReasonCode, null);
-        return SendAsync(packet, length, SendKind.Other);
+        byte[] answers = _answers.Take(out int length);
+        return SendAsync(answers, length, SendKind.Other);
     }
 
     /// <summary>
-    /// An acknowledgement the read loop owes the server: PUBACK, PUBREC, PUBREL or PUBCOMP, without properties.
+    /// An answer the read loop owes the server: PUBACK, PUBREC, PUBREL or PUBCOMP, without properties.
     /// </summary>
     /// <param name="Type">
     /// The packet type.

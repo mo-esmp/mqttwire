@@ -39,6 +39,22 @@ internal static class ClientLimits
     public const int MaxIncomingQoS2 = 1024;
 
     /// <summary>
+    /// The most answers the read loop keeps before it writes them. It writes before it handles the sixteenth packet
+    /// after the one whose answer waits longest, so at most fifteen packets pass in between.
+    /// </summary>
+    public const int AnswerPacketBound = 16;
+
+    /// <summary>
+    /// The most bytes one answer takes: a PUBACK, PUBREC, PUBREL or PUBCOMP with a reason code and no properties.
+    /// </summary>
+    public const int MaxAnswerBytes = 5;
+
+    /// <summary>
+    /// The size of the buffer that holds the waiting answers, in bytes.
+    /// </summary>
+    public const int AnswerBufferBytes = AnswerPacketBound * MaxAnswerBytes;
+
+    /// <summary>
     /// The smallest allowed <c>MaxIncomingPacketBytes</c>.
     /// </summary>
     public const int MinIncomingPacketBytes = 4096;

@@ -25,10 +25,10 @@ public sealed partial class MqttWireClient
     /// <see cref="EndStep.DisconnectRecorded"/>.
     /// </param>
     /// <returns>
-    /// <see cref="EndStep.None"/> at QoS 0; <see cref="EndStep.SendReply"/> for the PUBACK or PUBREC;
+    /// <see cref="EndStep.None"/> at QoS 0; <see cref="EndStep.RecordAnswer"/> for the PUBACK or PUBREC;
     /// <see cref="EndStep.DisconnectAndClose"/> for a PUBLISH the codec rejects (its code), one with a Topic Alias
     /// (0x94), or a QoS 2 one that passes the limit of remembered identifiers (0x93);
-    /// <see cref="EndStep.DisconnectRecorded"/> when <c>OnMessage</c> threw, in which case no reply is sent.
+    /// <see cref="EndStep.DisconnectRecorded"/> when <c>OnMessage</c> threw, in which case no answer is recorded.
     /// </returns>
     private EndStep HandlePublish(ReadOnlySpan<byte> packet, out MqttReasonCode disconnect)
     {
@@ -126,7 +126,7 @@ public sealed partial class MqttWireClient
     /// The DISCONNECT's reason code when the result is <see cref="EndStep.DisconnectAndClose"/>.
     /// </param>
     /// <returns>
-    /// <see cref="EndStep.SendReply"/> for the PUBCOMP; <see cref="EndStep.DisconnectAndClose"/> for a malformed
+    /// <see cref="EndStep.RecordAnswer"/> for the PUBCOMP; <see cref="EndStep.DisconnectAndClose"/> for a malformed
     /// PUBREL.
     /// </returns>
     private EndStep HandlePubRel(ReadOnlySpan<byte> packet, out MqttReasonCode disconnect)
