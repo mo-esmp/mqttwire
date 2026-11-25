@@ -1,6 +1,14 @@
 # QoS 1 latency in MqttWire and MQTTnet
 
-The client's read loop used to wait for the write of its own PUBACK before it read the next packet. That wait was the cause of the blocking round trip's extra latency, which the 13 to 25 µs experiment below supports. The read loop now records its answers and writes them together when it would wait for the link (see [the design](../specs/2026-11-24-client-acknowledgement-batching-design.md)). With a blocking caller, the round trip now takes 0.68 to 0.78 of its former time, and 0.69 to 0.87 of MQTTnet's. A burst of 50 publishes costs 0.61 to 0.76 of its former time per message. A caller that awaits its round trip sees no difference beyond this VM's noise, but allocates about 220 B more per operation. [#13](https://github.com/mo-esmp/mqttwire/issues/13) tracks that allocation.
+The client's read loop used to wait for the write of its own PUBACK before it read the next packet. That wait was the cause of the blocking round trip's extra latency, which the 13 to 25 µs experiment below supports. The read loop now records its answers and writes them together when it would wait for the link (see [the design](../specs/2026-11-24-client-acknowledgement-batching-design.md)).
+
+Measured at commit 8463064 against the client of commit 9aea873:
+
+* **Blocking round trip:** 0.84 of its former time in BenchmarkDotNet and in the original probe, and 0.81 to 0.86 of MQTTnet's. The committed probe gives 0.97 of the former time; see [the two probes](#probes-before-and-after).
+* **Bursts of 50 publishes:** 0.66 to 0.67 of the former time per message in BenchmarkDotNet, 0.62 to 0.64 in the original probe and 0.88 to 1.04 in the committed probe. Every instrument puts them at 0.43 to 0.48 of MQTTnet's. The link writes per burst fell from 100 to about 57.5.
+* **Awaiting round trip:** no difference beyond this VM's noise, but about 222 B more per operation. [#13](https://github.com/mo-esmp/mqttwire/issues/13) tracks that allocation.
+* **Plain QoS 0 and QoS 1 publishes:** no change.
+* **Receiving one QoS 1 message on an in-memory link:** 9.5 ns slower (113.0 against 103.5 ns), still with no allocation.
 
 ## Cause
 
@@ -10,128 +18,151 @@ The cause is confirmed. Moving the PUBACK write off the read loop, with the numb
 
 ## What the first run showed
 
-The first BenchmarkDotNet run had MqttWire's plain QoS 1 publish faster than MQTTnet's (86.198 against 93.669 µs). Its self-echo round trip was slower (108.264 against 100.700 µs, a gap of 7.564 µs). A follow-up probe did not reproduce that gap consistently. The probe that measured the batching shows the same mix for the blocking round trip before the change: MqttWire took 165.2, 165.0 and 167.2 µs against MQTTnet's 162.7, 147.9 and 152.9 µs, which is level in run 1 and slower in runs 2 and 3. The "Before" BenchmarkDotNet table below shows no gap (157.36 against 162.33 µs). So the gap exists on some runs only, and the experiment above is what ties it to the PUBACK write.
+The first BenchmarkDotNet run had MqttWire's plain QoS 1 publish faster than MQTTnet's (86.198 against 93.669 µs). Its self-echo round trip was slower (108.264 against 100.700 µs, a gap of 7.564 µs). A follow-up probe did not reproduce that gap consistently, and neither does the "Before" BenchmarkDotNet table below (143.39 against 147.56 µs). So the gap exists on some runs only, and the experiment above is what ties it to the PUBACK write.
 
 ## Method
 
-All numbers come from one noisy VM (Apple Silicon, 10 cores, .NET 10.0.15, BenchmarkDotNet 0.15.8, default job). Both clients talk over a loopback WebSocket to the same in-process MQTTnet broker, with a 64-byte payload. Each burst is 50 QoS 1 publishes started together. The awaiting categories repeat the round trip (100 times) or the burst (10 times) and await them. "Blocking" means the caller blocks on the round trip.
+All numbers come from one noisy VM (Apple Silicon, 10 cores, .NET 10.0.15, BenchmarkDotNet 0.15.8, default job). Both clients talk over a loopback WebSocket to the same in-process MQTTnet broker, with a 64-byte payload. Each burst is 50 QoS 1 publishes started together. The awaiting categories repeat the round trip (100 times) or the burst (10 times) and await them. "Blocking" means the caller blocks on the round trip. Every publish result is checked, and a lost connection fails the benchmark instead of hanging it.
 
-"Before" is the client of commit 9aea873, measured with the benchmarks added in commit 8d4328b. "After" is the client of commit d7640a3. Allocations count the whole process, broker included.
+A QoS 0 operation is a batch of 100 publishes, timed until the broker has received all of them, and reported per publish. A QoS 0 publish completes once the client has handed the packet over, so timing only the calls would measure how fast the client fills its send queue.
+
+"Before" is the client of commit 9aea873, measured with the benchmarks of commit 8463064. "After" is the client of commit 8463064. Allocations count the whole process, broker included.
 
 ## After: the client with the answer batching
 
 ### ClientBenchmarks.ReceiveQoS1 (in-memory link)
 
-| Method      | Mean     | Allocated |
-|------------ |---------:|----------:|
-| ReceiveQoS1 | 118.7 ns |         - |
-
-Before: 159.7 ns, also with no allocation.
+| Method      | Mean     | Error   | StdDev  | Allocated |
+|------------ |---------:|--------:|--------:|----------:|
+| ReceiveQoS1 | 113.0 ns | 1.33 ns | 1.18 ns |         - |
 
 ### Client comparison (loopback WebSocket, same MQTTnet broker)
 
-| Method                             | Categories            | Mean      | Error    | StdDev    | Median    | Ratio | RatioSD | Gen0   | Gen1   | Allocated | Alloc Ratio |
-|----------------------------------- |---------------------- |----------:|---------:|----------:|----------:|------:|--------:|-------:|-------:|----------:|------------:|
-| BurstQoS1MqttWireAsync             | BurstQoS1             |  28.57 us | 1.087 us |  3.136 us |  28.40 us |  1.01 |    0.16 | 0.4688 |      - |    2161 B |        1.00 |
-| BurstQoS1MqttNetAsync              | BurstQoS1             |  58.15 us | 1.210 us |  3.531 us |  57.94 us |  2.06 |    0.25 | 1.4063 |      - |    6033 B |        2.79 |
-|                                    |                       |           |          |           |           |       |         |        |        |           |             |
-| BurstQoS1AwaitingMqttWireAsync     | BurstQoS1Awaiting     |  26.45 us | 0.915 us |  2.670 us |  26.39 us |  1.01 |    0.14 | 0.5000 |      - |    2159 B |        1.00 |
-| BurstQoS1AwaitingMqttNetAsync      | BurstQoS1Awaiting     |  60.81 us | 1.753 us |  5.059 us |  60.49 us |  2.32 |    0.30 | 1.3750 | 0.1250 |    6086 B |        2.82 |
-|                                    |                       |           |          |           |           |       |         |        |        |           |             |
-| PublishQoS0MqttWire                | PublishQoS0           |  11.44 us | 0.331 us |  0.954 us |  11.50 us |  1.01 |    0.12 | 0.1678 |      - |     696 B |        1.00 |
-| PublishQoS0MqttNet                 | PublishQoS0           |  20.40 us | 0.406 us |  1.140 us |  20.21 us |  1.80 |    0.18 | 0.2136 |      - |     898 B |        1.29 |
-|                                    |                       |           |          |           |           |       |         |        |        |           |             |
-| PublishQoS1MqttWire                | PublishQoS1           | 110.89 us | 3.448 us |  9.781 us | 108.07 us |  1.01 |    0.12 | 0.2441 |      - |    1464 B |        1.00 |
-| PublishQoS1MqttNet                 | PublishQoS1           | 116.03 us | 4.672 us | 13.177 us | 115.29 us |  1.05 |    0.15 | 0.7324 |      - |    3515 B |        2.40 |
-|                                    |                       |           |          |           |           |       |         |        |        |           |             |
-| RoundTripQoS1MqttWireAsync         | RoundTripQoS1         | 136.66 us | 7.091 us | 20.907 us | 129.20 us |  1.02 |    0.21 | 0.4883 |      - |    2357 B |        1.00 |
-| RoundTripQoS1MqttNetAsync          | RoundTripQoS1         | 160.06 us | 6.013 us | 17.635 us | 152.07 us |  1.20 |    0.22 | 1.4648 |      - |    6422 B |        2.72 |
-|                                    |                       |           |          |           |           |       |         |        |        |           |             |
-| RoundTripQoS1AwaitingMqttWireAsync | RoundTripQoS1Awaiting |  94.03 us | 2.449 us |  6.866 us |  93.15 us |  1.01 |    0.10 | 0.4688 |      - |    2502 B |        1.00 |
-| RoundTripQoS1AwaitingMqttNetAsync  | RoundTripQoS1Awaiting | 111.79 us | 3.082 us |  8.386 us | 109.96 us |  1.20 |    0.12 | 1.5625 |      - |    6770 B |        2.71 |
+| Method                             | Categories            | Mean      | Error    | StdDev   | Median    | Ratio | RatioSD | Gen0   | Gen1   | Allocated | Alloc Ratio |
+|----------------------------------- |---------------------- |----------:|---------:|---------:|----------:|------:|--------:|-------:|-------:|----------:|------------:|
+| BurstQoS1MqttWireAsync             | BurstQoS1             |  27.83 us | 0.677 us | 1.963 us |  27.74 us |  1.00 |    0.10 | 0.5078 |      - |    2155 B |        1.00 |
+| BurstQoS1MqttNetAsync              | BurstQoS1             |  57.43 us | 1.257 us | 3.545 us |  57.14 us |  2.07 |    0.19 | 1.4063 | 0.2344 |    6011 B |        2.79 |
+|                                    |                       |           |          |          |           |       |         |        |        |           |             |
+| BurstQoS1AwaitingMqttWireAsync     | BurstQoS1Awaiting     |  26.59 us | 0.888 us | 2.603 us |  26.50 us |  1.01 |    0.14 | 0.5000 |      - |    2151 B |        1.00 |
+| BurstQoS1AwaitingMqttNetAsync      | BurstQoS1Awaiting     |  57.20 us | 1.547 us | 4.514 us |  57.20 us |  2.17 |    0.27 | 1.3750 | 0.3750 |    6037 B |        2.81 |
+|                                    |                       |           |          |          |           |       |         |        |        |           |             |
+| PublishQoS0MqttWireAsync           | PublishQoS0           |  10.51 us | 0.207 us | 0.419 us |  10.49 us |  1.00 |    0.06 | 0.1953 |      - |     856 B |        1.00 |
+| PublishQoS0MqttNetAsync            | PublishQoS0           |  21.07 us | 0.650 us | 1.853 us |  20.39 us |  2.01 |    0.19 | 0.2344 |      - |    1059 B |        1.24 |
+|                                    |                       |           |          |          |           |       |         |        |        |           |             |
+| PublishQoS1MqttWireAsync           | PublishQoS1           | 106.43 us | 1.986 us | 2.651 us | 106.06 us |  1.00 |    0.03 | 0.2441 |      - |    1432 B |        1.00 |
+| PublishQoS1MqttNetAsync            | PublishQoS1           | 111.33 us | 3.272 us | 9.440 us | 111.55 us |  1.05 |    0.09 | 0.7324 |      - |    3457 B |        2.41 |
+|                                    |                       |           |          |          |           |       |         |        |        |           |             |
+| RoundTripQoS1MqttWireAsync         | RoundTripQoS1         | 121.05 us | 3.122 us | 8.650 us | 118.13 us |  1.00 |    0.10 | 0.4883 |      - |    2354 B |        1.00 |
+| RoundTripQoS1MqttNetAsync          | RoundTripQoS1         | 148.67 us | 2.936 us | 4.656 us | 148.73 us |  1.23 |    0.09 | 1.4648 |      - |    6422 B |        2.73 |
+|                                    |                       |           |          |          |           |       |         |        |        |           |             |
+| RoundTripQoS1AwaitingMqttWireAsync | RoundTripQoS1Awaiting |  92.24 us | 1.837 us | 3.954 us |  93.05 us |  1.00 |    0.06 | 0.4688 |      - |    2500 B |        1.00 |
+| RoundTripQoS1AwaitingMqttNetAsync  | RoundTripQoS1Awaiting | 105.61 us | 2.093 us | 4.768 us | 106.61 us |  1.15 |    0.07 | 1.5625 |      - |    6770 B |        2.71 |
 
-BenchmarkDotNet flagged two MqttWire distributions here as multimodal or bimodal: `BurstQoS1MqttWireAsync` and `BurstQoS1AwaitingMqttWireAsync`. The "before" table below was noisier still (standard deviations up to 27 µs), so the means of the two tables are not a reliable comparison. The probe below is the comparison to read.
+BenchmarkDotNet flagged `BurstQoS1MqttWireAsync` as multimodal and `BurstQoS1AwaitingMqttNetAsync` as bimodal.
 
-### Allocation per operation, before and after
+### Before and after, BenchmarkDotNet means
 
-| Category              |  Before |   After | Change |
-| --------------------- | ------: | ------: | -----: |
-| RoundTripQoS1         | 2339 B  | 2357 B  |  +18 B |
-| RoundTripQoS1Awaiting | 2280 B  | 2502 B  | +222 B |
-| BurstQoS1             | 2211 B  | 2161 B  |  -50 B |
-| BurstQoS1Awaiting     | 2157 B  | 2159 B  |   +2 B |
-| PublishQoS1           | 1464 B  | 1464 B  |      0 |
+| Category              |    Before |     After | After/before | Allocated before | Allocated after | Change |
+| --------------------- | --------: | --------: | -----------: | ---------------: | --------------: | -----: |
+| RoundTripQoS1         | 143.39 µs | 121.05 µs |         0.84 |           2341 B |          2354 B |  +13 B |
+| RoundTripQoS1Awaiting |  89.70 µs |  92.24 µs |         1.03 |           2278 B |          2500 B | +222 B |
+| BurstQoS1             |  41.54 µs |  27.83 µs |         0.67 |           2121 B |          2155 B |  +34 B |
+| BurstQoS1Awaiting     |  40.57 µs |  26.59 µs |         0.66 |           2184 B |          2151 B |  -33 B |
+| PublishQoS1           | 106.89 µs | 106.43 µs |         1.00 |           1432 B |          1432 B |      0 |
+| PublishQoS0           |  10.55 µs |  10.51 µs |         1.00 |            859 B |           856 B |   -3 B |
+
+A QoS 0 publish sends no answer and receives none, so the batching cannot change it. It is in the table to show that the client's write path did not change either.
+
+### The in-memory receive
+
+`ReceiveQoS1` feeds one QoS 1 PUBLISH through an in-memory link. It takes 113.0 ns, against 103.5 ns before, and allocates nothing in both. The answer is now recorded and written later, instead of written at once to a link whose write completes at once. The extra 9.5 ns is the price of that bookkeeping where a write costs almost nothing. On a real socket the write it saves costs microseconds. An earlier run of the same benchmark gave 159.7 ns before, with a standard deviation of 43 ns. That figure was noise and is replaced here.
 
 ### Writes per burst
 
-MqttWire made 100 link writes per burst of 50 before (one PUBLISH and one PUBACK each). It now makes about 57.5: the 50 publishes and 7 to 8 writes for the answers. The two benchmark processes printed 57.8 and 57.5.
+MqttWire made 100 link writes per burst of 50 before (one PUBLISH and one PUBACK each), in both benchmark processes. It now makes about 57.5: the 50 publishes and 7 to 8 writes for the answers. The two processes printed 57.8 and 57.5.
 
-## Probe: medians, before and after
+## Probes: before and after
 
-An interleaved probe ran before, after and MQTTnet in rotating order, 30 rounds of 1,000 operations per scenario, and took the median of the rounds. Values are microseconds per operation; burst rows are per message. Three runs.
+BenchmarkDotNet runs each benchmark on its own, so the before and after clients are measured minutes apart on a VM whose speed drifts. An interleaved probe runs before, after and MQTTnet in one process, in an order that rotates every round: 30 rounds of 1,000 operations per scenario, after two warm-up passes, reporting the median of the rounds. Values are microseconds per operation; burst rows are per message.
 
-| Scenario            | Run | Before |  After | MQTTnet | After/before | After/MQTTnet |
-| ------------------- | --: | -----: | -----: | ------: | -----------: | ------------: |
-| Blocking round trip |   1 |  165.2 |  112.1 |   162.7 |         0.68 |          0.69 |
-|                     |   2 |  165.0 |  128.8 |   147.9 |         0.78 |          0.87 |
-|                     |   3 |  167.2 |  124.1 |   152.9 |         0.74 |          0.81 |
-| Awaiting round trip |   1 |   75.9 |   93.3 |   135.1 |         1.23 |          0.69 |
-|                     |   2 |   84.5 |   82.1 |   105.0 |         0.97 |          0.78 |
-|                     |   3 |  104.1 |  102.7 |    88.4 |         0.99 |          1.16 |
-| Blocking burst      |   1 |   34.5 |   26.2 |    66.1 |         0.76 |          0.40 |
-|                     |   2 |   43.8 |   27.2 |    55.4 |         0.62 |          0.49 |
-|                     |   3 |   41.2 |   29.3 |    56.8 |         0.71 |          0.52 |
-| Awaiting burst      |   1 |   37.7 |   24.3 |    59.0 |         0.65 |          0.41 |
-|                     |   2 |   44.1 |   26.8 |    57.9 |         0.61 |          0.46 |
-|                     |   3 |   38.3 |   26.2 |    62.6 |         0.68 |          0.42 |
+There are two probes. The original probe, a single file outside the repository, gave the first measurement of the batching. The committed probe, [bench/MqttWire.Probe](../../bench/MqttWire.Probe/Program.cs), measures the same four scenarios. It also checks every result and fails instead of hanging. Its remarks give the commands that build it against the before client. The runs below were made over two days, at commit 8463064, each probe alternating with the other. The time columns are medians of the runs' medians. The ratio columns give the median ratio and, in brackets, the lowest and highest run.
 
-What the probe shows:
+### Original probe (24 runs)
 
-* **Blocking round trip:** faster than before and than MQTTnet in all three runs.
-* **Bursts:** 0.61 to 0.76 of before per message, in all three runs and for both caller styles. The writes fell from 100 to about 57.5 per burst, not to half.
-* **Awaiting round trip:** mixed. Run 1 was 23% slower than before; runs 2 and 3 were equal. A second probe (20 rounds of 2,000 operations, three runs) gave after/before 1.01, 1.07 and 0.97. There is no latency difference beyond this VM's noise.
+| Scenario            | Before |  After | MQTTnet | After/before      | After/MQTTnet     | Runs where after is faster |
+| ------------------- | -----: | -----: | ------: | ----------------- | ----------------- | -------------------------: |
+| Blocking round trip |  153.6 |  126.5 |   155.4 | 0.84 (0.73–1.01)  | 0.86 (0.61–0.92)  |                      23/24 |
+| Awaiting round trip |   88.7 |   87.5 |    94.5 | 1.01 (0.73–1.23)  | 0.92 (0.70–1.31)  |                      11/24 |
+| Blocking burst      |   37.8 |   23.0 |    51.0 | 0.62 (0.51–0.85)  | 0.44 (0.35–0.58)  |                      24/24 |
+| Awaiting burst      |   37.4 |   22.9 |    52.5 | 0.64 (0.41–0.99)  | 0.43 (0.32–0.61)  |                      24/24 |
+
+The same probe against the client of commit d7640a3, three runs, gave 0.84 for the blocking round trip and 0.65 and 0.67 for the bursts. The review fixes between d7640a3 and 8463064 cost nothing measurable.
+
+### Committed probe (15 runs)
+
+| Scenario            | Before |  After | MQTTnet | After/before      | After/MQTTnet     | Runs where after is faster |
+| ------------------- | -----: | -----: | ------: | ----------------- | ----------------- | -------------------------: |
+| Blocking round trip |  133.4 |  133.1 |   157.8 | 0.97 (0.90–1.11)  | 0.86 (0.67–1.00)  |                       9/15 |
+| Awaiting round trip |   89.6 |   82.2 |   103.5 | 0.98 (0.69–1.15)  | 0.89 (0.68–1.01)  |                       9/15 |
+| Blocking burst      |   25.6 |   24.8 |    53.3 | 0.88 (0.73–1.19)  | 0.45 (0.39–0.58)  |                      11/15 |
+| Awaiting burst      |   23.0 |   23.5 |    49.1 | 1.04 (0.65–1.28)  | 0.46 (0.30–0.60)  |                       5/15 |
+
+### Why the two probes disagree
+
+The two probes agree on the after client against MQTTnet: 0.86 for the blocking round trip and 0.43 to 0.46 for the bursts. They disagree on the before client. The committed probe measures it faster, by about 20 µs on the blocking round trip and 12 to 14 µs per message on the bursts. Its fastest burst rounds for before take 14 to 15 µs per message, as for after, against 21 to 24 µs in the original probe. Within a run the before client is not bimodal: its whole distribution moves.
+
+BenchmarkDotNet agrees with the original probe (0.84 for the blocking round trip, 0.66 to 0.67 for the bursts). The cause of the difference was not found. Each change below was tried alone, in three alternating runs or more, and none moved one probe's result to the other's:
+
+* the broker host of the committed probe in the original probe's place, and the reverse;
+* `ConfigureAwait(false)` on every await, added to the original probe or removed from the committed one;
+* the result checks, the end-of-connection callback and the closed flag;
+* the order of connecting and subscribing, in both directions;
+* the clients held in classes with fields, instead of local functions over locals;
+* building the original probe inside the repository, with its build properties and its project reference.
+
+Both probes load the same before assembly and the same package versions. What is left is the dispatch through the `IContestant` interface and the static `Main` instead of top-level statements. Neither is likely to cost one client 20 µs and the other nothing.
 
 ## The awaiting round trip allocates more
 
-`ReceiveQoS1` still allocates nothing. The awaiting round trip allocates about 222 B more per operation in BenchmarkDotNet (2,280 to 2,502 B) and about 228 B more in the second probe. Plain publishes show no change.
+`ReceiveQoS1` still allocates nothing. The awaiting round trip allocates about 222 B more per operation in BenchmarkDotNet (2,278 to 2,500 B). Plain publishes show no change.
 
-The counts show that the caller's next publish usually holds the send lock first, and that the read loop's batched PUBACK then finds the lock held and waits for it asynchronously. The likely reason, which was not measured, is that the caller resumes and publishes again while the read loop is still flushing. Contended sends per operation went from 0.000 to about 0.98. The sends per operation did not change (2.000 both before and after). A counter-instrumented scratch build of both commits, driven by the second probe, took these counts. The blocking caller meets the lock far less (about 0.3 contended sends per operation) and allocates 18 to 33 B more.
+This was investigated at commit d7640a3, whose client the review fixes after it did not change in this respect. The counts show that the caller's next publish usually holds the send lock first, and that the read loop's batched PUBACK then finds the lock held and waits for it asynchronously. The likely reason, which was not measured, is that the caller resumes and publishes again while the read loop is still flushing. Contended sends per operation went from 0.000 to about 0.98. The sends per operation did not change (2.000 both before and after). A counter-instrumented scratch build of both commits, driven by a probe of 20 rounds of 2,000 operations, took these counts. That probe also measured about 228 B more per operation. The blocking caller meets the lock far less (about 0.3 contended sends per operation) and allocates 13 to 33 B more.
 
 Pooling the async builder of `SendAsync` removes only about 95 of the roughly 230 B and does not change the contention. The rest is probably the waiter that `SemaphoreSlim.WaitAsync` allocates on a contended wait; that part is inferred, not measured. The fix is left to [#13](https://github.com/mo-esmp/mqttwire/issues/13), "Make the client's send lock allocation-free". The send lock is outside the batching design (section 7, item 3).
 
 ## Before: the client of `main`
 
-Measured on the client of commit 9aea873, before the answer batching, with the benchmarks added in commit 8d4328b and the setup above.
+Measured on the client of commit 9aea873, before the answer batching, with the benchmarks of commit 8463064 and the setup above.
 
 ### ClientBenchmarks.ReceiveQoS1 (in-memory link)
 
-| Method      | Mean     | Error    | StdDev   | Median   | Allocated |
-|------------ |---------:|---------:|---------:|---------:|----------:|
-| ReceiveQoS1 | 159.7 ns | 14.78 ns | 42.88 ns | 143.3 ns |         - |
+| Method      | Mean     | Error   | StdDev  | Allocated |
+|------------ |---------:|--------:|--------:|----------:|
+| ReceiveQoS1 | 103.5 ns | 0.71 ns | 0.55 ns |         - |
 
 ### Client comparison (loopback WebSocket, same MQTTnet broker)
 
-| Method                             | Categories            | Mean      | Error     | StdDev    | Median    | Ratio  | RatioSD | Gen0   | Gen1   | Allocated | Alloc Ratio |
-|----------------------------------- |---------------------- |----------:|----------:|----------:|----------:|-------:|--------:|-------:|-------:|----------:|------------:|
-| BurstQoS1MqttWireAsync             | BurstQoS1             |  61.77 us |  4.316 us | 12.521 us |  59.64 us |   1.04 |    0.30 | 0.4688 |      - |    2211 B |        1.00 |
-| BurstQoS1MqttNetAsync              | BurstQoS1             |  85.75 us |  3.456 us | 10.026 us |  87.06 us |   1.44 |    0.33 | 1.4063 | 0.1563 |    6158 B |        2.79 |
-|                                    |                       |           |           |           |           |        |         |        |        |           |             |
-| BurstQoS1AwaitingMqttWireAsync     | BurstQoS1Awaiting     |  40.65 us |  5.001 us | 14.746 us |  34.60 us |   1.12 |    0.55 | 0.4000 |      - |    2157 B |        1.00 |
-| BurstQoS1AwaitingMqttNetAsync      | BurstQoS1Awaiting     |  72.78 us |  3.570 us | 10.413 us |  71.96 us |   2.01 |    0.69 | 1.4000 |      - |    6059 B |        2.81 |
-|                                    |                       |           |           |           |           |        |         |        |        |           |             |
-| PublishQoS0MqttWire                | PublishQoS0           |  11.17 us |  1.967 us |  5.800 us |  13.29 us |  73.28 |  184.57 |      - |      - |       5 B |        1.00 |
-| PublishQoS0MqttNet                 | PublishQoS0           |  26.78 us |  1.141 us |  3.365 us |  26.69 us | 175.60 |  388.26 | 0.1831 |      - |     901 B |      180.20 |
-|                                    |                       |           |           |           |           |        |         |        |        |           |             |
-| PublishQoS1MqttWire                | PublishQoS1           | 149.88 us |  8.899 us | 26.240 us | 153.10 us |   1.03 |    0.26 |      - |      - |    1464 B |        1.00 |
-| PublishQoS1MqttNet                 | PublishQoS1           | 119.53 us |  2.693 us |  7.508 us | 119.63 us |   0.82 |    0.16 | 0.7324 |      - |    3518 B |        2.40 |
-|                                    |                       |           |           |           |           |        |         |        |        |           |             |
-| RoundTripQoS1MqttWireAsync         | RoundTripQoS1         | 157.36 us |  3.128 us |  7.496 us | 156.53 us |   1.00 |    0.07 | 0.4883 |      - |    2339 B |        1.00 |
-| RoundTripQoS1MqttNetAsync          | RoundTripQoS1         | 162.33 us |  3.089 us |  8.083 us | 161.78 us |   1.03 |    0.07 | 1.4648 |      - |    6423 B |        2.75 |
-|                                    |                       |           |           |           |           |        |         |        |        |           |             |
-| RoundTripQoS1AwaitingMqttWireAsync | RoundTripQoS1Awaiting | 147.63 us |  9.114 us | 26.872 us | 149.63 us |   1.04 |    0.29 | 0.4688 |      - |    2280 B |        1.00 |
-| RoundTripQoS1AwaitingMqttNetAsync  | RoundTripQoS1Awaiting | 201.29 us | 12.901 us | 38.038 us | 197.19 us |   1.42 |    0.40 | 1.2500 |      - |    6797 B |        2.98 |
+| Method                             | Categories            | Mean      | Error    | StdDev   | Median    | Ratio | RatioSD | Gen0   | Gen1   | Allocated | Alloc Ratio |
+|----------------------------------- |---------------------- |----------:|---------:|---------:|----------:|------:|--------:|-------:|-------:|----------:|------------:|
+| BurstQoS1MqttWireAsync             | BurstQoS1             |  41.54 us | 1.535 us | 4.501 us |  40.69 us |  1.01 |    0.15 | 0.4688 |      - |    2121 B |        1.00 |
+| BurstQoS1MqttNetAsync              | BurstQoS1             |  58.82 us | 2.419 us | 6.500 us |  57.24 us |  1.43 |    0.22 | 1.4063 | 0.0781 |    6011 B |        2.83 |
+|                                    |                       |           |          |          |           |       |         |        |        |           |             |
+| BurstQoS1AwaitingMqttWireAsync     | BurstQoS1Awaiting     |  40.57 us | 0.966 us | 2.819 us |  40.25 us |  1.00 |    0.10 | 0.5000 |      - |    2184 B |        1.00 |
+| BurstQoS1AwaitingMqttNetAsync      | BurstQoS1Awaiting     |  55.53 us | 2.015 us | 5.845 us |  54.93 us |  1.38 |    0.17 | 1.2500 |      - |    6134 B |        2.81 |
+|                                    |                       |           |          |          |           |       |         |        |        |           |             |
+| PublishQoS0MqttWireAsync           | PublishQoS0           |  10.55 us | 0.211 us | 0.517 us |  10.43 us |  1.00 |    0.07 | 0.1953 |      - |     859 B |        1.00 |
+| PublishQoS0MqttNetAsync            | PublishQoS0           |  20.36 us | 0.575 us | 1.667 us |  20.16 us |  1.93 |    0.18 | 0.2344 |      - |    1059 B |        1.23 |
+|                                    |                       |           |          |          |           |       |         |        |        |           |             |
+| PublishQoS1MqttWireAsync           | PublishQoS1           | 106.89 us | 2.095 us | 5.840 us | 106.71 us |  1.00 |    0.08 | 0.2441 |      - |    1432 B |        1.00 |
+| PublishQoS1MqttNetAsync            | PublishQoS1           | 109.05 us | 2.776 us | 8.098 us | 106.31 us |  1.02 |    0.09 | 0.7324 |      - |    3456 B |        2.41 |
+|                                    |                       |           |          |          |           |       |         |        |        |           |             |
+| RoundTripQoS1MqttWireAsync         | RoundTripQoS1         | 143.39 us | 2.841 us | 6.968 us | 143.16 us |  1.00 |    0.07 | 0.4883 |      - |    2341 B |        1.00 |
+| RoundTripQoS1MqttNetAsync          | RoundTripQoS1         | 147.56 us | 2.942 us | 3.721 us | 148.18 us |  1.03 |    0.05 | 1.4648 |      - |    6411 B |        2.74 |
+|                                    |                       |           |          |          |           |       |         |        |        |           |             |
+| RoundTripQoS1AwaitingMqttWireAsync | RoundTripQoS1Awaiting |  89.70 us | 1.783 us | 5.174 us |  90.56 us |  1.00 |    0.08 | 0.4688 |      - |    2278 B |        1.00 |
+| RoundTripQoS1AwaitingMqttNetAsync  | RoundTripQoS1Awaiting | 106.92 us | 2.036 us | 4.382 us | 107.53 us |  1.20 |    0.09 | 1.5625 |      - |    6770 B |        2.97 |
 
-BenchmarkDotNet warned about `MinIterationTime` for `PublishQoS0MqttWire`: its fastest iteration took 785.5 µs, and BenchmarkDotNet recommends at least 100 ms per iteration (the default minimum iteration time) because shorter iterations make the timing less precise. The categories are compared within the same run, so the warning does not change the comparison.
+BenchmarkDotNet flagged `BurstQoS1MqttWireAsync`, `PublishQoS0MqttWireAsync` and `RoundTripQoS1MqttWireAsync` as multimodal and `PublishQoS0MqttNetAsync` as bimodal.
 
 ### Writes per burst
 
