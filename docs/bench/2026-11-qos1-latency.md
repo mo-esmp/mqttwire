@@ -4,8 +4,8 @@ The client's read loop used to wait for the write of its own PUBACK before it re
 
 Measured at commit 8463064 against the client of commit 9aea873:
 
-* **Blocking round trip:** 0.84 of its former time in BenchmarkDotNet and in the original probe, and 0.81 to 0.86 of MQTTnet's. The committed probe gives 0.97 of the former time; see [the two probes](#probes-before-and-after).
-* **Bursts of 50 publishes:** 0.66 to 0.67 of the former time per message in BenchmarkDotNet, 0.62 to 0.64 in the original probe and 0.88 to 1.04 in the committed probe. Every instrument puts them at 0.43 to 0.48 of MQTTnet's. The link writes per burst fell from 100 to about 57.5.
+* **Blocking round trip:** 0.84 of its former time in BenchmarkDotNet and in the original probe, 0.81 in the committed probe, and 0.81 to 0.86 of MQTTnet's.
+* **Bursts of 50 publishes:** 0.66 to 0.67 of the former time per message in BenchmarkDotNet, 0.62 to 0.64 in the original probe and 0.62 to 0.71 in the committed probe. Every instrument puts them at 0.43 to 0.52 of MQTTnet's. The link writes per burst fell from 100 to about 57.5.
 * **Awaiting round trip:** no difference beyond this VM's noise, but about 222 B more per operation. [#13](https://github.com/mo-esmp/mqttwire/issues/13) tracks that allocation.
 * **Plain QoS 0 and QoS 1 publishes:** no change.
 * **Receiving one QoS 1 message on an in-memory link:** 9.5 ns slower (113.0 against 103.5 ns), still with no allocation.
@@ -85,7 +85,7 @@ MqttWire made 100 link writes per burst of 50 before (one PUBLISH and one PUBACK
 
 BenchmarkDotNet runs each benchmark on its own, so the before and after clients are measured minutes apart on a VM whose speed drifts. An interleaved probe runs before, after and MQTTnet in one process, in an order that rotates every round: 30 rounds of 1,000 operations per scenario, after two warm-up passes, reporting the median of the rounds. Values are microseconds per operation; burst rows are per message.
 
-There are two probes. The original probe, a single file outside the repository, gave the first measurement of the batching. The committed probe, [bench/MqttWire.Probe](../../bench/MqttWire.Probe/Program.cs), measures the same four scenarios. It also checks every result and fails instead of hanging. Its remarks give the commands that build it against the before client. The runs below were made over two days, at commit 8463064, each probe alternating with the other. The time columns are medians of the runs' medians. The ratio columns give the median ratio and, in brackets, the lowest and highest run.
+There are two probes. The original probe, a single file outside the repository, gave the first measurement of the batching. The committed probe, [bench/MqttWire.Probe](../../bench/MqttWire.Probe/Program.cs), measures the same four scenarios. It also checks every result and fails instead of hanging. Its remarks give the commands that build it against the before client. The original probe ran over two days at commit 8463064. The committed probe ran on 2026-11-25, after the fix described [below](#why-the-first-runs-of-the-committed-probe-disagreed), at a commit whose client is the client of 8463064. The time columns are medians of the runs' medians, so they compare only within one table: the VM ran faster on 2026-11-25. The ratio columns give the median ratio and, in brackets, the lowest and highest run.
 
 ### Original probe (24 runs)
 
@@ -98,29 +98,20 @@ There are two probes. The original probe, a single file outside the repository, 
 
 The same probe against the client of commit d7640a3, three runs, gave 0.84 for the blocking round trip and 0.65 and 0.67 for the bursts. The review fixes between d7640a3 and 8463064 cost nothing measurable.
 
-### Committed probe (15 runs)
+### Committed probe (16 runs)
 
 | Scenario            | Before |  After | MQTTnet | After/before      | After/MQTTnet     | Runs where after is faster |
 | ------------------- | -----: | -----: | ------: | ----------------- | ----------------- | -------------------------: |
-| Blocking round trip |  133.4 |  133.1 |   157.8 | 0.97 (0.90–1.11)  | 0.86 (0.67–1.00)  |                       9/15 |
-| Awaiting round trip |   89.6 |   82.2 |   103.5 | 0.98 (0.69–1.15)  | 0.89 (0.68–1.01)  |                       9/15 |
-| Blocking burst      |   25.6 |   24.8 |    53.3 | 0.88 (0.73–1.19)  | 0.45 (0.39–0.58)  |                      11/15 |
-| Awaiting burst      |   23.0 |   23.5 |    49.1 | 1.04 (0.65–1.28)  | 0.46 (0.30–0.60)  |                       5/15 |
+| Blocking round trip |  103.0 |   82.3 |    99.5 | 0.81 (0.77–0.92)  | 0.84 (0.78–0.93)  |                      16/16 |
+| Awaiting round trip |   67.0 |   67.2 |    72.8 | 1.01 (0.94–1.03)  | 0.92 (0.87–0.94)  |                       7/16 |
+| Blocking burst      |   34.0 |   23.5 |    46.0 | 0.71 (0.51–0.94)  | 0.52 (0.39–0.70)  |                      16/16 |
+| Awaiting burst      |   31.9 |   19.6 |    44.2 | 0.62 (0.46–0.83)  | 0.44 (0.34–0.53)  |                      16/16 |
 
-### Why the two probes disagree
+### Why the first runs of the committed probe disagreed
 
-The two probes agree on the after client against MQTTnet: 0.86 for the blocking round trip and 0.43 to 0.46 for the bursts. They disagree on the before client. The committed probe measures it faster, by about 20 µs on the blocking round trip and 12 to 14 µs per message on the bursts. Its fastest burst rounds for before take 14 to 15 µs per message, as for after, against 21 to 24 µs in the original probe. Within a run the before client is not bimodal: its whole distribution moves.
+An earlier version of this report had 15 runs of the committed probe that put after against before at 0.88 to 1.04 for the bursts and 0.97 for the blocking round trip, against the original probe and BenchmarkDotNet. Its before contestant was running the branch's client, not the client of 9aea873. Its `using` aliases to the extern alias `before` stood outside the namespace `MqttWire.Probe`, and C# looks for a simple name such as `MqttWireClient` in the enclosing namespace `MqttWire`, which holds the branch's client, before it looks at aliases declared outside the namespace. The built probe confirmed it: the before contestant's client field had the type from `MqttWire`, not from `MqttWire.Before`. Six differences between the probes were tested before this was found, and none could have changed it.
 
-BenchmarkDotNet agrees with the original probe (0.84 for the blocking round trip, 0.66 to 0.67 for the bursts). The cause of the difference was not found. Each change below was tried alone, in three alternating runs or more, and none moved one probe's result to the other's:
-
-* the broker host of the committed probe in the original probe's place, and the reverse;
-* `ConfigureAwait(false)` on every await, added to the original probe or removed from the committed one;
-* the result checks, the end-of-connection callback and the closed flag;
-* the order of connecting and subscribing, in both directions;
-* the clients held in classes with fields, instead of local functions over locals;
-* building the original probe inside the repository, with its build properties and its project reference.
-
-Both probes load the same before assembly and the same package versions. What is left is the dispatch through the `IContestant` interface and the static `Main` instead of top-level statements. Neither is likely to cost one client 20 µs and the other nothing.
+The aliases now stand inside the namespace, and the built probe's before contestant holds the client of `MqttWire.Before`. The table above was measured with that fix.
 
 ## The awaiting round trip allocates more
 

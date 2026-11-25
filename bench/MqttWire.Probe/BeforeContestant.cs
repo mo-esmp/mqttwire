@@ -1,14 +1,17 @@
 #if BEFORE
 extern alias before;
 
+namespace MqttWire.Probe;
+
+// The aliases sit inside the namespace on purpose. Outside it, a simple name such as MqttWireClient is found in the
+// enclosing namespace MqttWire, from the branch's client, before the aliases are looked at, and this contestant would
+// run the branch's client instead of the older one.
 using MqttConnectAck = before::MqttWire.MqttConnectAck;
 using MqttPublish = before::MqttWire.MqttPublish;
 using MqttQoS = before::MqttWire.MqttQoS;
 using MqttRequestResult = before::MqttWire.MqttRequestResult;
 using MqttWireClient = before::MqttWire.MqttWireClient;
 using MqttWireClientOptions = before::MqttWire.MqttWireClientOptions;
-
-namespace MqttWire.Probe;
 
 /// <summary>
 /// The older MqttWire client in the probe, named <c>before</c>: the assembly given with <c>-p:BeforeAssembly</c>,
