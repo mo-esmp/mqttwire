@@ -163,6 +163,6 @@ public class WebSocketClientBenchmarks
         /// A completed task with the link.
         /// </returns>
         public ValueTask<LinkConnectResult> ConnectAsync(MqttWireClientOptions options, CancellationToken cancellationToken)
-            => new(new LinkConnectResult(new WebSocketLink(socket), null));
+            => new(new LinkConnectResult(new WebSocketLink(socket, dropWritesAfterClose: true), null));
     }
 }

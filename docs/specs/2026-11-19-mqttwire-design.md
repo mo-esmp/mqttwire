@@ -488,6 +488,9 @@ Rules for the WebSocket implementation, both sides:
   close with 1003 is being sent. A send already queued while the close frame is being written can
   still follow it: the socket stays open until the frame is out, so the send does not fail. The
   window is a few instructions wide and needs a peer that sends a text message; it is left open.
+  The server's link drops nothing: a write after its close goes to the socket, where it fails or
+  stays pending, so the close rule of 6.6 still sees a peer that is not taking data and aborts the
+  link instead of waiting for it to drain.
 - An empty binary message carries no bytes and does not end the wait for data: the wait goes
   on. What the link cannot see is a frame whose header has arrived and whose payload the peer
   withholds: the wait ends and the read that follows waits, which on the server is bounded by

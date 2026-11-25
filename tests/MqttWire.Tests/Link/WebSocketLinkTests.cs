@@ -95,7 +95,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         await SendBinaryAsync(serverSocket, [0xC0, 0x00]);
 
         // Act
@@ -118,7 +118,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         await SendBinaryAsync(serverSocket, [0xD0, 0x00, 0xD0, 0x00]);
 
         // Act
@@ -141,7 +141,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         await SendBinaryAsync(serverSocket, [0x32, 0x0A, 0x00]);
         await SendBinaryAsync(serverSocket, [0x03, 0x61, 0x2F, 0x62, 0x00, 0x01, 0x00, 0x68, 0x69]);
 
@@ -165,7 +165,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         await serverSocket.SendAsync("x"u8.ToArray(), WebSocketMessageType.Text, true, CancellationToken.None);
         byte[] buffer = new byte[16];
 
@@ -195,7 +195,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         await serverSocket.SendAsync("x"u8.ToArray(), WebSocketMessageType.Text, true, CancellationToken.None);
         byte[] buffer = new byte[16];
         (await link.ReadAsync(buffer, CancellationToken.None)).ShouldBe(0);
@@ -225,7 +225,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         byte[] message = new byte[200_000];
 
         // More than the pipe takes before its reader reads, so the write stays pending.
@@ -279,7 +279,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
         await serverSocket.SendAsync("x"u8.ToArray(), WebSocketMessageType.Text, true, CancellationToken.None);
         byte[] buffer = new byte[16];
@@ -309,7 +309,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         await serverSocket.SendAsync(Array.Empty<byte>(), WebSocketMessageType.Text, true, CancellationToken.None);
         await SendBinaryAsync(serverSocket, [0xC0, 0x00]);
         byte[] buffer = new byte[16];
@@ -338,7 +338,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         await serverSocket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, CancellationToken.None);
         byte[] buffer = new byte[16];
 
@@ -363,7 +363,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         byte[] buffer = new byte[16];
         ValueTask wait = link.WaitForDataAsync(CancellationToken.None);
         await serverSocket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, CancellationToken.None);
@@ -393,7 +393,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         ValueTask wait = link.WaitForDataAsync(CancellationToken.None);
         bool completedBeforeData = wait.IsCompleted;
 
@@ -421,7 +421,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create(inline: true);
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         ValueTask wait = link.WaitForDataAsync(CancellationToken.None);
 
         // Act: over the inline pair the link has seen a message by the time its send returns.
@@ -451,7 +451,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         byte[] buffer = new byte[16];
 
         // Act
@@ -479,7 +479,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         await serverSocket.SendAsync("x"u8.ToArray(), WebSocketMessageType.Text, true, CancellationToken.None);
         byte[] buffer = new byte[16];
         (await link.ReadAsync(buffer, CancellationToken.None)).ShouldBe(0);
@@ -511,7 +511,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         byte[] message = new byte[200_000];
 
         // More than the pipe takes before its reader reads, so the write stays pending.
@@ -563,7 +563,7 @@ public sealed class WebSocketLinkTests
         // Arrange
         TaskCompletionSource send = new(TaskCreationOptions.RunContinuationsAsynchronously);
         using ScriptedSendWebSocket socket = new() { Send = () => new ValueTask(send.Task) };
-        WebSocketLink link = new(socket);
+        WebSocketLink link = new(socket, dropWritesAfterClose: true);
         ValueTask write = link.WriteAsync(new byte[] { 0x40, 0x02, 0x00, 0x01 }, CancellationToken.None);
         await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
 
@@ -588,7 +588,7 @@ public sealed class WebSocketLinkTests
         // Arrange
         TaskCompletionSource send = new(TaskCreationOptions.RunContinuationsAsynchronously);
         using ScriptedSendWebSocket socket = new() { Send = () => new ValueTask(send.Task) };
-        WebSocketLink link = new(socket);
+        WebSocketLink link = new(socket, dropWritesAfterClose: true);
         ValueTask write = link.WriteAsync(new byte[] { 0x40, 0x02, 0x00, 0x01 }, CancellationToken.None);
 
         // Act
@@ -610,7 +610,7 @@ public sealed class WebSocketLinkTests
     {
         // Arrange
         using ScriptedSendWebSocket socket = new();
-        WebSocketLink link = new(socket);
+        WebSocketLink link = new(socket, dropWritesAfterClose: true);
         ValueTask close = default;
         socket.Send = () =>
         {
@@ -644,7 +644,7 @@ public sealed class WebSocketLinkTests
         {
             Send = () => throw new WebSocketException(WebSocketError.ConnectionClosedPrematurely),
         };
-        WebSocketLink link = new(socket);
+        WebSocketLink link = new(socket, dropWritesAfterClose: true);
 
         // Act
         Func<Task> write = async () => await link.WriteAsync(new byte[] { 0x40, 0x02, 0x00, 0x01 }, CancellationToken.None);
@@ -652,6 +652,58 @@ public sealed class WebSocketLinkTests
         // Assert
         await Should.ThrowAsync<WebSocketException>(write);
         socket.Closes.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves the server's link hands a write that begins after its close has started to the socket instead of
+    /// dropping it, so the server's close still sees a write that the peer is not taking.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task WriteAsync_ServerLinkAfterItsCloseStarted_HandsTheSendToTheSocket()
+    {
+        // Arrange
+        TaskCompletionSource send = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        using ScriptedSendWebSocket socket = new() { Send = () => new ValueTask(send.Task) };
+        WebSocketLink link = new(socket, dropWritesAfterClose: false);
+        await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
+
+        // Act
+        ValueTask write = link.WriteAsync(new byte[] { 0x40, 0x02, 0x00, 0x01 }, CancellationToken.None);
+
+        // Assert
+        write.IsCompleted.ShouldBeFalse();
+        socket.Sends.ShouldBe(1);
+        socket.Closes.ShouldBe(1);
+        send.SetResult();
+        await write.AsTask().Within("The write");
+    }
+
+    /// <summary>
+    /// Proves a send of the server's link that fails after the link's close has started surfaces as the write's
+    /// failure, so the server aborts the link instead of treating the write as sent.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task WriteAsync_ServerLinkSendFailsAfterItsCloseStarted_ThrowsTheFailure()
+    {
+        // Arrange
+        TaskCompletionSource send = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        using ScriptedSendWebSocket socket = new() { Send = () => new ValueTask(send.Task) };
+        WebSocketLink link = new(socket, dropWritesAfterClose: false);
+        ValueTask write = link.WriteAsync(new byte[] { 0x40, 0x02, 0x00, 0x01 }, CancellationToken.None);
+        await link.CloseAsync(WebSocketCloseStatus.NormalClosure, CancellationToken.None);
+
+        // Act
+        send.SetException(new WebSocketException(WebSocketError.InvalidState));
+
+        // Assert
+        await Should.ThrowAsync<WebSocketException>(write.AsTask().Within("The write"));
+        socket.Closes.ShouldBe(1);
     }
 
     /// <summary>
@@ -667,7 +719,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         byte[] buffer = new byte[16];
 
         // Act
@@ -692,7 +744,7 @@ public sealed class WebSocketLinkTests
         (WebSocket client, WebSocket server) = WebSocketPair.Create();
         using WebSocket clientSocket = client;
         using WebSocket serverSocket = server;
-        WebSocketLink link = new(clientSocket);
+        WebSocketLink link = new(clientSocket, dropWritesAfterClose: true);
         byte[] buffer = new byte[16];
         ValueTask<int> read = link.ReadAsync(buffer, CancellationToken.None);
 

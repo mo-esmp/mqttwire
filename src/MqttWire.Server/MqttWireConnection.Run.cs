@@ -169,7 +169,7 @@ public sealed partial class MqttWireConnection
             SubProtocol = SubProtocol, KeepAliveInterval = TimeSpan.Zero, DangerousEnableCompression = false,
         };
         WebSocket webSocket = await RunningContext.WebSockets.AcceptWebSocketAsync(accept).ConfigureAwait(false);
-        return new WebSocketLink(webSocket);
+        return new WebSocketLink(webSocket, dropWritesAfterClose: false);
     }
 
     /// <summary>

@@ -86,7 +86,7 @@ internal sealed class ClientWebSocketConnector : IMqttLinkConnector
 
         if (string.Equals(a: socket.SubProtocol, b: SubProtocol, comparisonType: StringComparison.Ordinal))
         {
-            return new LinkConnectResult(Link: new WebSocketLink(webSocket: socket), Error: null);
+            return new LinkConnectResult(Link: new WebSocketLink(webSocket: socket, dropWritesAfterClose: true), Error: null);
         }
 
         await RefuseAsync(socket: socket, cancellationToken: cancellationToken)
