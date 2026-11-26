@@ -125,7 +125,8 @@ Pooling the async builder of `SendAsync` removes only about 95 of the roughly 23
 
 [#13](https://github.com/mo-esmp/mqttwire/issues/13) replaced the client's `SemaphoreSlim` send lock with a send path that queues a write which finds another in progress, and hands the read loop's answers over without waiting for their write ([the design](../specs/2026-11-25-client-send-path-design.md), section 11 gives the method).
 
-* **Awaiting round trip:** 238 B less per operation in the probe (2,539.5 to 2,301.7 B) and 235 to 237 B less in BenchmarkDotNet (2,506–2,507 to 2,270–2,271 B). In the same probe the client of 9aea873, before #12, allocates 2,306.5–2,307.4 B, so the bytes #12 added are gone. Time: 0.98–0.99 of before in the probe, 0.96 and 0.98 in BenchmarkDotNet.
+* **Awaiting round trip:** 238 B less per operation in the probe (2,539.5 to 2,301.7 B) and 235 to 237 B less in BenchmarkDotNet (2,506–2,507 to 2,270–2,271 B). In the same probe program the client of 9aea873, before #12, allocates 2,306.5–2,307.4 B, so end to end the bytes #12 added are gone. Time: 0.98–0.99 of before in the probe, 0.96 and 0.98 in BenchmarkDotNet.
+* **These byte figures are end to end, not the client's own.** Both instruments count the whole process: the in-process broker and the WebSocket transport are in every figure, and their work changes with the client, which now sends more, smaller writes per burst (below). So a difference here cannot be put wholly on the client. The narrower claim, that a send which finds a write in progress allocates nothing in the client, rests on the client's allocation tests (`ClientAllocationTests`), which measure the client alone over the in-memory link.
 * **Bursts of 50:** 182 to 241 B less per message across both instruments, since 50 publishes started together no longer wait for the lock. Faster in every probe run and every BenchmarkDotNet run (0.35 to 0.90 of before in the probe).
 * **Blocking round trip:** 57 to 94 B less per operation; time 0.97 to 1.02 of before in the probe, 0.98 and 1.00 in BenchmarkDotNet.
 * **No row allocates more or is slower beyond the noise.** The worst rows are `ReceiveQoS0`, 2.9 ns slower in one pair of runs and 1.7 ns faster in the other, and the comparison's `PublishQoS1`, 1.006 and 0.98 of before.
@@ -136,7 +137,7 @@ Pooling the async builder of `SendAsync` removes only about 95 of the roughly 23
 
 Before is the client of `main` at de7af74; after is the client of this branch at e5f4586. Both were measured on 2026-11-26, between 10:19 and 11:11, on one noisy VM: Windows 11 Pro on Parallels (Apple Silicon, 10 cores, 32 GB), .NET SDK 10.0.404, .NET 10.0.15, BenchmarkDotNet 0.15.8.
 
-* **The probe** ([bench/MqttWire.Probe](../../bench/MqttWire.Probe/Program.cs) of e5f4586, unchanged), built as its remarks say with the before contestant from a worktree at de7af74 under the assembly name `MqttWire.Before`: 3 runs of 30 rounds of 1,000 operations per scenario. Bytes per operation are `GC.GetTotalAllocatedBytes(precise: true)` over each round's timed operations, process-wide, broker included; the broker is the same for every contestant, so the differences between the columns are the clients'. The same probe was built a second time with the client of 9aea873 as before, for 3 more runs. Reflection on each built probe showed the before contestant's `_client` field typed `MqttWire.MqttWireClient` from the assembly `MqttWire.Before`, with a `_sendLock` field and no `MqttWire.Client.SendQueue` type in it, and the after contestant's from `MqttWire`, with `SendQueue`. The 9aea873 build had no `MqttWire.Client.PendingAnswers` type, as expected before #12.
+* **The probe** ([bench/MqttWire.Probe](../../bench/MqttWire.Probe/Program.cs) of e5f4586, unchanged), built as its remarks say with the before contestant from a worktree at de7af74 under the assembly name `MqttWire.Before`: 3 runs of 30 rounds of 1,000 operations per scenario. Bytes per operation are `GC.GetTotalAllocatedBytes(precise: true)` over each round's timed operations, process-wide, broker and WebSocket transport included. The broker is the same program for every contestant, but its work depends on how each client writes, so the differences between the columns are end-to-end figures, not the clients' own. The same probe was built a second time with the client of 9aea873 as before, for 3 more runs. Reflection on each built probe showed the before contestant's `_client` field typed `MqttWire.MqttWireClient` from the assembly `MqttWire.Before`, with a `_sendLock` field and no `MqttWire.Client.SendQueue` type in it, and the after contestant's from `MqttWire`, with `SendQueue`. The 9aea873 build had no `MqttWire.Client.PendingAnswers` type, as expected before #12.
 * **BenchmarkDotNet:** `ClientBenchmarks` and `ClientComparisonBenchmarks`, default job, `[MemoryDiagnoser]`, filtered with `--filter "MqttWire.Microbench.ClientBenchmarks.*" "MqttWire.Microbench.ClientComparisonBenchmarks.*"`. The benchmarks are the same at both commits. Two pairs of runs in the order before, after, before, after, each run 9 to 14 minutes long.
 * **Contended sends:** a scratch copy of e5f4586, never committed, counting under the send path's lock the writes handed over, those that found a write in progress (queued), the answers writes among both, and the holds of the lock that count answers down. Its probe ran after and MQTTnet only, twice, and divided the counts by the operations of all its rounds, warm-up included.
 
@@ -212,6 +213,27 @@ A burst operation is one message. The awaiting round trip still meets a write in
 ### Writes per burst
 
 BenchmarkDotNet's burst benchmarks print the link writes per burst of 50: 57.8 and 57.5 before in both runs, 64.5 and 64.5 after in the first, 64.5 and 64.2 in the second. The counting probe agrees: 0.27 to 0.28 answers writes per message, about 14 per burst. Before, the read loop waited for each answers write, and the answers that arrived meanwhile went into the next; now it hands them over and reads on, so each write carries fewer. The bursts are faster and allocate less all the same.
+
+### Appending answers to a queued answers write (after the pull request's review)
+
+The review measured 57.7 link writes per burst at de7af74 and 63.2 at 331e394. Since 593a6e5, answers handed over right behind an answers write that has not started are appended to it while its buffer has room, and a queue ring of up to 256 slots is kept when it empties ([the design](../specs/2026-11-25-client-send-path-design.md), section 5).
+
+Method: `ClientComparisonBenchmarks` burst rows, `--job short --memory`, BenchmarkDotNet's ShortRun (3 iterations), same machine and session as below, 2026-11-26 in the afternoon. Before is 331e394 from a worktree; after is this branch with the change. The runs went before, after (a 64-slot ring), before, after (64), after (256), before, after (256). Each run prints writes per burst twice, once per burst benchmark.
+
+| Run | Writes per burst | `BurstQoS1MqttWireAsync` | B/message | `BurstQoS1AwaitingMqttWireAsync` | B/message |
+|---|---|---|---|---|---|
+| before 1 | 62.9, 63.5 | 18.93 µs | 1.92 KB | 17.70 µs | 1.91 KB |
+| before 2 | 62.7, 62.4 | 19.70 µs | 1.92 KB | 25.83 µs | 1.91 KB |
+| before 3 | 63.6, 63.3 | 18.37 µs | 1.91 KB | 17.95 µs | 1.91 KB |
+| after 1 (64-slot ring) | 59.6, 59.3 | 21.67 µs | 1.94 KB | 18.40 µs | 1.94 KB |
+| after 2 (64-slot ring) | 59.7, 60.1 | 18.88 µs | 1.96 KB | 19.71 µs | 1.92 KB |
+| after 3 (256-slot ring) | 58.7, 59.4 | 24.63 µs | 1.95 KB | 19.68 µs | 1.93 KB |
+| after 4 (256-slot ring) | 60.4, 58.4 | 21.23 µs | 1.93 KB | 26.78 µs | 1.95 KB |
+
+* **Writes per burst fell** in every run, from 62.4 to 63.6 to 58.4 to 60.4: about four fewer answers writes per burst of 50. It is not back at the 57.5 to 57.8 of de7af74, where the read loop's wait made the batches larger.
+* **Time:** within ShortRun's noise. The half widths of the 99.9% confidence intervals run from 2 to 60 µs, larger than every difference in the table.
+* **Bytes per message rose by 10 to 50 B end to end,** in every after run. The client's own allocation tests (`ClientAllocationTests`) still show 0 B for answers queued behind a pending write, so the bytes are most likely the broker's or the transport's, which now receive fewer, larger WebSocket messages. That was not isolated and is unexplained. The kept ring did not change it: the 64-slot and the 256-slot runs are alike.
+* **Held behind a slow write,** the change is larger than in a burst: the in-memory test `ReadLoop_AnswersHandedOverOneByOneBehindHeldWrite_GoOutInFewWrites` has 256 PUBACKs handed over one by one go out in 8 writes instead of 256, with as few pooled buffers held meanwhile.
 
 ## Before: the client of `main`
 

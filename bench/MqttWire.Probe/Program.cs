@@ -38,8 +38,10 @@ namespace MqttWire.Probe;
 /// </para>
 /// <para>
 /// The bytes per operation are counted with <see cref="GC.GetTotalAllocatedBytes(bool)"/> over the timed
-/// operations, so the count is process-wide: the broker and every other thread are in it. The broker is the same for
-/// every contestant, so the differences between the columns are the clients'.
+/// operations, so the count is process-wide: the broker, the WebSocket transport and every other thread are in it.
+/// A difference between two columns is therefore an end-to-end figure, not the clients' own: the broker's and the
+/// transport's work changes with how a client writes, for example with how many WebSocket messages a burst takes.
+/// What a client allocates by itself is shown by its allocation tests, not here.
 /// </para>
 /// </remarks>
 internal static class Program
