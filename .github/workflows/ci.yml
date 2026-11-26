@@ -30,7 +30,7 @@ jobs:
       - run: dotnet pack src/MqttWire.Server --no-build -c Release -o artifacts/pack-check -p:NuspecOutputPath=obj/pack-check -p:PackageVersion=0.2
       # For the publish job: the packages built and tested here are the ones published, with their symbol packages.
       - if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: packages
           path: artifacts/packages
