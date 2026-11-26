@@ -161,9 +161,14 @@ a continuation that runs inside its own registration, on the stack of the caller
 the write, from one that runs later.
 
 A link that refuses the registration is a fault of the link. The holder then ends the connection
-as a failed write does and gives up the send path; the write's buffer is not returned, since the
-write may still be using it (design 6.8, rule 4). The object stays armed for that write's
-completion, if it ever comes, and returns the buffer then.
+as a failed write does, and aborts the link whether or not another reason ended it first. The
+send path is faulted: nothing is written on the link again, the DISCONNECT included, since the
+refused write may still be in progress (design 6.8, rule 3). The holder drops what waits, giving
+each buffer back, and gives up the send path; every write handed over later is refused. The
+write's buffer is not returned, since the write may still be using it (design 6.8, rule 4). The
+object stays armed for that write's completion, if it ever comes, and returns the buffer then.
+(Amended on 2026-11-26, after review of the first build: the path is faulted and the link always
+aborted, so that no DISCONNECT reaches a link whose write may still be in progress.)
 
 ### Writes made on someone else's thread
 

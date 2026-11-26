@@ -251,6 +251,48 @@ public sealed class SendPathTests
     }
 
     /// <summary>
+    /// Proves that once a link has refused the registration of a write's continuation, nothing more reaches it while
+    /// that write may still be in progress: a dispose begun as the write starts records the end with a close and
+    /// queues the DISCONNECT, yet the refusal aborts the link all the same, the DISCONNECT is dropped and the close is
+    /// not attempted, no write overlaps the refused one, and every buffer but the refused write's is back when the
+    /// dispose completes; that one comes back, once, when the write ends.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task PublishAsync_RefusedWhileDisposeQueuesDisconnect_WritesNothingMoreOnTheLink()
+    {
+        // Arrange
+        CountingPool pool = new();
+        ClientHarness harness = await ConnectAsync(pool);
+        MqttWireClient client = harness.Client;
+        MemoryLink link = harness.Link;
+        link.TakeWritten();
+        Task? dispose = null;
+        link.Writing = _ => dispose ??= client.DisposeAsync().AsTask();
+        link.RefuseWriteRegistration();
+
+        // Act
+        _ = client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce);
+        await dispose.ShouldNotBeNull().Within("the dispose");
+        int outstandingAfterTheDispose = pool.Outstanding;
+        bool ended = link.CompleteRefusedWrite();
+
+        // Assert
+        link.IsAborted.ShouldBeTrue();
+        link.OverlappingWrites.ShouldBe(0);
+        link.WritesAfterAbort.ShouldBe(0);
+        link.ClosedWith.ShouldBeNull();
+        harness.Closed.Select(static info => info.Reason).ShouldBe([MqttClientCloseReason.Disposed]);
+        outstandingAfterTheDispose.ShouldBe(1);
+        ended.ShouldBeTrue();
+        link.TakeWritten().ShouldBe(ClientPackets.PublishQoS0);
+        pool.Outstanding.ShouldBe(0);
+        pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves a PINGREQ queued behind a pending write and dropped by the end of the connection is never written, and
     /// its buffer goes back exactly once, when the write ahead of it ends.
     /// </summary>

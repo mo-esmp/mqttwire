@@ -119,7 +119,8 @@ internal sealed class SendPathContinuation : IThreadPoolWorkItem
     /// <exception cref="Exception">
     /// The write refused the registration (a fault of the link) and its continuation has not run. The object stays
     /// armed: should the write end all the same, its continuation still finds what it needs and only ends the write
-    /// (<see cref="MqttWireClient.EndRefusedWrite"/>), without carrying the send path on, which the caller then keeps.
+    /// (<see cref="MqttWireClient.EndRefusedWrite"/>), without carrying the send path on: the caller faults the path,
+    /// drops what waits and gives it up.
     /// A write that refused the registration after its continuation had run is not reported: that continuation has
     /// already carried the send path on.
     /// </exception>

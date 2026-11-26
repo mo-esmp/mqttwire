@@ -57,10 +57,20 @@ public sealed partial class MqttWireClient
     private TaskCompletionSource? _writesEnded;
 
     /// <summary>
+    /// Whether the link refused the registration of a write's continuation, which faults the send path for good: the
+    /// link is aborted, and nothing is written on it again, a DISCONNECT included, since the refused write may still
+    /// be in progress (design 6.8, rule 3). Set once, under <see cref="_sendGate"/>, by the holder that met the
+    /// refusal; read under the lock by whoever hands a write over, and by the holders that follow, which take the path
+    /// in a hold of that lock.
+    /// </summary>
+    private bool _faulted;
+
+    /// <summary>
     /// Hands a packet to the send path and returns at once: written now on this thread when the path is free, added
     /// to the queue behind the writes in progress otherwise. Once the end has begun, anything but a DISCONNECT is
-    /// refused, and once <see cref="WhenWritesEndedAsync"/> has handed its marker over, everything is: the packet is
-    /// given back as a write that ended would give it back (<see cref="GiveBack"/>), and nothing is written.
+    /// refused, and once <see cref="WhenWritesEndedAsync"/> has handed its marker over, or the path is faulted
+    /// (<see cref="_faulted"/>), everything is: the packet is given back as a write that ended would give it back
+    /// (<see cref="GiveBack"/>), and nothing is written.
     /// </summary>
     /// <param name="packet">
     /// The encoded packet in a buffer rented from the client's pool. The send path owns it from now on and returns it
@@ -113,8 +123,8 @@ public sealed partial class MqttWireClient
     /// A task that completes once the DISCONNECT's write has ended, with <see langword="true"/> when the link took
     /// it. A link whose own close has started takes it without sending it (<see cref="IMqttLink.WriteAsync"/>), so
     /// <see langword="true"/> does not promise that it was sent. <see langword="false"/> when it was not written,
-    /// because <see cref="WhenWritesEndedAsync"/> had already handed its marker over or the link refused the
-    /// registration of the write's continuation, or when the write failed, which ended the connection with
+    /// because <see cref="WhenWritesEndedAsync"/> had already handed its marker over or the link had refused the
+    /// registration of a write's continuation, this one's or an earlier one's, or when the write failed, which ended the connection with
     /// <see cref="MqttClientCloseReason.WriteFailed"/> and aborted the link. It never fails, and its continuations
     /// run asynchronously.
     /// </returns>
@@ -176,7 +186,7 @@ public sealed partial class MqttWireClient
         bool refused = false;
         lock (_sendGate)
         {
-            if (_writesEnded is not null || IsDropped(write.Kind))
+            if (_writesEnded is not null || _faulted || IsDropped(write.Kind))
             {
                 refused = true;
             }
@@ -298,9 +308,10 @@ public sealed partial class MqttWireClient
 
     /// <summary>
     /// Writes one write the holder of the send path has taken, or drops it, or completes the marker; called by the
-    /// holder, outside the lock. A write whose link refuses the registration of its continuation ends the connection
-    /// as a failed write does, and is from then on left to its own completion, which returns its buffer; the holder
-    /// keeps the path and goes on, dropping what waits.
+    /// holder, outside the lock. A write whose link refuses the registration of its continuation faults the send path
+    /// (<see cref="FaultSendPath"/>) and is from then on left to its own completion, which returns its buffer; the
+    /// holder then drops every write it takes, the DISCONNECT included, until the queue is empty and it gives the
+    /// path up.
     /// </summary>
     /// <param name="write">
     /// The write taken.
@@ -315,7 +326,8 @@ public sealed partial class MqttWireClient
     private bool TryWrite(in QueuedWrite write, int inlineWrites)
     {
         IMqttLink? link = _link;
-        if (write.Kind == SendKind.WritesEnded || link is null || IsDropped(write.Kind))
+        // Set only by a holder; a later holder took the path in a hold of the lock, which published it.
+        if (write.Kind == SendKind.WritesEnded || link is null || _faulted || IsDropped(write.Kind))
         {
             GiveBack(write);
             return true;
@@ -345,18 +357,45 @@ public sealed partial class MqttWireClient
         catch (Exception exception)
         {
             // A fault of the link. The write may still be using its buffer (design 6.8, rule 4), so it is not
-            // returned: the continuation stays armed and returns it if the write ever ends. This holder keeps the path,
-            // and the end recorded here drops what waits, but for a DISCONNECT, which is told it was not written.
+            // returned: the continuation stays armed and returns it if the write ever ends.
             _continuation = null;
-            TryBeginEnd(
-                new MqttClientCloseInfo(MqttClientCloseReason.WriteFailed, MqttReasonCode.Success, null, exception),
-                EndMode.Abort);
-            if (write.Kind == SendKind.Disconnect)
-            {
-                Volatile.Read(ref _disconnectWritten)?.TrySetResult(result: false);
-            }
-
+            FaultSendPath(write, exception);
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Faults the send path after the link refused the registration of a write's continuation; called by the holder,
+    /// outside the lock. The refused write may still be in progress, so nothing may reach the link again: the path is
+    /// marked faulted, which refuses every later write and makes the holder drop what waits, the DISCONNECT included;
+    /// the connection ends with <see cref="MqttClientCloseReason.WriteFailed"/> unless another reason was recorded
+    /// first; and the link is aborted in either case, so that a close already under way does not wait for a
+    /// DISCONNECT that never comes. A DISCONNECT that was the refused write is told now that it was not written.
+    /// </summary>
+    /// <param name="refused">
+    /// The write whose registration was refused; its buffer stays with it.
+    /// </param>
+    /// <param name="exception">
+    /// What the registration threw.
+    /// </param>
+    private void FaultSendPath(in QueuedWrite refused, Exception exception)
+    {
+        lock (_sendGate)
+        {
+            _faulted = true;
+        }
+
+        if (!TryBeginEnd(
+                new MqttClientCloseInfo(MqttClientCloseReason.WriteFailed, MqttReasonCode.Success, null, exception),
+                EndMode.Abort))
+        {
+            // Another reason ended the connection first, perhaps with a close that does not abort: abort all the same.
+            AbortLink();
+        }
+
+        if (refused.Kind == SendKind.Disconnect)
+        {
+            Volatile.Read(ref _disconnectWritten)?.TrySetResult(result: false);
         }
     }
 
