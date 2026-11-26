@@ -135,6 +135,87 @@ public sealed class AnswerCapTests
     }
 
     /// <summary>
+    /// Proves exactly 4,096 answers waiting in the send path do not stop the read loop: with 256 batches of 16 behind
+    /// a held write, a message behind them is still handled while the write is held. It is the cap's boundary: the
+    /// read loop waits only once the count is past the cap, not when it reaches it.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task ReadLoop_ExactlyCapAnswersWaitingWhileWriteHeld_StillHandlesNextPacket()
+    {
+        // Arrange
+        TaskCompletionSource qoS0Arrived = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        ClientHarness harness = await ConnectAsync((in message) =>
+        {
+            if (message.QoS == MqttQoS.AtMostOnce)
+            {
+                qoS0Arrived.TrySetResult();
+            }
+        });
+        MemoryLink link = harness.Link;
+        link.HoldWrites();
+        int writesBefore = link.WriteCount;
+        _ = harness.Client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce);
+        DeliverFlood(link, Cap / Batch);
+
+        // Act
+        link.Deliver(ClientPackets.PublishQoS0);
+        bool arrivedWhileHeld = qoS0Arrived.Task.IsCompleted;
+        link.CompleteHeldWrites();
+        await link.WhenWrittenAsync(writesBefore + 1 + (Cap / Batch));
+
+        // Assert: one write of 16 answers per batch, so exactly the cap's worth waited while the write was held.
+        arrivedWhileHeld.ShouldBeTrue();
+        link.TakeWritten()
+            .ShouldBe([.. ClientPackets.PublishQoS0, .. Repeat(ClientPackets.PubCompNotFound7, Cap)]);
+        link.WriteCount.ShouldBe(writesBefore + 1 + (Cap / Batch));
+        harness.Client.IsConnected.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// Proves a link that refuses the registration of a write's continuation while the read loop waits at the cap
+    /// ends that wait: the connection ends with <see cref="MqttClientCloseReason.WriteFailed"/>, the read loop
+    /// finishes, and every buffer comes back exactly once, the refused write's only when that write ends.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task ReadLoop_RegistrationRefusedWhileWaitingAtCap_FinishesAndReturnsEveryBuffer()
+    {
+        // Arrange
+        CountingPool pool = new();
+        TaskCompletionSource closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        ClientHarness harness = await ConnectAsync(pool: pool, onClosed: _ => closed.TrySetResult());
+        MemoryLink link = harness.Link;
+        link.HoldWrites();
+        _ = harness.Client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce);
+        DeliverFlood(link);
+
+        // The first answers' write, taken once the held publish ends, refuses the registration of its continuation.
+        link.RefuseWriteRegistration();
+
+        // Act
+        link.CompleteHeldWrites();
+        await closed.Task.Within("the end of the connection");
+        await harness.Client.DisposeAsync().AsTask().Within("the dispose");
+        int outstandingBeforeTheWriteEnds = pool.Outstanding;
+        bool ended = link.CompleteRefusedWrite();
+
+        // Assert
+        harness.Closed.Select(static info => info.Reason).ShouldBe([MqttClientCloseReason.WriteFailed]);
+        link.IsAborted.ShouldBeTrue();
+        link.WritesAfterAbort.ShouldBe(0);
+        link.OverlappingWrites.ShouldBe(0);
+        outstandingBeforeTheWriteEnds.ShouldBe(1);
+        ended.ShouldBeTrue();
+        pool.Outstanding.ShouldBe(0);
+        pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves a dispose begun while the read loop waits at the cap ends that wait: the answers waiting are dropped,
     /// only the DISCONNECT follows the held write, and the dispose completes with every buffer back exactly once.
     /// </summary>
@@ -353,16 +434,19 @@ public sealed class AnswerCapTests
     }
 
     /// <summary>
-    /// Delivers the flood of these tests: <see cref="Batches"/> reads of <see cref="Batch"/> PUBRELs for the unknown
-    /// identifier 7 each, one past the cap's worth of answers.
+    /// Delivers the flood of these tests: reads of <see cref="Batch"/> PUBRELs for the unknown identifier 7 each,
+    /// which the read loop answers in one write per read.
     /// </summary>
     /// <param name="link">
     /// The connected client's link.
     /// </param>
-    private static void DeliverFlood(MemoryLink link)
+    /// <param name="batches">
+    /// How many reads; by default <see cref="Batches"/>, one past the cap's worth of answers.
+    /// </param>
+    private static void DeliverFlood(MemoryLink link, int batches = Batches)
     {
         byte[] batch = Repeat(ClientPackets.PubRel7, Batch);
-        for (int i = 0; i < Batches; i++)
+        for (int i = 0; i < batches; i++)
         {
             link.Deliver(batch);
         }

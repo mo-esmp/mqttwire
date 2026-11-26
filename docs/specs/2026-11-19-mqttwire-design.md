@@ -1170,8 +1170,10 @@ The inside of `MqttWireClient`.
   returns, without waiting and without allocating. Whoever holds the path takes the next waiting
   write when its own has ended, at most sixteen on a caller's thread before the thread pool
   takes over; a write that does not complete at once is carried on by its completion, through
-  one kept object. Nothing waits for the send path but the read loop past 4,096 waiting
-  answers, above. See [the client's send path](2026-11-25-client-send-path-design.md).
+  one kept object. No sender waits for its turn. The read loop waits only when more than 4,096
+  answers wait to be written, above, and only until the count is back at or below 4,096; the
+  end of a connection waits for the DISCONNECT's write and for every write handed over before
+  it to end. See [the client's send path](2026-11-25-client-send-path-design.md).
 
 ### 6.10 Shared topics through the host
 

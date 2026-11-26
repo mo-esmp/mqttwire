@@ -58,7 +58,8 @@ public sealed partial class MqttWireClient
     /// the send path first, so that no answer waits in the loop while the loop does; the wait is awaited once,
     /// whatever that write does. The loop never waits for a write, but for one case: a hand-over that leaves more
     /// than <see cref="ClientLimits.MaxWaitingAnswers"/> answers waiting in the send path makes it wait, before it
-    /// waits for the link, until they are written or the connection ends.
+    /// waits for the link, until enough of them are written to bring the count back to the cap or below, or the
+    /// connection ends.
     /// </summary>
     /// <param name="link">
     /// The link.
@@ -404,8 +405,9 @@ public sealed partial class MqttWireClient
 
     /// <summary>
     /// Hands every answer waiting to the send path, to be written as one WebSocket message, and does not wait for
-    /// the write, unless more than <see cref="ClientLimits.MaxWaitingAnswers"/> answers then wait in the send path
-    /// (the client's send-path design, section 5, "How many answers may wait"). The buffer goes to
+    /// their write. Only when more than <see cref="ClientLimits.MaxWaitingAnswers"/> answers then wait in the send
+    /// path does the read loop wait, and only until the count is back at or below the cap (the client's send-path
+    /// design, section 5, "How many answers may wait"). The buffer goes to
     /// <see cref="SendAnswers"/>, which returns it to the pool whatever the outcome, so afterwards no answer waits in
     /// the read loop. Once the end has begun nothing but a DISCONNECT is written, so the answers are dropped and their
     /// buffer returned here. Called by the read loop only, and only while an answer waits.
