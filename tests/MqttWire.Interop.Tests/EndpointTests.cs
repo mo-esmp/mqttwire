@@ -189,7 +189,12 @@ public sealed class EndpointTests(ITestOutputHelper output)
     {
         // Arrange
         await using ServerHost host = await ServerHost.StartAsync(options => options.MaxOutgoingBytes = 64 << 20);
-        await using RawWebSocket client = await host.ConnectRawAsync(receiveBufferSize: 1024);
+
+        // The system's receive buffer, not a small one: the client reads what the server queued, and a receive buffer
+        // far smaller than loopback's segments of 64 KB stalls Linux's TCP for seconds at a time while the client
+        // reads. The 12 MB below keep the server's write pending without it, since the client reads nothing until it
+        // sends the text message.
+        await using RawWebSocket client = await host.ConnectRawAsync();
         host.Server.TryGetConnection("c1", out MqttWireConnection? connection).ShouldBeTrue();
         byte[] payload = new byte[60_000];
         MqttTopic topic = MqttTopic.Create("a/b");
