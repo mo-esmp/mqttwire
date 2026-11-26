@@ -11,7 +11,7 @@ permissions:
 jobs:
   dotnet:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 20
     env:
       CI: true
     steps:
@@ -21,14 +21,6 @@ jobs:
           dotnet-version: 10.0.x
       - run: dotnet restore
       - run: dotnet build --no-restore -c Release
-      # DIAGNOSTIC ONLY, not for merge: the whole interop suite ten times, with the capture of a stalled drain.
-      - run: |
-          for i in $(seq 1 10); do
-            echo "=== iteration $i"
-            dotnet test tests/MqttWire.Interop.Tests --no-build -c Release --logger "console;verbosity=detailed" 2>&1 | grep -E "DIAG|\[FAIL\]|Passed!|Failed!|TimeoutException" || true
-          done
-        env:
-          DIAG_RUNS: 6
       - run: dotnet test --no-build -c Release --logger "trx;LogFileName=test-results.trx"
       # Packs both packages, which also checks that MqttWire.Server depends on exactly its own version of MqttWire.
       - run: dotnet pack src/MqttWire --no-build -c Release -o artifacts/packages
