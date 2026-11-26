@@ -445,8 +445,8 @@ public sealed class SendPathTests
 
     /// <summary>
     /// Proves a publish that the send path refuses, because the end began between its check against the connection
-    /// and its hand-over, throws nothing at its caller when the pool throws as its buffer goes back: the connection
-    /// ends as the dispose ended it, and the buffer whose return threw is never returned again.
+    /// and its hand-over, neither throws nor faults for its caller when the pool throws as its buffer goes back: the
+    /// connection ends as the dispose ended it, and the buffer whose return threw is never returned again.
     /// </summary>
     /// <returns>
     /// A task that completes when the test has run.
@@ -481,12 +481,19 @@ public sealed class SendPathTests
         };
 
         // Act
-        Exception? thrown = Record.Exception(() => _ = client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce));
+        // Awaited, not discarded: the pool's exception could reach the caller thrown at the call or as a faulted
+        // publish, and this sees both.
+        MqttRequestResult result = default;
+        Exception? thrown = await Record.ExceptionAsync(async () =>
+            result = await client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce).AsTask().Within("the publish"));
         harness.Link.EndFromPeer();
         await dispose.AsTask().Within("the dispose");
 
         // Assert
         thrown.ShouldBeNull();
+
+        // A QoS 0 publish ends when it is handed over, refused or not.
+        result.Status.ShouldBe(MqttRequestStatus.Completed);
         Volatile.Read(ref armed).ShouldBe(0);
         harness.Closed.Select(static info => info.Reason).ShouldBe([MqttClientCloseReason.Disposed]);
         pool.Outstanding.ShouldBe(1);
