@@ -154,9 +154,12 @@ public sealed partial class MqttWireClient
         if (read == 0)
         {
             _receive.Clear();
-            if (TryBeginEnd(new MqttClientCloseInfo(MqttClientCloseReason.ConnectionLost, MqttReasonCode.Success, null, null), EndMode.Close))
+            if (TryBeginEnd(new MqttClientCloseInfo(MqttClientCloseReason.ConnectionLost, MqttReasonCode.Success, null, null), EndMode.Close)
+                && WhenWritesEndedAsync().IsCompleted)
             {
-                // Answer the server's close.
+                // Answer the server's close, but only with no write in progress: a close then would overlap it, and
+                // waiting would hold up the end for a link that has ended. With a write in progress the close is left
+                // out, and finishing the connection aborts the link, which ends that write.
                 await CloseLinkAsync(link, null).ConfigureAwait(false);
             }
 

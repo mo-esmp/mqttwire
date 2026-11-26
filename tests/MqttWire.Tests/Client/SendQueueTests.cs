@@ -138,4 +138,140 @@ public sealed class SendQueueTests
         afterWrap.ShouldBe(Enumerable.Range(0, 12).ToList());
         afterGrowth.ShouldBe(Enumerable.Range(100, 9).ToList());
     }
+
+    /// <summary>
+    /// Proves a ring grown past the retained size by a burst is released once the burst has drained, and the next
+    /// write to wait creates a small one again.
+    /// </summary>
+    [Fact]
+    public void TryDequeue_LastWriteOfBurst_ReleasesOversizedRing()
+    {
+        // Arrange
+        SendQueue queue = new();
+        for (int i = 0; i < 1_000; i++)
+        {
+            queue.Enqueue(WriteOf(i));
+        }
+
+        int capacityDuringBurst = queue.Capacity;
+
+        // Act
+        List<int> lengths = Drain(ref queue);
+        int capacityAfterBurst = queue.Capacity;
+        queue.Enqueue(WriteOf(5));
+
+        // Assert
+        capacityDuringBurst.ShouldBeGreaterThan(ClientLimits.SendQueueRetainedCapacity);
+        lengths.ShouldBe(Enumerable.Range(0, 1_000).ToList());
+        capacityAfterBurst.ShouldBe(0);
+        queue.Capacity.ShouldBe(ClientLimits.SendQueueFirstCapacity);
+        Drain(ref queue).ShouldBe([5]);
+    }
+
+    /// <summary>
+    /// Proves a ring within the retained size is kept when it empties, so that routine contention, the same number of
+    /// writes waiting again and again, allocates nothing once the ring has grown.
+    /// </summary>
+    [Fact]
+    public void Enqueue_RepeatedRoutineContention_KeepsRingAndAllocatesNothing()
+    {
+        // Arrange
+        SendQueue queue = new();
+        Fill(ref queue, ClientLimits.SendQueueRetainedCapacity);
+        int capacity = queue.Capacity;
+
+        // Act
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int round = 0; round < 100; round++)
+        {
+            Fill(ref queue, ClientLimits.SendQueueRetainedCapacity);
+        }
+
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        // Assert
+        capacity.ShouldBe(ClientLimits.SendQueueRetainedCapacity);
+        queue.Capacity.ShouldBe(capacity);
+        allocated.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves answers are appended to the newest write when it is an answers write with room in its buffer: the bytes
+    /// follow its own, it counts both sets of answers, and no write is added.
+    /// </summary>
+    [Fact]
+    public void TryAppendAnswers_NewestIsAnswersWithRoom_AppendsBytesAndAnswers()
+    {
+        // Arrange
+        SendQueue queue = new();
+        queue.Enqueue(new QueuedWrite(new byte[8], length: 0, SendKind.Publish, answers: 0));
+        byte[] buffer = new byte[8];
+        buffer[0] = 1;
+        buffer[1] = 2;
+        queue.Enqueue(new QueuedWrite(buffer, length: 2, SendKind.Answers, answers: 1));
+
+        // Act
+        bool appended = queue.TryAppendAnswers(new QueuedWrite([3, 4, 5], length: 3, SendKind.Answers, answers: 2));
+
+        // Assert
+        appended.ShouldBeTrue();
+        queue.Count.ShouldBe(2);
+        queue.TryDequeue(out _);
+        queue.TryDequeue(out QueuedWrite newest);
+        newest.Buffer.ShouldBeSameAs(buffer);
+        newest.Length.ShouldBe(5);
+        newest.Answers.ShouldBe(3);
+        buffer.AsSpan(0, 5).ToArray().ShouldBe([1, 2, 3, 4, 5]);
+    }
+
+    /// <summary>
+    /// Proves answers are not appended when the newest write is not answers, or its buffer has no room for them, or
+    /// nothing waits: the queue is left as it was.
+    /// </summary>
+    [Fact]
+    public void TryAppendAnswers_NewestNotAnswersOrFull_ReturnsFalse()
+    {
+        // Arrange
+        QueuedWrite answers = new([9, 9], length: 2, SendKind.Answers, answers: 1);
+        SendQueue empty = new();
+        SendQueue behindPublish = new();
+        behindPublish.Enqueue(new QueuedWrite(new byte[8], length: 2, SendKind.Answers, answers: 1));
+        behindPublish.Enqueue(new QueuedWrite(new byte[8], length: 2, SendKind.Publish, answers: 0));
+        SendQueue full = new();
+        full.Enqueue(new QueuedWrite(new byte[4], length: 3, SendKind.Answers, answers: 1));
+
+        // Act
+        bool intoEmpty = empty.TryAppendAnswers(answers);
+        bool behindAPublish = behindPublish.TryAppendAnswers(answers);
+        bool intoFull = full.TryAppendAnswers(answers);
+
+        // Assert
+        intoEmpty.ShouldBeFalse();
+        behindAPublish.ShouldBeFalse();
+        intoFull.ShouldBeFalse();
+        full.TryDequeue(out QueuedWrite unchanged);
+        unchanged.Length.ShouldBe(3);
+        unchanged.Answers.ShouldBe(1);
+    }
+
+    /// <summary>
+    /// Queues a number of writes and then takes them all again.
+    /// </summary>
+    /// <param name="queue">
+    /// The queue, empty before and after.
+    /// </param>
+    /// <param name="count">
+    /// How many writes wait at once.
+    /// </param>
+    private static void Fill(ref SendQueue queue, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            queue.Enqueue(WriteOf(i));
+        }
+
+        while (queue.TryDequeue(out _))
+        {
+        }
+    }
 }

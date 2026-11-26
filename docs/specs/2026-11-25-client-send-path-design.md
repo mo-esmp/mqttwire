@@ -117,8 +117,11 @@ writes are guarded by one lock of the send path's own, never held across a write
 
 **A waiting write** is a small struct: the rented buffer, its length, and its `SendKind`. The
 queue is a ring of these structs in an array the client keeps. It is created on the first send
-that has to wait, grows by doubling when it is full, and is never shrunk; a client has one
-connection, so it is gone with the client.
+that has to wait and grows by doubling when it is full. A ring of up to 64 slots is kept when it
+empties, so routine contention allocates nothing; a larger one, grown by a burst, is released when
+it empties, so that one burst does not raise the client's idle memory for the rest of its
+connection (amended on 2026-11-26, after the pull request's review; until then the ring was never
+shrunk).
 
 **Handing a packet to the send path** (what `SendAsync` does today) returns at once and never
 throws. In one hold of the lock:
@@ -221,6 +224,14 @@ over are those of #12, unchanged. When the path is free, the read loop writes th
 as a caller does; a write that does not complete at once is carried on by its completion, not
 by the read loop.
 
+**Answers that queue right behind an answers write that has not started are appended to it**,
+while its buffer has room, and their own buffer goes back to the pool (amended on 2026-11-26,
+after the pull request's review). Without this, answers handed over one by one behind a slow
+write, one per read, would each hold a pooled buffer and each cost a write of their own. Nothing
+is appended across a write of another kind, so the order of section 5, "Order", is kept, and the
+answers appended are counted with the write they join. The copy of a few bytes is the one thing
+done under the send path's lock besides deciding.
+
 The answers' buffer now leaves the read loop as soon as it is handed over, and the send path
 returns it. `PendingAnswers` stays read-loop state only.
 
@@ -283,11 +294,17 @@ These happen once in a client's life and may allocate.
 - **The DISCONNECT and the close.** `CloseLinkAsync` today awaits the DISCONNECT's write, then
   closes the link. The DISCONNECT now carries a completion, made when the end is recorded, which
   the send path completes when its write has ended (or when it was dropped), with whether the link
-  took it. `CloseLinkAsync` awaits that, and then closes the link, as today.
+  took it. `CloseLinkAsync` awaits that, and then closes the link, as today. **When no
+  DISCONNECT is sent** (the server's own close or DISCONNECT, or a DISCONNECT over the server's
+  Maximum Packet Size), `CloseLinkAsync` first awaits the marker below, so that the close never
+  overlaps a write in progress, the read loop's answers among them; the close deadline aborts the
+  link if that write never ends (amended on 2026-11-26, after the pull request's review: the
+  close used to start at once).
 - **Every write has ended.** `WaitUntilEndedAsync` today takes and releases the lock once, after
   the read loop has finished, so that every write handed over before then has ended and given its
   buffer back. Instead it hands the send path a **marker** with a completion: added to the queue
-  like a write, completed by the holder when it takes it, or at once when nobody holds the path.
+  like a write, completed by the holder when it takes it, or at once when nobody holds the path;
+  then no completion is made, and a completed marker shared by every client stands in for it.
   Every write handed over before the marker has then ended. A write handed over after it finds the
   end recorded and is refused at once.
 - **The CONNECT** is handed over without being awaited. `HandshakeAsync` awaits the CONNACK, as
@@ -334,9 +351,10 @@ limits, and loses any mention of the send lock.
 3. **One kept object for a pending write,** not a pool: a client has one write in progress at a
    time. It and the queue are created on first need, so a client that never meets a slow or
    contended write allocates neither, and a new client allocates no more than today.
-4. **The end may allocate:** a completion for the DISCONNECT and one for the marker, once per
-   client.
-5. **The queue never shrinks.** A client lives for one connection.
+4. **The end may allocate:** a completion for the DISCONNECT, and one for the marker when a write
+   is still in progress, once per client.
+5. **The queue keeps a ring of up to 64 slots** and releases a larger one when it empties
+   (amended after the pull request's review; it was "never shrinks").
 6. **The cap is 4,096 answers** (section 5).
 
 ## 9. Left to the builder

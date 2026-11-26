@@ -73,6 +73,12 @@ internal static class ClientLimits
     public const int SendQueueFirstCapacity = 8;
 
     /// <summary>
+    /// The largest ring the send queue keeps once it has emptied, in slots: routine contention reuses it and
+    /// allocates nothing, while a larger ring, grown by a burst, is released when it empties.
+    /// </summary>
+    public const int SendQueueRetainedCapacity = 64;
+
+    /// <summary>
     /// The smallest allowed <c>MaxIncomingPacketBytes</c>.
     /// </summary>
     public const int MinIncomingPacketBytes = 4096;

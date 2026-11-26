@@ -137,8 +137,10 @@ public sealed partial class MqttWireClient
     }
 
     /// <summary>
-    /// Closes the link, after a DISCONNECT when one is given. Run by whoever recorded the end with
-    /// <see cref="EndMode.Close"/>; the close deadline aborts the link if this or the server's answer takes too long.
+    /// Closes the link, after a DISCONNECT when one is given, and in any case only once every write handed over before
+    /// has ended, so that the close never overlaps a write. Run by whoever recorded the end with
+    /// <see cref="EndMode.Close"/>; the close deadline aborts the link if this, a write ahead of it, or the server's
+    /// answer takes too long.
     /// </summary>
     /// <param name="link">
     /// The link.
@@ -165,6 +167,13 @@ public sealed partial class MqttWireClient
                 // is nothing left to close.
                 return;
             }
+        }
+        else
+        {
+            // No DISCONNECT to follow the writes, so the close waits for them itself: the link takes one writer at a
+            // time, and a write may be in progress, the read loop's answers among them. Nothing else is written once
+            // the end is recorded, and the close deadline aborts the link if a write never ends, which ends the wait.
+            await WhenWritesEndedAsync().ConfigureAwait(continueOnCapturedContext: false);
         }
 
         try

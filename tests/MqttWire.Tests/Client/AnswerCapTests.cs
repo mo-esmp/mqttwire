@@ -1,4 +1,6 @@
 using System.Buffers;
+using System.Net.WebSockets;
+using MqttWire.Client;
 using MqttWire.Tests.Link;
 
 namespace MqttWire.Tests.Client;
@@ -6,8 +8,9 @@ namespace MqttWire.Tests.Client;
 /// <summary>
 /// Tests how the read loop hands its answers to the send path (the client's send-path design, section 5, "The read
 /// loop" and "How many answers may wait"): it does not wait for their write, so the packets behind a held write are
-/// still handled and their answers go out after it, in order; and only once more than 4,096 answers wait to be written
-/// does it stop handling packets, until enough of them have been written or the connection ends.
+/// still handled and their answers go out after it, in order, appended to an answers write still waiting where it has
+/// room; only once more than 4,096 answers wait to be written does it stop handling packets, until enough of them have
+/// been written or the connection ends; and its close of the link waits for the answers write in progress.
 /// </summary>
 public sealed class AnswerCapTests
 {
@@ -382,11 +385,12 @@ public sealed class AnswerCapTests
         link.Deliver([.. PublishesQoS1(1_024), .. ClientPackets.PublishQoS0]);
         int messagesWhileHeld = Volatile.Read(ref messages);
         link.CompleteHeldWrites();
-        await link.WhenWrittenAsync(writesBefore + 1 + (1_024 / Batch));
+        await link.WhenWrittenAsync(writesBefore + 1 + AnswerWrites(1_024, Batch));
 
         // Assert
         messagesWhileHeld.ShouldBe(1_025);
         link.TakeWritten().ShouldBe([.. ClientPackets.PublishQoS0, .. PubAcks(1, 1_024)]);
+        link.WriteCount.ShouldBe(writesBefore + 1 + AnswerWrites(1_024, Batch));
         harness.Client.IsConnected.ShouldBeTrue();
     }
 
@@ -431,6 +435,134 @@ public sealed class AnswerCapTests
         written.ShouldBe([.. PubAck(1), .. ClientPackets.PublishQoS1, .. PubAck(2)]);
         result.Status.ShouldBe(MqttRequestStatus.Completed);
         link.OverlappingWrites.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves answers handed over one by one behind a held write are appended to the answers write still waiting:
+    /// 256 QoS 1 messages delivered one per read leave as few writes as their buffers hold, not 256, the buffers held
+    /// meanwhile are as few, and the PUBACKs go out after the held write in the order of their messages.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task ReadLoop_AnswersHandedOverOneByOneBehindHeldWrite_GoOutInFewWrites()
+    {
+        // Arrange
+        const int Messages = 256;
+        CountingPool pool = new();
+        ClientHarness harness = await ConnectAsync(pool: pool);
+        MemoryLink link = harness.Link;
+        link.HoldWrites();
+        int writesBefore = link.WriteCount;
+        _ = harness.Client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce);
+
+        int answerWrites = AnswerWrites(Messages, perRead: 1);
+
+        // Act
+        for (int id = 1; id <= Messages; id++)
+        {
+            link.Deliver(PublishQoS1((ushort)id));
+        }
+
+        int outstandingWhileHeld = pool.Outstanding;
+        link.CompleteHeldWrites();
+        await link.WhenWrittenAsync(writesBefore + 1 + answerWrites);
+
+        // Assert
+        outstandingWhileHeld.ShouldBeLessThanOrEqualTo(2 + answerWrites);
+        link.TakeWritten().ShouldBe([.. ClientPackets.PublishQoS0, .. PubAcks(1, Messages)]);
+        link.WriteCount.ShouldBe(writesBefore + 1 + answerWrites);
+        link.OverlappingWrites.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves answers are not appended across a caller's write: with a publish queued between two PUBACKs behind a
+    /// held write, the four packets go out in four writes, in the order they were handed over.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task ReadLoop_AnswersAroundQueuedPublish_NotMergedAcrossIt()
+    {
+        // Arrange
+        ClientHarness harness = await ConnectAsync();
+        MemoryLink link = harness.Link;
+        link.HoldWrites();
+        int writesBefore = link.WriteCount;
+        _ = harness.Client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce);
+
+        // Act
+        link.Deliver(PublishQoS1(1));
+        _ = harness.Client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce);
+        link.Deliver(PublishQoS1(2));
+        link.CompleteHeldWrites();
+        await link.WhenWrittenAsync(writesBefore + 4);
+
+        // Assert
+        link.TakeWritten().ShouldBe(
+            [.. ClientPackets.PublishQoS0, .. PubAck(1), .. ClientPackets.PublishQoS0, .. PubAck(2)]);
+        link.WriteCount.ShouldBe(writesBefore + 4);
+    }
+
+    /// <summary>
+    /// Proves the close that answers a server's DISCONNECT waits for the answers write in progress: with the PUBACK
+    /// of a QoS 1 message held, the DISCONNECT that follows does not close the link while the write is held, the close
+    /// comes once the write has ended, and no write and close overlap.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task ReadLoop_ServerDisconnectsWhileAnswersWriteHeld_ClosesAfterWriteEnds()
+    {
+        // Arrange
+        CountingPool pool = new();
+        ClientHarness harness = await ConnectAsync(pool: pool);
+        MemoryLink link = harness.Link;
+        link.HoldWrites();
+        link.Deliver(PublishQoS1(1));
+
+        // Act
+        link.Deliver(ClientPackets.DisconnectSessionTakenOver);
+        WebSocketCloseStatus? closedWhileHeld = link.ClosedWith;
+        link.CompleteHeldWrites();
+        link.EndFromPeer();
+        await harness.Client.DisposeAsync().AsTask().Within("the dispose");
+
+        // Assert
+        closedWhileHeld.ShouldBeNull();
+        link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
+        link.TakeWritten().ShouldBe(PubAck(1));
+        link.OverlappingWrites.ShouldBe(0);
+        harness.Closed.ShouldBe(
+            [new MqttClientCloseInfo(MqttClientCloseReason.ServerDisconnected, MqttReasonCode.SessionTakenOver, null, null)]);
+        pool.Outstanding.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// The number of writes the PUBACKs of QoS 1 messages take behind a held write, when the read loop hands them over
+    /// in batches and each batch that fits is appended to the answers write waiting last: as many batches go out
+    /// together as the buffer the pool hands out for the read loop's answers holds.
+    /// </summary>
+    /// <param name="pubAcks">
+    /// How many PUBACKs.
+    /// </param>
+    /// <param name="perRead">
+    /// How many PUBACKs the read loop hands over at a time.
+    /// </param>
+    /// <returns>
+    /// The number of answers writes.
+    /// </returns>
+    private static int AnswerWrites(int pubAcks, int perRead)
+    {
+        byte[] probe = ArrayPool<byte>.Shared.Rent(ClientLimits.AnswerBufferBytes);
+        int bufferBytes = probe.Length;
+        ArrayPool<byte>.Shared.Return(probe);
+        int batchesPerWrite = bufferBytes / (perRead * PubAck(1).Length);
+        int batches = (pubAcks + perRead - 1) / perRead;
+        return (batches + batchesPerWrite - 1) / batchesPerWrite;
     }
 
     /// <summary>
