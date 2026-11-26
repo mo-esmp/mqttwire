@@ -55,6 +55,21 @@ internal static class ClientLimits
     public const int AnswerBufferBytes = AnswerPacketBound * MaxAnswerBytes;
 
     /// <summary>
+    /// The most writes the send path keeps inline, besides the queue of the writes waiting for their turn.
+    /// </summary>
+    public const int InlineWrites = 16;
+
+    /// <summary>
+    /// The most answers that may wait to be written, across the answer writes queued and not yet ended.
+    /// </summary>
+    public const int MaxWaitingAnswers = 4_096;
+
+    /// <summary>
+    /// The number of slots the send queue creates when its first write is queued; a full queue doubles.
+    /// </summary>
+    public const int SendQueueFirstCapacity = 8;
+
+    /// <summary>
     /// The smallest allowed <c>MaxIncomingPacketBytes</c>.
     /// </summary>
     public const int MinIncomingPacketBytes = 4096;
