@@ -117,11 +117,11 @@ writes are guarded by one lock of the send path's own, never held across a write
 
 **A waiting write** is a small struct: the rented buffer, its length, and its `SendKind`. The
 queue is a ring of these structs in an array the client keeps. It is created on the first send
-that has to wait and grows by doubling when it is full. A ring of up to 64 slots is kept when it
-empties, so routine contention allocates nothing; a larger one, grown by a burst, is released when
-it empties, so that one burst does not raise the client's idle memory for the rest of its
-connection (amended on 2026-11-26, after the pull request's review; until then the ring was never
-shrunk).
+that has to wait and grows by doubling when it is full. A ring of up to 256 slots (6 KiB) is
+kept when it empties, so routine contention, a burst of 50 publishes and their answers included,
+allocates nothing; a larger one, grown by a bigger burst, is released when it empties, so that
+one burst does not raise the client's idle memory for the rest of its connection (amended on
+2026-11-26, after the pull request's review; until then the ring was never shrunk).
 
 **Handing a packet to the send path** (what `SendAsync` does today) returns at once and never
 throws. In one hold of the lock:
@@ -353,7 +353,7 @@ limits, and loses any mention of the send lock.
    contended write allocates neither, and a new client allocates no more than today.
 4. **The end may allocate:** a completion for the DISCONNECT, and one for the marker when a write
    is still in progress, once per client.
-5. **The queue keeps a ring of up to 64 slots** and releases a larger one when it empties
+5. **The queue keeps a ring of up to 256 slots** and releases a larger one when it empties
    (amended after the pull request's review; it was "never shrinks").
 6. **The cap is 4,096 answers** (section 5).
 
