@@ -245,6 +245,13 @@ signal to catch up by your own means.
 The client works in Blazor WebAssembly. There the browser supports only part of
 `ClientWebSocketOptions`: `ConfigureWebSocket` cannot set request headers, TLS or proxy settings.
 
+## Security
+
+To report a vulnerability, follow the
+[security policy](https://github.com/mo-esmp/mqttwire/security/policy) and do not open a public
+issue. The policy also says what MqttWire bounds on each connection and what it leaves to your
+host: authentication, TLS and limits across connections.
+
 ## Building from source
 
 ```
