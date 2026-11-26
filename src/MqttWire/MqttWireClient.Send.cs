@@ -12,7 +12,8 @@ namespace MqttWire;
 /// write has ended, either takes the next waiting write or clears the flag, in one hold of <see cref="_sendGate"/>.
 /// A write that does not complete at once is handed to <see cref="_continuation"/>, and its completion carries the
 /// path on. The lock is never held across a write, a completion, a return to the pool or a call into the
-/// application, and nothing is rented or encoded under it.
+/// application, and nothing is rented or encoded under it. Should something throw inside the path, the link's abort
+/// or the pool, the holder gives the path up (<see cref="GiveUpFaultedSendPath"/>) rather than leave it held.
 /// </content>
 public sealed partial class MqttWireClient
 {
@@ -58,11 +59,11 @@ public sealed partial class MqttWireClient
     private TaskCompletionSource? _writesEnded;
 
     /// <summary>
-    /// Whether the link refused the registration of a write's continuation, which faults the send path for good: the
-    /// link is aborted, and nothing is written on it again, a DISCONNECT included, since the refused write may still
-    /// be in progress (design 6.8, rule 3). Set once, under <see cref="_sendGate"/>, by the holder that met the
-    /// refusal; read under the lock by whoever hands a write over, and by the holders that follow, which take the path
-    /// in a hold of that lock.
+    /// Whether the send path is faulted for good: the link refused the registration of a write's continuation, or
+    /// something threw inside the path. The link is aborted, and nothing is written on it again, a DISCONNECT
+    /// included, since a refused write may still be in progress (design 6.8, rule 3). Set, under
+    /// <see cref="_sendGate"/>, by the holder that met the refusal or caught the throw; read under the lock by whoever
+    /// hands a write over, and by the holders that follow, which take the path in a hold of that lock.
     /// </summary>
     private bool _faulted;
 
@@ -210,7 +211,8 @@ public sealed partial class MqttWireClient
     /// among those waiting (<see cref="_waitingAnswers"/>), refused ones too, since their give-back counts them down;
     /// and when a write that is not refused takes the count past <see cref="ClientLimits.MaxWaitingAnswers"/>, the
     /// read loop's wait is created (<see cref="_answerRoom"/>). A refused write is given back outside the lock
-    /// (<see cref="GiveBack"/>).
+    /// (<see cref="GiveBack"/>). Should something throw while this caller holds the path, the path is given up
+    /// (<see cref="GiveUpFaultedSendPath"/>) and nothing is thrown at the caller.
     /// </summary>
     /// <param name="write">
     /// The write handed over; its buffer belongs to the send path from now on.
@@ -256,7 +258,17 @@ public sealed partial class MqttWireClient
             return null;
         }
 
-        RunSendPath(write, ClientLimits.InlineWrites);
+        try
+        {
+            RunSendPath(write, ClientLimits.InlineWrites);
+        }
+        catch (Exception exception)
+        {
+            // A fault inside the send path, with the path still this caller's: it is given up, not thrown at the
+            // caller. The end it records also ends the read loop's wait, so the room returned has completed.
+            GiveUpFaultedSendPath(exception);
+        }
+
         return room;
     }
 
@@ -267,8 +279,14 @@ public sealed partial class MqttWireClient
     /// write it takes that is not a DISCONNECT is dropped (<see cref="GiveBack"/>), and counts as one more write. A
     /// write that does not complete at once is handed to <see cref="_continuation"/>, and this returns with the path
     /// held by that write. After <paramref name="inlineWrites"/> writes, with more waiting, the path, still held, is
-    /// handed to the thread pool. It never throws, but for a bug of the client.
+    /// handed to the thread pool.
     /// </summary>
+    /// <remarks>
+    /// What the link's abort or the pool throws comes out of here with the path still held: every place that can
+    /// throw runs before the next write is started, once the current write has done its end's work or, refused the
+    /// registration of its continuation, has been left to that continuation. Each caller catches it and gives the
+    /// path up (<see cref="GiveUpFaultedSendPath"/>).
+    /// </remarks>
     /// <param name="write">
     /// The first write, which the caller took with the path.
     /// </param>
@@ -299,7 +317,8 @@ public sealed partial class MqttWireClient
     /// Carries the send path on after a write that did not complete at once has ended; called by
     /// <see cref="SendPathContinuation"/>, once per such write, on the thread that completed it. It does the work of
     /// the write's end (<see cref="FinishWrite"/>), then takes the next waiting write and writes on, or gives the path
-    /// up. It never throws, but for a bug of the client.
+    /// up. It never throws, so nothing reaches the thread that completed the write: a fault inside the send path, the
+    /// link's abort or the pool throwing, gives the path up (<see cref="GiveUpFaultedSendPath"/>).
     /// </summary>
     /// <param name="ended">
     /// The write that has ended.
@@ -322,22 +341,37 @@ public sealed partial class MqttWireClient
         int writes = insideTheRegistration
             ? Math.Min(inlineWrites, ClientLimits.InlineWrites) - 1
             : int.MaxValue;
-        FinishWrite(ended, failure);
-        if (TryTakeNext(writes, out QueuedWrite next))
+        try
         {
-            RunSendPath(next, writes);
+            FinishWrite(ended, failure);
+            if (TryTakeNext(writes, out QueuedWrite next))
+            {
+                RunSendPath(next, writes);
+            }
+        }
+        catch (Exception exception)
+        {
+            GiveUpFaultedSendPath(exception);
         }
     }
 
     /// <summary>
     /// Carries the send path on from the thread pool, after a holder handed it over, still held, with writes waiting;
-    /// called by <see cref="SendPathContinuation"/> as a work item. It never throws, but for a bug of the client.
+    /// called by <see cref="SendPathContinuation"/> as a work item. It never throws, so a work item never fails: a
+    /// fault inside the send path gives the path up (<see cref="GiveUpFaultedSendPath"/>).
     /// </summary>
     internal void RunHandedOverSendPath()
     {
-        if (TryTakeNext(int.MaxValue, out QueuedWrite next))
+        try
         {
-            RunSendPath(next, int.MaxValue);
+            if (TryTakeNext(int.MaxValue, out QueuedWrite next))
+            {
+                RunSendPath(next, int.MaxValue);
+            }
+        }
+        catch (Exception exception)
+        {
+            GiveUpFaultedSendPath(exception);
         }
     }
 
@@ -345,7 +379,9 @@ public sealed partial class MqttWireClient
     /// Ends a write whose link refused the registration of its continuation, when the link ends it after all; called
     /// by that write's <see cref="SendPathContinuation"/>. The send path is no longer this write's, so it is not
     /// carried on: the write only does its end's work and returns its buffer, which nobody could return before, since
-    /// the write might still have been using it (design 6.8, rule 4).
+    /// the write might still have been using it (design 6.8, rule 4). It never throws, so nothing reaches the thread
+    /// that completed the write: should the pool throw, the buffer is left to the garbage collector, and the end the
+    /// refusal recorded stands.
     /// </summary>
     /// <param name="ended">
     /// The write that has ended.
@@ -353,8 +389,20 @@ public sealed partial class MqttWireClient
     /// <param name="failure">
     /// What the write failed with, or <see langword="null"/> when the link took it.
     /// </param>
-    internal void EndRefusedWrite(in QueuedWrite ended, Exception? failure) =>
-        EndWrite(ended, succeeded: failure is null);
+    internal void EndRefusedWrite(in QueuedWrite ended, Exception? failure)
+    {
+        try
+        {
+            EndWrite(ended, succeeded: failure is null);
+        }
+#pragma warning disable RCS1075 // Swallowed on purpose: the send path is not this write's, and the end is recorded.
+        catch (Exception)
+        {
+            // The refusal faulted the send path and recorded the end, and aborted the link; the path is not this
+            // write's to give up. EndWrite has told whoever waits for this write, whatever the pool did.
+        }
+#pragma warning restore RCS1075
+    }
 
     /// <summary>
     /// Writes one write the holder of the send path has taken, or drops it, or completes the marker; called by the
@@ -501,17 +549,119 @@ public sealed partial class MqttWireClient
     /// <param name="failure">
     /// What the write failed with, or <see langword="null"/> when the link took it.
     /// </param>
+    /// <exception cref="Exception">
+    /// The link's abort or the pool threw: the write's end has done its work all the same, and the holder, which
+    /// still holds the path, gives it up (<see cref="GiveUpFaultedSendPath"/>).
+    /// </exception>
     private void FinishWrite(in QueuedWrite write, Exception? failure)
     {
-        if (failure is not null)
+        try
         {
-            // Whatever the link threw, the write did not happen: the connection cannot go on.
-            TryBeginEnd(
-                new MqttClientCloseInfo(MqttClientCloseReason.WriteFailed, MqttReasonCode.Success, null, failure),
-                EndMode.Abort);
+            if (failure is not null)
+            {
+                // Whatever the link threw, the write did not happen: the connection cannot go on.
+                TryBeginEnd(
+                    new MqttClientCloseInfo(MqttClientCloseReason.WriteFailed, MqttReasonCode.Success, null, failure),
+                    EndMode.Abort);
+            }
+        }
+        finally
+        {
+            // Also when the abort threw: the write has ended, and nobody else gives it back.
+            EndWrite(write, succeeded: failure is null);
+        }
+    }
+
+    /// <summary>
+    /// Gives the send path up after something threw inside it (the link's abort, the pool), for the holder that
+    /// caught it; the last resort, which costs nothing on the paths that do not throw. In this order: the path is
+    /// faulted, so every later write is refused; the connection ends with
+    /// <see cref="MqttClientCloseReason.WriteFailed"/> and what was thrown, unless another reason was recorded first,
+    /// which also ends the read loop's wait at the cap; the link is aborted, a second time if the first abort threw;
+    /// every write waiting is given back, each the way a dropped write is (<see cref="GiveBack"/>), which completes
+    /// the marker of <see cref="WhenWritesEndedAsync"/> and counts answers down; the path is given up in the hold that
+    /// finds the queue empty; and whoever waits for the DISCONNECT is told it was not written.
+    /// </summary>
+    /// <remarks>
+    /// It cannot throw: each call that could is guarded, and what it throws is swallowed, since the connection has
+    /// ended and there is no one to tell. The holder calls it only while it still holds the path, with no write of
+    /// its own outstanding: the one that threw has done its end's work (<see cref="FinishWrite"/>,
+    /// <see cref="EndWrite"/>) or, refused the registration of its continuation, is left to that continuation. A
+    /// buffer whose return threw is never returned again, since the pool may have taken it.
+    /// </remarks>
+    /// <param name="exception">
+    /// What was thrown.
+    /// </param>
+    private void GiveUpFaultedSendPath(Exception exception)
+    {
+        lock (_sendGate)
+        {
+            _faulted = true;
         }
 
-        EndWrite(write, succeeded: failure is null);
+        bool aborted = false;
+        try
+        {
+            aborted = TryBeginEnd(
+                new MqttClientCloseInfo(MqttClientCloseReason.WriteFailed, MqttReasonCode.Success, null, exception),
+                EndMode.Abort);
+        }
+#pragma warning disable RCS1075 // Swallowed on purpose: the link is aborted again just below.
+        catch (Exception)
+        {
+            // The end is recorded, and the read loop's wait ended, before the abort that threw.
+        }
+#pragma warning restore RCS1075
+
+        if (!aborted)
+        {
+            TryAbortLink();
+        }
+
+        while (true)
+        {
+            QueuedWrite write;
+            lock (_sendGate)
+            {
+                if (!_sendQueue.TryDequeue(out write))
+                {
+                    _writing = false;
+                    break;
+                }
+            }
+
+            try
+            {
+                GiveBack(write);
+            }
+#pragma warning disable RCS1075 // Swallowed on purpose: the write's end has told whoever waits for it.
+            catch (Exception)
+            {
+                // The pool threw: the buffer is left to the garbage collector, and the next write is given back.
+            }
+#pragma warning restore RCS1075
+        }
+
+        // No DISCONNECT is written from now on; one already written has been told so, and this changes nothing.
+        Volatile.Read(ref _disconnectWritten)?.TrySetResult(result: false);
+    }
+
+    /// <summary>
+    /// Aborts the link for <see cref="GiveUpFaultedSendPath"/>, swallowing what the abort throws: a link that cannot
+    /// even be aborted is left to the end of its read.
+    /// </summary>
+    private void TryAbortLink()
+    {
+        try
+        {
+            AbortLink();
+        }
+#pragma warning disable RCS1075 // Swallowed on purpose: nothing more can be done for the link.
+        catch (Exception)
+        {
+            // Nothing more can be done: the read loop finishes when the link's read ends.
+        }
+#pragma warning restore RCS1075
     }
 
     /// <summary>
@@ -528,7 +678,8 @@ public sealed partial class MqttWireClient
     /// The work of a write's end, whatever the outcome, outside the lock: records the time of the last send after a
     /// write that succeeded, clears a CONNECT's bytes, gives back a PUBLISH's queued bytes or the PINGREQ's flag, and
     /// returns the buffer to the client's pool, once; then tells whoever waits for a DISCONNECT whether it was
-    /// written. The marker of <see cref="WhenWritesEndedAsync"/> has no buffer: its end completes it.
+    /// written, or counts answers down. The marker of <see cref="WhenWritesEndedAsync"/> has no buffer: its end
+    /// completes it.
     /// </summary>
     /// <param name="write">
     /// The write that has ended, or was refused or dropped.
@@ -536,6 +687,10 @@ public sealed partial class MqttWireClient
     /// <param name="succeeded">
     /// Whether the link took it.
     /// </param>
+    /// <exception cref="Exception">
+    /// The pool threw: the DISCONNECT's waiter has been told and the answers counted down all the same, and the buffer
+    /// is never returned again.
+    /// </exception>
     private void EndWrite(in QueuedWrite write, bool succeeded)
     {
         if (write.Kind == SendKind.WritesEnded)
@@ -564,19 +719,25 @@ public sealed partial class MqttWireClient
                 break;
         }
 
-        // The write has ended, so the buffer is no longer in use (6.8).
-        if (write.Buffer is { } buffer)
+        try
         {
-            _pool.Return(buffer);
+            // The write has ended, so the buffer is no longer in use (6.8).
+            if (write.Buffer is { } buffer)
+            {
+                _pool.Return(buffer);
+            }
         }
-
-        if (write.Kind == SendKind.Disconnect)
+        finally
         {
-            Volatile.Read(ref _disconnectWritten)?.TrySetResult(succeeded);
-        }
-        else if (write.Kind == SendKind.Answers)
-        {
-            CountDownAnswers(write.Answers);
+            // Also when the pool threw, so that nobody is left waiting: whoever caught it gives the path up.
+            if (write.Kind == SendKind.Disconnect)
+            {
+                Volatile.Read(ref _disconnectWritten)?.TrySetResult(succeeded);
+            }
+            else if (write.Kind == SendKind.Answers)
+            {
+                CountDownAnswers(write.Answers);
+            }
         }
     }
 

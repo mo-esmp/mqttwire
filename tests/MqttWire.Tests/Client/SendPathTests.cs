@@ -293,6 +293,164 @@ public sealed class SendPathTests
     }
 
     /// <summary>
+    /// Proves a pool whose return throws once, at the end of a write that carries the send path on, gives the path up
+    /// instead of leaving it held: the connection ends with <see cref="MqttClientCloseReason.WriteFailed"/> and what
+    /// was thrown, the writes waiting are dropped unwritten, the dispose completes, and every buffer but the one whose
+    /// return threw comes back exactly once.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task CompletePendingWrite_PoolReturnThrowsWithWritesWaiting_EndsWithWriteFailedAndDisposeCompletes()
+    {
+        // Arrange
+        CountingPool pool = new();
+        ClientHarness harness = await ConnectAsync(pool);
+        MemoryLink link = harness.Link;
+        link.TakeWritten();
+        link.PendWrites();
+        for (int i = 0; i < 3; i++)
+        {
+            _ = harness.Client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce);
+        }
+
+        InvalidOperationException refused = new("return refused");
+        int armed = 1;
+        pool.Returning = _ =>
+        {
+            if (Interlocked.Exchange(ref armed, 0) == 1)
+            {
+                throw refused;
+            }
+        };
+
+        // Act
+        link.CompletePendingWrite();
+        await harness.Client.DisposeAsync().AsTask().Within("the dispose");
+
+        // Assert
+        harness.Closed.ShouldBe(
+            [new MqttClientCloseInfo(MqttClientCloseReason.WriteFailed, MqttReasonCode.Success, null, refused)]);
+        link.TakeWritten().ShouldBe(ClientPackets.PublishQoS0);
+        link.IsAborted.ShouldBeTrue();
+        link.OverlappingWrites.ShouldBe(0);
+
+        // The buffer whose return threw is never returned again: a second return could hand it out twice.
+        pool.Outstanding.ShouldBe(1);
+        pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves a link whose abort throws once, as the failure of a write that carries the send path on aborts it,
+    /// leaves no write behind: the connection ends with <see cref="MqttClientCloseReason.WriteFailed"/> and the
+    /// write's failure, the failed write and the writes waiting give their buffers back exactly once, the link is
+    /// aborted all the same, and the dispose completes.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task CompletePendingWrite_AbortThrowsAfterFailedWrite_EndsWithWriteFailedAndReturnsEveryBuffer()
+    {
+        // Arrange
+        CountingPool pool = new();
+        ClientHarness harness = await ConnectAsync(pool);
+        MemoryLink link = harness.Link;
+        link.TakeWritten();
+        link.PendWrites();
+        for (int i = 0; i < 3; i++)
+        {
+            _ = harness.Client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce);
+        }
+
+        IOException error = new("write failed");
+        link.FailNextAbort(new InvalidOperationException("abort refused"));
+
+        // Act
+        link.CompletePendingWrite(error);
+        await harness.Client.DisposeAsync().AsTask().Within("the dispose");
+
+        // Assert
+        harness.Closed.ShouldBe(
+            [new MqttClientCloseInfo(MqttClientCloseReason.WriteFailed, MqttReasonCode.Success, null, error)]);
+        link.TakeWritten().ShouldBeEmpty();
+        link.IsAborted.ShouldBeTrue();
+        pool.Outstanding.ShouldBe(0);
+        pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Proves a write whose link refused the registration of its continuation, and whose end then meets a pool that
+    /// throws, throws nothing into the thread that ends it: the connection stays ended as the refusal ended it.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task CompleteRefusedWrite_PoolReturnThrows_ThrowsNothing()
+    {
+        // Arrange
+        CountingPool pool = new();
+        ClientHarness harness = await ConnectAsync(pool);
+        harness.Link.RefuseWriteRegistration();
+        _ = harness.Client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce);
+        pool.Returning = static _ => throw new InvalidOperationException("return refused");
+
+        // Act
+        bool ended = false;
+        Exception? thrown = Record.Exception(() => ended = harness.Link.CompleteRefusedWrite());
+
+        // Assert
+        thrown.ShouldBeNull();
+        ended.ShouldBeTrue();
+        harness.Closed.Select(static info => info.Reason).ShouldBe([MqttClientCloseReason.WriteFailed]);
+        harness.Link.IsAborted.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// Proves an end the read loop records itself, for a PUBLISH with a Topic Alias, while writes wait behind a held
+    /// one, writes once that write ends only the DISCONNECT 0x94 after it: the waiting publishes are dropped, the link
+    /// is closed with 1000 after the DISCONNECT, and every buffer comes back exactly once.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task ReadLoop_ProtocolErrorWithWritesWaiting_WritesHeldWriteThenOnlyDisconnect()
+    {
+        // Arrange
+        CountingPool pool = new();
+        ClientHarness harness = await ConnectAsync(pool);
+        MemoryLink link = harness.Link;
+        link.TakeWritten();
+        link.HoldWrites();
+        int writesBefore = link.WriteCount;
+        for (int i = 0; i < 3; i++)
+        {
+            _ = harness.Client.PublishAsync("a/b", new[] { (byte)('1' + i) }, MqttQoS.AtMostOnce);
+        }
+
+        // Act
+        link.Deliver(ClientPackets.PublishWithTopicAlias);
+        link.CompleteHeldWrites();
+
+        // The held write's continuation may run on the thread pool: the peer ends the link once the DISCONNECT is in.
+        await link.WhenWrittenAsync(writesBefore + 2);
+        link.EndFromPeer();
+        await harness.Client.DisposeAsync().AsTask().Within("the dispose");
+
+        // Assert
+        link.TakeWritten().ShouldBe([.. PublishOf((byte)'1'), .. ClientPackets.DisconnectTopicAliasInvalid]);
+        link.ClosedWith.ShouldBe(WebSocketCloseStatus.NormalClosure);
+        harness.Closed.ShouldBe(
+            [new MqttClientCloseInfo(MqttClientCloseReason.ProtocolError, MqttReasonCode.TopicAliasInvalid, null, null)]);
+        link.OverlappingWrites.ShouldBe(0);
+        pool.Outstanding.ShouldBe(0);
+        pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves a PINGREQ queued behind a pending write and dropped by the end of the connection is never written, and
     /// its buffer goes back exactly once, when the write ahead of it ends.
     /// </summary>

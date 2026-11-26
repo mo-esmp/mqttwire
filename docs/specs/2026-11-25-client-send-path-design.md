@@ -1,6 +1,6 @@
 # The client's send path: nobody waits for the send lock
 
-A change to the inside of `MqttWireClient`, for issue #13. It amends section 6.9 of
+A change to the inside of `MqttWireClient`, for issue #13. It amends sections 6.5 and 6.9 of
 [the design](2026-11-19-mqttwire-design.md), and the rule for writing answers in
 [the client writes its answers when it runs out of input](2026-11-24-client-acknowledgement-batching-design.md)
 (its section 5, "Writing"). Both stay the authority for everything else.
@@ -170,6 +170,29 @@ object stays armed for that write's completion, if it ever comes, and returns th
 (Amended on 2026-11-26, after review of the first build: the path is faulted and the link always
 aborted, so that no DISCONNECT reaches a link whose write may still be in progress.)
 
+### When something throws inside the send path
+
+The send path calls code it does not control: the link's abort, when a failed write ends the
+connection, and the pool, when a write's buffer goes back. Should either throw, the exception
+must not leave the path held: every later write would queue for ever, and the DISCONNECT and
+`DisposeAsync` would wait for a write that never ends. Nor may it reach a thread that is nobody's
+call, a write's completion, the thread pool or the keep-alive timer, where it would end the
+process, or a caller's `PublishAsync`, which does not fail this way.
+
+So each place that carries the path on (a caller that took it, a write's completion, the work
+item) catches what it throws and gives the path up, as the server does: the path is faulted, the
+connection ends with `WriteFailed` and the exception, unless another reason was recorded first,
+the link is aborted (again, if the first abort threw), every waiting write is given back as a
+dropped one is, and the flag is cleared in the hold that finds the queue empty. A write's end
+tells whoever waits for it, the DISCONNECT's completion and the count of waiting answers, even
+when the pool throws, so the guard leaves no one waiting. Giving the path up is safe there:
+everything that can throw runs after the current write has done its end's work, or was left to
+its own completion after a refused registration, and before the next write starts. A buffer whose
+return threw is never returned again. The completion of a write whose registration was refused
+does not hold the path, so it swallows what its end throws and changes nothing else. A
+`try`/`catch` costs nothing on the paths that do not throw. (Added on 2026-11-26, after the final
+review of the branch.)
+
 ### Writes made on someone else's thread
 
 A holder writes at most **sixteen packets inline**, its own included, while the writes complete
@@ -268,6 +291,10 @@ These happen once in a client's life and may allocate.
 
 ## 6. What changes in the design
 
+Section 6.5 of the design, in the same pull request: the sentence on the client's writes, which
+said they allocate when the send lock is contended or a write completes asynchronously, now says
+they allocate nothing in steady state in either case, through the one object kept for a write.
+
 Section 6.9 of the design, in the same pull request:
 
 - The bullet on answers: they are handed to the send path, and the read loop does not wait for
@@ -359,6 +386,8 @@ holds a write open and releases it on a signal.
 - A link that refuses the registration of a continuation: the connection ends, and the write's
   buffer is returned only when that write ends.
 - A PINGREQ waiting behind a held write: its deadline starts when its write starts.
+- The link's abort or the pool throws inside the send path: the connection ends with
+  `WriteFailed`, the waiting writes are given back, and `DisposeAsync` completes.
 
 **The cap**
 
@@ -369,6 +398,7 @@ holds a write open and releases it on a signal.
   pool has every buffer back exactly once.
 - A server within its window (1,024 QoS 1 messages unanswered behind a held write) never makes
   the read loop wait.
+- Exactly 4,096 answers waiting do not make the read loop wait; one more batch does.
 
 Existing tests that name the send lock are changed to the send path, not deleted.
 
