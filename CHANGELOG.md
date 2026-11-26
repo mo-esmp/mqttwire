@@ -6,6 +6,8 @@ the public API may change between previews, and such a change is listed here as 
 
 ## Unreleased
 
+## 0.1.0-preview.2 (2026-11-26)
+
 ### MqttWire
 
 - **The client writes the acknowledgements it owes that wait together in one WebSocket
