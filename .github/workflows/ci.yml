@@ -21,6 +21,11 @@ jobs:
           dotnet-version: 10.0.x
       - run: dotnet restore
       - run: dotnet build --no-restore -c Release
+      # DIAGNOSTIC ONLY, not for merge.
+      - run: sysctl net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.core.rmem_default net.core.wmem_default; uname -r
+      - run: dotnet test tests/MqttWire.Interop.Tests --no-build -c Release --filter "FullyQualifiedName~DrainDiagnosticTests" --logger "console;verbosity=detailed" | grep -E "^ *DIAG|Passed!|Failed!" | sort -u
+        env:
+          DIAG_RUNS: 30
       - run: dotnet test --no-build -c Release --logger "trx;LogFileName=test-results.trx"
       # Packs both packages, which also checks that MqttWire.Server depends on exactly its own version of MqttWire.
       - run: dotnet pack src/MqttWire --no-build -c Release -o artifacts/packages
