@@ -227,7 +227,7 @@ public sealed partial class MqttWireClient
             if (!_writing)
             {
                 // Nobody holds the path, so every write handed over so far has ended: the shared marker, completed
-                // already, refuses what comes later as well as one of this client's own would, and costs nothing.
+                // already, refuses what comes later as well as one of this client's own would, and allocates nothing.
                 _writesEnded = s_writesEndedAtOnce;
                 return s_writesEndedAtOnce.Task;
             }
@@ -248,9 +248,10 @@ public sealed partial class MqttWireClient
     /// read loop's wait is created (<see cref="_answerRoom"/>). Answers that would queue right behind an answers
     /// write that has not started are appended to it instead, while its buffer has room
     /// (<see cref="SendQueue.TryAppendAnswers"/>), and their own buffer goes back to the pool outside the lock. A
-    /// refused write is given back outside the lock (<see cref="GiveBack"/>). Should something throw while this
-    /// caller holds the path, the path is given up (<see cref="GiveUpFaultedSendPath"/>) and nothing is thrown at the
-    /// caller.
+    /// refused write is given back outside the lock, and what the pool throws there is swallowed
+    /// (<see cref="TryGiveBack"/>): this caller does not hold the path, and the end that refused the write has begun
+    /// already. Should something throw while this caller holds the path, the path is given up
+    /// (<see cref="GiveUpFaultedSendPath"/>) and nothing is thrown at the caller.
     /// </summary>
     /// <param name="write">
     /// The write handed over; its buffer belongs to the send path from now on.
@@ -264,7 +265,8 @@ public sealed partial class MqttWireClient
         switch (DecideHandOver(write, out TaskCompletionSource? room))
         {
             case HandOverStep.Refused:
-                GiveBack(write);
+                // Not GiveBack: a pool that throws must not reach a caller's PublishAsync or the keep-alive timer.
+                TryGiveBack(write);
                 return null;
             case HandOverStep.Queued:
                 return room;
@@ -648,11 +650,11 @@ public sealed partial class MqttWireClient
 
     /// <summary>
     /// Gives the send path up after something threw inside it (the link's abort, the pool), for the holder that
-    /// caught it; the last resort, which costs nothing on the paths that do not throw. In this order: the path is
+    /// caught it; the last resort, which allocates nothing on the paths that do not throw. In this order: the path is
     /// faulted, so every later write is refused; the connection ends with
     /// <see cref="MqttClientCloseReason.WriteFailed"/> and what was thrown, unless another reason was recorded first,
     /// which also ends the read loop's wait at the cap; the link is aborted, a second time if the first abort threw;
-    /// every write waiting is given back, each the way a dropped write is (<see cref="GiveBack"/>), which completes
+    /// every write waiting is given back, each the way a dropped write is (<see cref="TryGiveBack"/>), which completes
     /// the marker of <see cref="WhenWritesEndedAsync"/> and counts answers down; the path is given up in the hold that
     /// finds the queue empty; and whoever waits for the DISCONNECT is told it was not written.
     /// </summary>
@@ -704,16 +706,7 @@ public sealed partial class MqttWireClient
                 }
             }
 
-            try
-            {
-                GiveBack(write);
-            }
-#pragma warning disable RCS1075 // Swallowed on purpose: the write's end has told whoever waits for it.
-            catch (Exception)
-            {
-                // The pool threw: the buffer is left to the garbage collector, and the next write is given back.
-            }
-#pragma warning restore RCS1075
+            TryGiveBack(write);
         }
 
         // No DISCONNECT is written from now on; one already written has been told so, and this changes nothing.
@@ -747,6 +740,30 @@ public sealed partial class MqttWireClient
     /// The write.
     /// </param>
     private void GiveBack(in QueuedWrite write) => EndWrite(write, succeeded: false);
+
+    /// <summary>
+    /// Gives back a write that is not written (<see cref="GiveBack"/>) for a caller that has no one to tell when the
+    /// pool throws: the caller of <see cref="HandOver"/>, whose write was refused and who does not hold the path, and
+    /// <see cref="GiveUpFaultedSendPath"/>. What the pool throws is swallowed; the write's end has told whoever waits
+    /// for it all the same (<see cref="EndWrite"/>), and its buffer, which the pool may have taken, is left to the
+    /// garbage collector and never returned again.
+    /// </summary>
+    /// <param name="write">
+    /// The write.
+    /// </param>
+    private void TryGiveBack(in QueuedWrite write)
+    {
+        try
+        {
+            GiveBack(write);
+        }
+#pragma warning disable RCS1075 // Swallowed on purpose: the write's end has told whoever waits for it.
+        catch (Exception)
+        {
+            // The pool threw: the buffer is left to the garbage collector.
+        }
+#pragma warning restore RCS1075
+    }
 
     /// <summary>
     /// The work of a write's end, whatever the outcome, outside the lock: records the time of the last send after a

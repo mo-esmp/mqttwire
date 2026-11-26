@@ -196,8 +196,13 @@ everything that can throw runs after the current write has done its end's work, 
 its own completion after a refused registration, and before the next write starts. A buffer whose
 return threw is never returned again. The completion of a write whose registration was refused
 does not hold the path, so it swallows what its end throws and changes nothing else. A
-`try`/`catch` costs nothing on the paths that do not throw. (Added on 2026-11-26, after the final
+`try`/`catch` allocates nothing on the paths that do not throw. (Added on 2026-11-26, after the final
 review of the branch.)
+
+The same holds for a write refused when it is handed over, because the end had begun or the path
+was faulted: its caller does not hold the path, and the end that refused it has begun already, so
+the caller gives it back and swallows what the pool throws, and a `PublishAsync` racing the end
+or a keep-alive tick sees nothing. (Added on 2026-11-26, after the branch was merged.)
 
 ### Writes made on someone else's thread
 
