@@ -29,14 +29,17 @@ they ask not to be named.
 MqttWire is a connection server, not a broker. It handles the MQTT 5 protocol for each
 connection and leaves every decision about trust to the host:
 
-- **The host authenticates and authorizes.** Every connection passes through
+- **The host authenticates and authorizes.** MqttWire first refuses on its own what MQTT 5
+  forbids or what it does not implement, such as a malformed packet, an invalid topic filter or
+  a topic alias; the host never sees those. Every CONNECT that passes those checks reaches
   `IMqttWireHandler.OnConnectAsync`, which sees the user name, the password, the user properties
-  and the `HttpContext` of the WebSocket request. Every subscription and every publish passes
-  through the handler before anything happens. The result types fail closed: `default` is a
-  refusal with `0x87` (not authorized), and a handler method that throws closes its connection
-  with `0x83`.
-- **Malformed input is never an exception in the host.** A packet that does not parse is
-  answered with a reason code and the end of the connection.
+  and the `HttpContext` of the WebSocket request, and no connection is admitted without it. Every
+  subscription and every publish that passes them reaches the handler before anything happens.
+  The result types fail closed: `default` is a refusal with `0x87` (not authorized), and a
+  handler method that throws closes its connection with `0x83`.
+- **Malformed input is never an exception in the host.** It ends the connection: with a
+  reason code where MQTT allows one, and otherwise by closing the WebSocket, as with status 1002
+  when the first packet is not a CONNECT or its fixed header is malformed.
 - **Every connection is bounded in bytes and in time.** Packet sizes, the payload of a publish,
   the messages and bytes that may wait for a client, and the acknowledgements waiting to be
   written all have limits, and a client that exceeds one is disconnected. Fixed deadlines end a
