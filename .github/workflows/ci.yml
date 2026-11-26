@@ -28,7 +28,7 @@ jobs:
             dotnet test tests/MqttWire.Interop.Tests --no-build -c Release --logger "console;verbosity=detailed" 2>&1 | grep -E "DIAG|\[FAIL\]|Passed!|Failed!|TimeoutException" || true
           done
         env:
-          DIAG_RUNS: 3
+          DIAG_RUNS: 6
       - run: dotnet test --no-build -c Release --logger "trx;LogFileName=test-results.trx"
       # Packs both packages, which also checks that MqttWire.Server depends on exactly its own version of MqttWire.
       - run: dotnet pack src/MqttWire --no-build -c Release -o artifacts/packages

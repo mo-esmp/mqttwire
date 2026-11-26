@@ -31,6 +31,7 @@ public sealed class DrainDiagnosticTests(ITestOutputHelper output)
         await using ServerHost host = await ServerHost.StartAsync(options => options.MaxOutgoingBytes = 64 << 20);
         await using RawWebSocket client = await host.ConnectRawAsync(receiveBufferSize: 1024);
         host.Server.TryGetConnection("c1", out MqttWireConnection? connection).ShouldBeTrue();
+        Dictionary<string, long> netBefore = ReadTcpExt();
         byte[] payload = new byte[60_000];
         MqttTopic topic = MqttTopic.Create("a/b");
         for (int i = 0; i < 200; i++)
@@ -52,7 +53,6 @@ public sealed class DrainDiagnosticTests(ITestOutputHelper output)
             while (true)
             {
                 receive = client.ReceiveAsync();
-                Dictionary<string, long> netBefore = ReadTcpExt();
                 int waited = 0;
                 while (await Task.WhenAny(receive, Task.Delay(TimeSpan.FromSeconds(2))) != receive)
                 {
@@ -67,7 +67,7 @@ public sealed class DrainDiagnosticTests(ITestOutputHelper output)
                     if (stalled)
                     {
                         Emit($"DIAG ss at={watch.ElapsedMilliseconds}ms available={Available(client)} state=[{State(connection!)}]\n" + Ss(host.WebSocketUri.Port));
-                        Emit("DIAG tcpext since receive: " + Delta(netBefore, ReadTcpExt()));
+                        Emit("DIAG tcpext since the sends: " + Delta(netBefore, ReadTcpExt()));
                     }
 
                     if (waited >= 70)
