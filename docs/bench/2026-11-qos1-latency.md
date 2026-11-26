@@ -173,7 +173,7 @@ The round trips are the only scenarios close enough to judge against noise: the 
 | Blocking burst      |       63.3 |     16.5 |  0.26 (0.18–0.27) | 2190.8, 2192.2, 2187.9 | 1991.6, 1989.0, 1988.0 |
 | Awaiting burst      |       47.6 |     15.4 |  0.32 (0.30–0.37) | 2193.2, 2190.7, 2191.8 | 1985.0, 1981.9, 1978.3 |
 
-The awaiting round trip allocates 5 to 6 B less than before #12, so all of the roughly 230 B came back. The design expected "near 2,141–2,187 B": those figures came from the scratch probe of #12 (20 rounds of 2,000 operations, with counters), and the absolute bytes of a process-wide count depend on what else the process runs. The counting probe below, with two contestants instead of three, measured the same client at 2,261 to 2,262 B, 40 B below this probe. Only differences within one probe compare, and within this one the bytes are those of 9aea873. Nothing was left to find, so no allocation trace was taken.
+The awaiting round trip allocates 5 to 6 B less than before #12 in the same probe, so the roughly 230 B that #12 added are gone. The absolute bytes are not those the design expected. Design section 11 put the bytes of before #12 at 2,141 to 2,187 B, taken with the scratch probe of #12 (20 rounds of 2,000 operations, with counters). After allocates 2,301 B here, 114 to 160 B above that range. Part of the gap is the process: the counting probe below, which runs two contestants instead of three, measured the same client at 2,261 to 2,262 B, 40 B below this probe. The remaining 75 to 120 B between the design's figures and either probe of this report is unexplained. It was not re-measured: the scratch probe of #12 was not rerun, and no allocation trace was taken. The conclusion rests on the comparison within one probe, where after and 9aea873 allocate the same bytes.
 
 ### BenchmarkDotNet, before and after (two pairs)
 
@@ -196,7 +196,7 @@ MQTTnet's rows did not change beyond their own noise (for example the awaiting r
 
 ### The extra hold of the lock
 
-Each answers write now takes the send path's lock once more when it ends, to count the waiting answers down: 1.0 per round trip and 0.27 to 0.28 per burst message in the counting probe. No instrument shows a cost from it. `ReceiveQoS1`, which writes one answer per operation to an in-memory link where a write costs almost nothing, is 8.3 and 8.0 ns faster than before; the round trips and bursts are faster or within noise.
+Each answers write now takes the send path's lock once more when it ends, to count the waiting answers down. The only direct data are the counts in the counting probe: 1.0 holds per round trip and 0.27 to 0.28 per burst message. No cost is visible in the net result, but the count-down cannot be measured on its own: no instrument isolates it. `ReceiveQoS1`, which writes one answer per operation to an in-memory link, is 8.3 and 8.0 ns faster than before, and the round trips and bursts are faster or within noise. Those are the net effect of the whole branch, which includes the count-down.
 
 ### Contended sends (scratch build, 2 runs)
 
