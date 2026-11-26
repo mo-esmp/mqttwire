@@ -1,0 +1,37 @@
+version: 2
+updates:
+  # The packages of the tests, benchmarks, analyzers and sample, all in Directory.Packages.props; MqttWire and
+  # MqttWire.Server themselves depend on no package. An analyzer update can bring new rules, and warnings fail the
+  # build, so its pull request may need code changes before it is green.
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      microsoft:
+        patterns: ["Microsoft.*"]
+      xunit:
+        patterns: ["xunit*"]
+      analyzers:
+        patterns: ["Meziantou.*", "SonarAnalyzer.*", "Roslynator.*"]
+      # The independent cross-check of the interop tests: pinned on purpose, so raising it is the owner's decision on
+      # its pull request (design 6.15).
+      mqttnet:
+        patterns: ["MQTTnet*"]
+    # The repository builds for .NET 10 only; moving to a new major of these is moving to a new .NET.
+    ignore:
+      - dependency-name: Microsoft.AspNetCore.*
+        update-types: ["version-update:semver-major"]
+      - dependency-name: Microsoft.Extensions.*
+        update-types: ["version-update:semver-major"]
+
+  # MQTT.js, which the interop in tests/interop-js runs against: pinned on purpose, like MQTTnet.
+  - package-ecosystem: npm
+    directory: /tests/interop-js
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
