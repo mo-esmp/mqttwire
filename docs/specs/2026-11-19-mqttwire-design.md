@@ -463,9 +463,10 @@ write a buffer, close with a status, abort. One implementation wraps a `WebSocke
 operations return `ValueTask`, so an operation that completes at once allocates nothing, and on
 the server it must not add a noticeable object per connection. The wait, the read and the client's
 read loop use the pooling method builder, so an idle connection waking for data allocates
-nothing in steady state either. The client's writes are allocation-free when the send lock is
-uncontended and the write completes synchronously; a write that completes asynchronously
-(always in the browser) allocates its state machine.
+nothing in steady state either. The client's writes allocate nothing in steady state, also when
+a write waits behind another or completes asynchronously (always in the browser): its send path
+keeps one object that waits for a write
+([the client's send path](2026-11-25-client-send-path-design.md)).
 
 This keeps own WebSocket framing possible later, and it lets tests drive a connection over an
 in-memory link, byte by byte, and decide exactly when a write completes. It stays internal: a
@@ -1135,10 +1136,14 @@ The inside of `MqttWireClient`.
   after the one whose answer waits longest. They go out in the order their packets arrived.
   When the connection ends, answers still waiting are not sent. See
   [the client writes its answers when it runs out of input](2026-11-24-client-acknowledgement-batching-design.md).
+  The answers are handed to the send path, and the read loop does not wait for their write:
+  it goes on handling packets while a write is in progress. Only when more than 4,096 answers
+  wait in the send path does it wait, before the next packet, until they are written or the
+  connection ends ([the client's send path](2026-11-25-client-send-path-design.md)).
 - **Keep-alive:** one timer per client, ticking every half interval. On a tick the client sends
   a PINGREQ if nothing was sent for half the interval, so the time between packets never
   exceeds the keep-alive, as MQTT requires. One PINGREQ waits at a time: no second is queued
-  while one waits for the send lock or for its PINGRESP. It ends the connection if a PINGREQ has
+  while one waits to be written or for its PINGRESP. It ends the connection if a PINGREQ has
   waited a full interval for its PINGRESP, counted from when its write began, so a write stalled
   ahead of it is not taken for a silent server; or if the oldest record is older than twice the
   interval
@@ -1159,8 +1164,16 @@ The inside of `MqttWireClient`.
   the publishes in the order they were made; a publish made from `OnMessage` may go out ahead of
   answers that still wait, and an acknowledgement never stands behind something that is waiting
   for the server.
-- It must not block a thread (Blazor WebAssembly). A plain send lock or queue is fine: a client
-  has one connection and does not need the server's "only while there is work" machinery.
+- It must not block a thread (Blazor WebAssembly). Every packet goes through one **send path**,
+  one write at a time, in the order the packets were handed to it. Whoever hands a packet over
+  and finds the path free writes it on its own thread; everyone else adds it to a queue and
+  returns, without waiting and without allocating. Whoever holds the path takes the next waiting
+  write when its own has ended, at most sixteen on a caller's thread before the thread pool
+  takes over; a write that does not complete at once is carried on by its completion, through
+  one kept object. No sender waits for its turn. The read loop waits only when more than 4,096
+  answers wait to be written, above, and only until the count is back at or below 4,096; the
+  end of a connection waits for the DISCONNECT's write and for every write handed over before
+  it to end. See [the client's send path](2026-11-25-client-send-path-design.md).
 
 ### 6.10 Shared topics through the host
 

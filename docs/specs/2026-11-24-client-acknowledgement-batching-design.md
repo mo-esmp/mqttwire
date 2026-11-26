@@ -119,6 +119,8 @@ things the loop asks of the link: the wait for data, and the read.
 - **Writing.** What waits is written as one WebSocket message through `SendAsync`, which takes
   the send lock and returns the buffer to the pool, as it does for every packet. The read loop
   waits for that write, as it waits for a single answer today.
+  *Since #13 the answers are handed to the send path and the read loop no longer waits for their
+  write, but past 4,096 waiting answers: see [the client's send path](2026-11-25-client-send-path-design.md).*
 - **When it is written.** In two places:
   1. **The loop would wait.** The loop starts the link's wait for data, and later its read. If
      either does not complete at once and answers wait, they are written before the loop waits

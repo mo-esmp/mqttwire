@@ -395,7 +395,7 @@ public sealed class KeepAliveTests
     }
 
     /// <summary>
-    /// Proves a write stalled in the send lock does not end the connection as
+    /// Proves a write stalled in the send path does not end the connection as
     /// <see cref="MqttClientCloseReason.KeepAliveTimedOut"/>: with a 10 s keep-alive and a publish held, three
     /// half-intervals queue one PINGREQ and no second, the client stays connected, and once the writes end that one
     /// PINGREQ follows the publish.

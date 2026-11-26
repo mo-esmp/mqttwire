@@ -18,6 +18,11 @@ the public API may change between previews, and such a change is listed here as 
   than failing and aborting the link during the close handshake.
 - **Receiving at QoS 1 and 2 takes fewer writes:** a run of incoming messages is acknowledged in
   one write instead of one write each.
+- **A slow write no longer holds up the messages that arrive behind it** (#13): the client hands
+  every packet to a send path that queues it behind the write in progress, so a send that waits
+  for another write allocates nothing, and the client goes on reading. A server that floods it
+  past 4,096 acknowledgements waiting to be written sees it stop reading until enough of them are
+  written.
 
 ## 0.1.0-preview.1 (2026-11-23)
 

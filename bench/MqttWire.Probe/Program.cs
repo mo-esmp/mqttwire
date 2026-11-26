@@ -12,7 +12,8 @@ namespace MqttWire.Probe;
 /// that blocks on every operation and by one that awaits it. Each scenario runs <see cref="Ops"/> operations per
 /// client per round, for <see cref="Rounds"/> rounds after two warm-up passes, and the table shows the median of the
 /// rounds in microseconds per operation (per message for a burst) and the ratios of <c>after</c> to the others.
-/// Every publish is checked, and a lost connection fails the run instead of hanging it.
+/// Every publish is checked, and a lost connection fails the run instead of hanging it. A second table shows the
+/// median bytes allocated per operation, with the same rows, columns and ratios.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -21,7 +22,7 @@ namespace MqttWire.Probe;
 /// the probe with the path to it, from the repository root (PowerShell or a POSIX shell):
 /// </para>
 /// <code>
-/// git worktree add ../mqttwire-before 9aea873
+/// git worktree add ../mqttwire-before &lt;commit&gt;
 /// dotnet build -c Release ../mqttwire-before/src/MqttWire/MqttWire.csproj -p:AssemblyName=MqttWire.Before -o ../mqttwire-before-bin
 /// dotnet build -c Release bench/MqttWire.Probe/MqttWire.Probe.csproj -p:BeforeAssembly=../../../mqttwire-before-bin/MqttWire.Before.dll
 /// dotnet bench/MqttWire.Probe/bin/Release/net10.0/MqttWire.Probe.dll
@@ -32,7 +33,15 @@ namespace MqttWire.Probe;
 /// probe built with it references the older assembly under the extern alias <c>before</c> and compiles the
 /// <c>before</c> contestant (the <c>BEFORE</c> constant). Building the probe again
 /// without the property drops <c>before</c> again. Commit 9aea873 is the client before the answer batching, the
-/// "before" of <c>docs/bench/2026-11-qos1-latency.md</c>.
+/// "before" of <c>docs/bench/2026-11-qos1-latency.md</c>; commit de7af74 is the "before" of the measurements of the
+/// send lock (issue 13).
+/// </para>
+/// <para>
+/// The bytes per operation are counted with <see cref="GC.GetTotalAllocatedBytes(bool)"/> over the timed
+/// operations, so the count is process-wide: the broker, the WebSocket transport and every other thread are in it.
+/// A difference between two columns is therefore an end-to-end figure, not the clients' own: the broker's and the
+/// transport's work changes with how a client writes, for example with how many WebSocket messages a burst takes.
+/// What a client allocates by itself is shown by its allocation tests, not here.
 /// </para>
 /// </remarks>
 internal static class Program
@@ -84,7 +93,7 @@ internal static class Program
 #endif
             contestants.Add(await WireContestant.ConnectAsync(broker.WebSocketUri, payload, s_keepAlive).ConfigureAwait(false));
             contestants.Add(await NetContestant.ConnectAsync(broker.WebSocketUri, payload, s_keepAlive).ConfigureAwait(false));
-            List<double>[,] samples = await MeasureAsync(contestants).ConfigureAwait(false);
+            List<ProbeSample>[,] samples = await MeasureAsync(contestants).ConfigureAwait(false);
             Print(contestants, samples);
         }
         finally
@@ -106,9 +115,9 @@ internal static class Program
     /// The clients.
     /// </param>
     /// <returns>
-    /// For each scenario and client, the microseconds per operation of each round.
+    /// For each scenario and client, the sample of each round.
     /// </returns>
-    private static async Task<List<double>[,]> MeasureAsync(List<IContestant> contestants)
+    private static async Task<List<ProbeSample>[,]> MeasureAsync(List<IContestant> contestants)
     {
         int count = contestants.Count;
         for (int pass = 0; pass < 2; pass++)
@@ -122,7 +131,7 @@ internal static class Program
             }
         }
 
-        List<double>[,] samples = new List<double>[s_scenarios.Length, count];
+        List<ProbeSample>[,] samples = new List<ProbeSample>[s_scenarios.Length, count];
         for (int scenario = 0; scenario < s_scenarios.Length; scenario++)
         {
             for (int client = 0; client < count; client++)
@@ -156,10 +165,11 @@ internal static class Program
     /// The client.
     /// </param>
     /// <returns>
-    /// The microseconds per operation; per message for a burst.
+    /// The microseconds and the bytes allocated per operation; per message for a burst.
     /// </returns>
-    private static async Task<double> RunAsync(int scenario, IContestant contestant)
+    private static async Task<ProbeSample> RunAsync(int scenario, IContestant contestant)
     {
+        long allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
         long start = Stopwatch.GetTimestamp();
         switch (scenario)
         {
@@ -195,22 +205,46 @@ internal static class Program
                 break;
         }
 
-        return Stopwatch.GetElapsedTime(start).TotalMicroseconds / Ops;
+        double microseconds = Stopwatch.GetElapsedTime(start).TotalMicroseconds / Ops;
+        long allocated = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
+        return new ProbeSample(microseconds, (double)allocated / Ops);
     }
 
     /// <summary>
-    /// Prints, for each scenario, the median of every client and the ratios of <c>after</c> to each other client.
+    /// Prints the table of the microseconds per operation and the table of the bytes allocated per operation.
     /// </summary>
     /// <param name="contestants">
     /// The clients, in the order of the columns.
     /// </param>
     /// <param name="samples">
-    /// For each scenario and client, the microseconds per operation of each round.
+    /// For each scenario and client, the sample of each round.
     /// </param>
-    private static void Print(List<IContestant> contestants, List<double>[,] samples)
+    private static void Print(List<IContestant> contestants, List<ProbeSample>[,] samples)
+    {
+        PrintTable("us per operation", contestants, samples, static sample => sample.Microseconds);
+        Console.WriteLine();
+        PrintTable("B/op", contestants, samples, static sample => sample.Bytes);
+    }
+
+    /// <summary>
+    /// Prints, for each scenario, the median of every client and the ratios of <c>after</c> to each other client.
+    /// </summary>
+    /// <param name="unit">
+    /// The unit named in the header.
+    /// </param>
+    /// <param name="contestants">
+    /// The clients, in the order of the columns.
+    /// </param>
+    /// <param name="samples">
+    /// For each scenario and client, the sample of each round.
+    /// </param>
+    /// <param name="selector">
+    /// Picks the value of the table from a sample.
+    /// </param>
+    private static void PrintTable(string unit, List<IContestant> contestants, List<ProbeSample>[,] samples, Func<ProbeSample, double> selector)
     {
         int after = contestants.FindIndex(contestant => contestant.Name == "after");
-        string header = $"scenario (us per operation, median of {Rounds} rounds)";
+        string header = $"scenario ({unit}, median of {Rounds} rounds)";
         foreach (IContestant contestant in contestants)
         {
             header += $" | {contestant.Name}";
@@ -228,17 +262,17 @@ internal static class Program
         for (int scenario = 0; scenario < s_scenarios.Length; scenario++)
         {
             string line = s_scenarios[scenario].PadRight(15);
-            double afterMedian = Median(samples[scenario, after]);
+            double afterMedian = Median(samples[scenario, after], selector);
             for (int client = 0; client < contestants.Count; client++)
             {
-                line += string.Create(CultureInfo.InvariantCulture, $" | {Median(samples[scenario, client]),8:F1}");
+                line += string.Create(CultureInfo.InvariantCulture, $" | {Median(samples[scenario, client], selector),8:F1}");
             }
 
             for (int client = 0; client < contestants.Count; client++)
             {
                 if (client != after)
                 {
-                    line += string.Create(CultureInfo.InvariantCulture, $" | {afterMedian / Median(samples[scenario, client]),5:F2}");
+                    line += string.Create(CultureInfo.InvariantCulture, $" | {afterMedian / Median(samples[scenario, client], selector),5:F2}");
                 }
             }
 
@@ -247,17 +281,25 @@ internal static class Program
     }
 
     /// <summary>
-    /// Computes the median of the samples, the mean of the middle two for an even count.
+    /// Computes the median of one value of the samples, the mean of the middle two for an even count.
     /// </summary>
     /// <param name="samples">
     /// The samples, which are not changed.
     /// </param>
+    /// <param name="selector">
+    /// Picks the value from a sample.
+    /// </param>
     /// <returns>
     /// The median.
     /// </returns>
-    private static double Median(List<double> samples)
+    private static double Median(List<ProbeSample> samples, Func<ProbeSample, double> selector)
     {
-        List<double> sorted = [.. samples];
+        List<double> sorted = [];
+        foreach (ProbeSample sample in samples)
+        {
+            sorted.Add(selector(sample));
+        }
+
         sorted.Sort();
         int middle = sorted.Count / 2;
         return sorted.Count % 2 == 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];

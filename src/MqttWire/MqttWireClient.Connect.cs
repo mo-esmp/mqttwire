@@ -136,7 +136,9 @@ public sealed partial class MqttWireClient
         {
             _ = ReadLoopAsync(link);
             byte[] connect = RentConnect(out int length);
-            await SendAsync(connect, length, SendKind.Connect).ConfigureAwait(false);
+
+            // Not awaited: a failed write ends the connection, and the read loop then fails the connect.
+            Send(connect, length, SendKind.Connect);
             return await result.Task.ConfigureAwait(false);
         }
         finally
@@ -178,7 +180,7 @@ public sealed partial class MqttWireClient
     /// The packet's length.
     /// </param>
     /// <returns>
-    /// The rented buffer, which the caller hands to <see cref="SendAsync"/>.
+    /// The rented buffer, which the caller hands to <see cref="Send"/>.
     /// </returns>
     private byte[] RentConnect(out int length)
     {
@@ -217,7 +219,16 @@ public sealed partial class MqttWireClient
             link = _link;
         }
 
-        link?.Abort();
+        try
+        {
+            link?.Abort();
+        }
+        finally
+        {
+            // No answer is owed before the CONNACK, so the read loop cannot wait at the cap; released all the same, as
+            // by every recorder of the end.
+            ReleaseAnswerRoom();
+        }
     }
 
     /// <summary>

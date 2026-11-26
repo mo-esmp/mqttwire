@@ -11,10 +11,12 @@ namespace MqttWire;
 /// </summary>
 /// <remarks>
 /// <para>
-/// One read loop, started when the link opens, is the only reader. Every packet is written through one send lock,
-/// in the order the writers took it. The end of the connection has one path: the first reason recorded wins; whoever
-/// records it sends the DISCONNECT that is due and closes the link, or aborts it; the read loop, once it has
-/// stopped, completes what is in flight, returns its buffer and calls <c>OnClosed</c> once.
+/// One read loop, started when the link opens, is the only reader. Every packet is written through one send path,
+/// one write at a time, in the order the packets were handed to it; a packet handed over while another is being
+/// written waits in a queue, and nobody waits for it, but for the read loop once more than 4,096 of its answers wait
+/// to be written. The end of the connection has one path: the first reason recorded wins; whoever records it sends
+/// the DISCONNECT that is due and closes the link, or aborts it; the read loop, once it has stopped, completes what is
+/// in flight, returns its buffer and calls <c>OnClosed</c> once.
 /// </para>
 /// <para>
 /// A close waits for the server to end the link, at most two seconds; then the link is aborted.
@@ -31,11 +33,6 @@ public sealed partial class MqttWireClient : IAsyncDisposable
     /// Guards the phase, the end's record and the close timer; never held across an await.
     /// </summary>
     private readonly Lock _gate = new();
-
-    /// <summary>
-    /// Lets one write at a time reach the link, in the order the writers asked; held across the write.
-    /// </summary>
-    private readonly SemaphoreSlim _sendLock = new(1, 1);
 
     /// <summary>
     /// The application's end-of-connection callback, or <see langword="null"/>.
@@ -162,8 +159,9 @@ public sealed partial class MqttWireClient : IAsyncDisposable
     private uint _serverMaximumPacketSize = uint.MaxValue;
 
     /// <summary>
-    /// The bytes of the PUBLISH packets queued for the send lock or being written. A publish adds its size under
-    /// <see cref="_gate"/> before its packet is rented; the send path takes it off when the write ends.
+    /// The bytes of the PUBLISH packets waiting in the send path or being written. A publish adds its size under
+    /// <see cref="_gate"/> before its packet is rented; the send path takes it off when the write ends, or when it
+    /// drops the packet.
     /// </summary>
     private long _pendingPublishBytes;
 
@@ -447,9 +445,10 @@ public sealed partial class MqttWireClient : IAsyncDisposable
     /// <c>OnClosed</c>, if due, has returned, and every write handed to the send path before then has ended, so
     /// every buffer those writes held is back in the pool. A write still in flight when the link was aborted is
     /// waited for; the abort makes it end. A <see cref="PublishAsync"/> or keep-alive tick racing the dispose can
-    /// rent a buffer after the dispose's turn on the send lock; that buffer comes back at once, because its send
-    /// finds the connection ended. It does not throw, unless finishing the connection failed through a bug in the
-    /// client.
+    /// rent a buffer after the dispose's wait was handed to the send path; that buffer comes back at once, because
+    /// the send path refuses it. A write whose link refused the registration of its continuation, a fault of the
+    /// link, is not waited for: it returns its buffer if the link ever ends it. It does not throw, unless finishing
+    /// the connection failed through a bug in the client.
     /// </returns>
     public async ValueTask DisposeAsync()
     {
@@ -485,6 +484,10 @@ public sealed partial class MqttWireClient : IAsyncDisposable
             connectReturned = _connectReturned;
         }
 
+        // The end is recorded, by this call or before it: a read loop waiting at the cap of waiting answers carries on
+        // and sees it.
+        ReleaseAnswerRoom();
+
         // Stops a link that is still opening; the connect then throws ObjectDisposedException.
         if (connectCanceledByDispose is not null)
         {
@@ -508,8 +511,8 @@ public sealed partial class MqttWireClient : IAsyncDisposable
 
     /// <summary>
     /// Waits until the connect has returned, the read loop has finished the connection, and every write handed to
-    /// the send path before then has ended and returned its buffer. A write handed over after this wait's turn on
-    /// the send lock finds the connection ended and returns its buffer at once.
+    /// the send path before then has ended and returned its buffer (<see cref="WhenWritesEndedAsync"/>). A write
+    /// handed over after this wait's marker is refused and returns its buffer at once.
     /// </summary>
     /// <param name="connectReturned">
     /// Completes when <see cref="ConnectAsync"/> has returned, or <see langword="null"/> when it was never called.
@@ -536,11 +539,10 @@ public sealed partial class MqttWireClient : IAsyncDisposable
         await ended.Task.ConfigureAwait(false);
 
         // A write still in flight, or queued behind one, owns its buffer until it has ended (6.8 rule 3), and the
-        // link may have been aborted under it. Each entered the send lock's queue before this wait, and the lock
-        // serves its waiters in order, so when this turn comes each has returned its buffer. The read loop aborted
-        // the link as it finished, so each write ends promptly; a later one finds the connection over and returns.
-        await _sendLock.WaitAsync().ConfigureAwait(false);
-        _sendLock.Release();
+        // link may have been aborted under it. Each was handed to the send path before the marker, which is taken
+        // in turn behind them, so when it completes each has returned its buffer. The read loop aborted the link as
+        // it finished, so each write ends promptly, and the queued ones are dropped; a later one is refused.
+        await WhenWritesEndedAsync().ConfigureAwait(false);
     }
 
     /// <summary>
