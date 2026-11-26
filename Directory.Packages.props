@@ -25,6 +25,6 @@
     <PackageVersion Include="Meziantou.Analyzer" Version="3.0.342" />
     <PackageVersion Include="SonarAnalyzer.CSharp" Version="10.37.0.15768" />
     <PackageVersion Include="Roslynator.Analyzers" Version="5.0.1" />
-    <PackageVersion Include="xunit.analyzers" Version="1.26.0" />
+    <PackageVersion Include="xunit.analyzers" Version="2.3.0" />
   </ItemGroup>
 </Project>
