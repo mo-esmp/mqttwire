@@ -17,8 +17,9 @@ namespace MqttWire;
 public sealed partial class MqttWireClient
 {
     /// <summary>
-    /// Guards <see cref="_writing"/>, <see cref="_sendQueue"/> and <see cref="_writesEnded"/>; never held across a
-    /// write, a completion or a return to the pool.
+    /// Guards <see cref="_writing"/>, <see cref="_sendQueue"/>, <see cref="_writesEnded"/>, <see cref="_faulted"/>,
+    /// <see cref="_waitingAnswers"/> and <see cref="_answerRoom"/>; never held across a write, a completion or a return
+    /// to the pool.
     /// </summary>
     private readonly Lock _sendGate = new();
 
@@ -66,6 +67,27 @@ public sealed partial class MqttWireClient
     private bool _faulted;
 
     /// <summary>
+    /// The read loop's answers handed to the send path whose write has not ended, whether they wait in the queue or
+    /// are being written (the client's send-path design, section 5, "How many answers may wait"); under
+    /// <see cref="_sendGate"/>. Counted up when the answers are handed over, refused ones included, and down when their
+    /// write ends or they are given back, so that every hand-over is counted down exactly once. An answers write whose
+    /// link refused the registration of its continuation stays counted until that write ends, which it may never do;
+    /// the end of the connection releases the read loop all the same.
+    /// </summary>
+    private int _waitingAnswers;
+
+    /// <summary>
+    /// What the read loop waits for when its hand-over took <see cref="_waitingAnswers"/> past
+    /// <see cref="ClientLimits.MaxWaitingAnswers"/>, or <see langword="null"/> while it does not wait; under
+    /// <see cref="_sendGate"/>. Created in the hold that took the count past the cap; taken, in a hold of the lock,
+    /// and completed outside it, by whoever brings the count back to the cap or below, and by whoever records the end
+    /// of the connection or meets it recorded (<see cref="ReleaseAnswerRoom"/>). Its continuations run asynchronously,
+    /// so the read loop never carries on inside the send path. It allocates, but only for a server that has broken
+    /// its window or floods the client with packets that each call for an answer.
+    /// </summary>
+    private TaskCompletionSource? _answerRoom;
+
+    /// <summary>
     /// Hands a packet to the send path and returns at once: written now on this thread when the path is free, added
     /// to the queue behind the writes in progress otherwise. Once the end has begun, anything but a DISCONNECT is
     /// refused, and once <see cref="WhenWritesEndedAsync"/> has handed its marker over, or the path is faulted
@@ -91,11 +113,13 @@ public sealed partial class MqttWireClient
     /// use of the queue and of <see cref="SendPathContinuation"/>, which the client keeps, and the growth of the queue.
     /// </remarks>
     private void Send(byte[] packet, int length, SendKind kind) =>
-        HandOver(new QueuedWrite(packet, length, kind, answers: 0));
+        _ = HandOver(new QueuedWrite(packet, length, kind, answers: 0));
 
     /// <summary>
-    /// Hands the read loop's answers to the send path, as <see cref="Send"/> does, and returns at once; the read loop
-    /// does not wait for their write. It never throws, but for a bug of the client.
+    /// Hands the read loop's answers to the send path, as <see cref="Send"/> does, and counts them among the answers
+    /// waiting to be written (<see cref="_waitingAnswers"/>), in the same hold of the lock. It returns at once; the
+    /// read loop does not wait for their write, unless this hand-over took the count past
+    /// <see cref="ClientLimits.MaxWaitingAnswers"/>. It never throws, but for a bug of the client.
     /// </summary>
     /// <param name="packet">
     /// The encoded answers in one rented buffer, which the send path owns from now on.
@@ -106,7 +130,13 @@ public sealed partial class MqttWireClient
     /// <param name="answers">
     /// The number of answers in the buffer.
     /// </param>
-    private void SendAnswers(byte[] packet, int length, int answers) =>
+    /// <returns>
+    /// <see langword="null"/> when the read loop goes on: the count is at or below the cap, or the answers were
+    /// refused, the end having begun. Otherwise <see cref="_answerRoom"/>, which completes once the count is back at
+    /// or below the cap, or the connection ends; it may have completed already, when the answers' write, made on
+    /// this thread, ended at once.
+    /// </returns>
+    private TaskCompletionSource? SendAnswers(byte[] packet, int length, int answers) =>
         HandOver(new QueuedWrite(packet, length, SendKind.Answers, answers));
 
     /// <summary>
@@ -124,9 +154,9 @@ public sealed partial class MqttWireClient
     /// it. A link whose own close has started takes it without sending it (<see cref="IMqttLink.WriteAsync"/>), so
     /// <see langword="true"/> does not promise that it was sent. <see langword="false"/> when it was not written,
     /// because <see cref="WhenWritesEndedAsync"/> had already handed its marker over or the link had refused the
-    /// registration of a write's continuation, this one's or an earlier one's, or when the write failed, which ended the connection with
-    /// <see cref="MqttClientCloseReason.WriteFailed"/> and aborted the link. It never fails, and its continuations
-    /// run asynchronously.
+    /// registration of a write's continuation, this one's or an earlier one's, or when the write failed, which ended
+    /// the connection with <see cref="MqttClientCloseReason.WriteFailed"/> and aborted the link. It never fails, and
+    /// its continuations run asynchronously.
     /// </returns>
     private Task<bool> SendDisconnectAsync(byte[] packet, int length)
     {
@@ -176,27 +206,46 @@ public sealed partial class MqttWireClient
     /// <summary>
     /// The one hold of the lock in which a write handed over is refused, added to the queue, or taken with the send
     /// path by this caller, who then writes it, and whatever waits behind it, on this thread
-    /// (<see cref="RunSendPath"/>). A refused write is given back outside the lock (<see cref="GiveBack"/>).
+    /// (<see cref="RunSendPath"/>). In the same hold, the answers of a <see cref="SendKind.Answers"/> write are counted
+    /// among those waiting (<see cref="_waitingAnswers"/>), refused ones too, since their give-back counts them down;
+    /// and when a write that is not refused takes the count past <see cref="ClientLimits.MaxWaitingAnswers"/>, the
+    /// read loop's wait is created (<see cref="_answerRoom"/>). A refused write is given back outside the lock
+    /// (<see cref="GiveBack"/>).
     /// </summary>
     /// <param name="write">
     /// The write handed over; its buffer belongs to the send path from now on.
     /// </param>
-    private void HandOver(in QueuedWrite write)
+    /// <returns>
+    /// <see cref="_answerRoom"/> when this write took the waiting answers past the cap; <see langword="null"/>
+    /// otherwise, and always for a write that is not answers.
+    /// </returns>
+    private TaskCompletionSource? HandOver(in QueuedWrite write)
     {
         bool refused = false;
+        TaskCompletionSource? room = null;
         lock (_sendGate)
         {
+            _waitingAnswers += write.Answers;
             if (_writesEnded is not null || _faulted || IsDropped(write.Kind))
             {
                 refused = true;
             }
-            else if (_writing)
-            {
-                _sendQueue.Enqueue(write);
-                return;
-            }
             else
             {
+                if (_waitingAnswers > ClientLimits.MaxWaitingAnswers)
+                {
+                    // Only the read loop hands answers over, so at most one wait exists; it is created here, where
+                    // the end, recorded before this hold, would have refused the write, and recorded after it, takes
+                    // it (ReleaseAnswerRoom).
+                    room = _answerRoom ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                }
+
+                if (_writing)
+                {
+                    _sendQueue.Enqueue(write);
+                    return room;
+                }
+
                 _writing = true;
             }
         }
@@ -204,10 +253,11 @@ public sealed partial class MqttWireClient
         if (refused)
         {
             GiveBack(write);
-            return;
+            return null;
         }
 
         RunSendPath(write, ClientLimits.InlineWrites);
+        return room;
     }
 
     /// <summary>
@@ -524,6 +574,53 @@ public sealed partial class MqttWireClient
         {
             Volatile.Read(ref _disconnectWritten)?.TrySetResult(succeeded);
         }
+        else if (write.Kind == SendKind.Answers)
+        {
+            CountDownAnswers(write.Answers);
+        }
+    }
+
+    /// <summary>
+    /// Takes answers whose write has ended, or which were given back, off the answers waiting
+    /// (<see cref="_waitingAnswers"/>); when that brings the count back to the cap or below while the read loop waits,
+    /// completes its wait, outside the lock.
+    /// </summary>
+    /// <param name="answers">
+    /// The number of answers in the write.
+    /// </param>
+    private void CountDownAnswers(int answers)
+    {
+        TaskCompletionSource? room = null;
+        lock (_sendGate)
+        {
+            _waitingAnswers -= answers;
+            if (_waitingAnswers <= ClientLimits.MaxWaitingAnswers)
+            {
+                room = _answerRoom;
+                _answerRoom = null;
+            }
+        }
+
+        room?.TrySetResult();
+    }
+
+    /// <summary>
+    /// Ends the read loop's wait at the cap, if it waits, once the end of the connection is recorded; called by
+    /// whoever recorded it or found it recorded, after its hold of the client's lock (<see cref="TryBeginEnd"/>,
+    /// <see cref="DisposeAsync"/>, the connect's deadline). Once the end is recorded no wait is created again: a hold
+    /// of <see cref="_sendGate"/> after this one sees the end and refuses the answers. A wait created in a hold before
+    /// it is taken here. The read loop then sees the end on its next turn.
+    /// </summary>
+    private void ReleaseAnswerRoom()
+    {
+        TaskCompletionSource? room;
+        lock (_sendGate)
+        {
+            room = _answerRoom;
+            _answerRoom = null;
+        }
+
+        room?.TrySetResult();
     }
 
     /// <summary>
@@ -535,6 +632,12 @@ public sealed partial class MqttWireClient
     /// <returns>
     /// <see langword="true"/> when the end has begun and the write is not a DISCONNECT; it is then dropped.
     /// </returns>
+    /// <remarks>
+    /// It reads <see cref="_phase"/> without the client's lock, so it may miss an end being recorded at that moment.
+    /// A stale read is benign: the write it lets through is one handed over or taken as the end was recorded, which
+    /// the link may take or fail like any write already in progress; and every recorder of the end then takes
+    /// <see cref="_sendGate"/> (<see cref="ReleaseAnswerRoom"/>), so the next hold of that lock sees the end.
+    /// </remarks>
     private bool IsDropped(SendKind kind) => kind != SendKind.Disconnect && _phase >= Phase.Closing;
 
     /// <summary>

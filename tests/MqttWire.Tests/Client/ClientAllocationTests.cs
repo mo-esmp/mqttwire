@@ -226,6 +226,42 @@ public sealed class ClientAllocationTests
     }
 
     /// <summary>
+    /// Proves receiving a QoS 1 PUBLISH while a caller's write is pending allocates nothing in an optimized build: the
+    /// read loop hands its PUBACK to the send path, where it waits behind the caller's write and is counted against
+    /// the cap of waiting answers, and the two writes then end one after the other, each carried on by the kept
+    /// continuation.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task Receive_PublishQoS1WhileCallerWritePending_AllocatesNothing()
+    {
+        // Arrange
+        int messages = 0;
+        ClientHarness harness = await ConnectAsync((in _) => messages++);
+        MqttWireClient client = harness.Client;
+        MemoryLink link = harness.Link;
+        link.DiscardsWritten = true;
+        link.PendWrites();
+        ReceiveWhilePending(client, link);
+        int writesBefore = link.WriteCount;
+
+        // Act
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        ReceiveWhilePending(client, link);
+        long after = GC.GetAllocatedBytesForCurrentThread();
+
+        // Assert
+        AssertNothingAllocated(after - before);
+        messages.ShouldBe(2 * Iterations);
+        link.WriteCount.ShouldBe(writesBefore + (2 * Iterations));
+        link.IsWritePending.ShouldBeFalse();
+        link.OverlappingWrites.ShouldBe(0);
+        harness.Client.IsConnected.ShouldBeTrue();
+    }
+
+    /// <summary>
     /// Proves keeping an idle connection alive allocates nothing in an optimized build: each tick of the fake clock
     /// sends PINGREQ from a pooled buffer over the uncontended send path, and each PINGRESP is read and noted.
     /// </summary>
@@ -335,6 +371,28 @@ public sealed class ClientAllocationTests
         {
             _ = client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce);
             _ = client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce);
+            link.CompletePendingWrite();
+            link.CompletePendingWrite();
+        }
+    }
+
+    /// <summary>
+    /// Receives a QoS 1 PUBLISH behind a pending caller's write <see cref="Iterations"/> times: a QoS 0 publish takes
+    /// the path and its write pends, the server's QoS 1 PUBLISH is handled and its PUBACK waits in the queue behind
+    /// that write; then both writes are ended in turn.
+    /// </summary>
+    /// <param name="client">
+    /// The connected client.
+    /// </param>
+    /// <param name="link">
+    /// The connected client's link, in the mode of <see cref="MemoryLink.PendWrites"/>.
+    /// </param>
+    private static void ReceiveWhilePending(MqttWireClient client, MemoryLink link)
+    {
+        for (int i = 0; i < Iterations; i++)
+        {
+            _ = client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce);
+            link.Deliver(ClientPackets.PublishQoS1);
             link.CompletePendingWrite();
             link.CompletePendingWrite();
         }

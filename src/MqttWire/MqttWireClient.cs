@@ -13,9 +13,10 @@ namespace MqttWire;
 /// <para>
 /// One read loop, started when the link opens, is the only reader. Every packet is written through one send path,
 /// one write at a time, in the order the packets were handed to it; a packet handed over while another is being
-/// written waits in a queue, and nobody waits for it. The end of the connection has one path: the first reason
-/// recorded wins; whoever records it sends the DISCONNECT that is due and closes the link, or aborts it; the read loop, once it has
-/// stopped, completes what is in flight, returns its buffer and calls <c>OnClosed</c> once.
+/// written waits in a queue, and nobody waits for it, but for the read loop once more than 4,096 of its answers wait
+/// to be written. The end of the connection has one path: the first reason recorded wins; whoever records it sends
+/// the DISCONNECT that is due and closes the link, or aborts it; the read loop, once it has stopped, completes what is
+/// in flight, returns its buffer and calls <c>OnClosed</c> once.
 /// </para>
 /// <para>
 /// A close waits for the server to end the link, at most two seconds; then the link is aborted.
@@ -482,6 +483,10 @@ public sealed partial class MqttWireClient : IAsyncDisposable
             ended = _ended;
             connectReturned = _connectReturned;
         }
+
+        // The end is recorded, by this call or before it: a read loop waiting at the cap of waiting answers carries on
+        // and sees it.
+        ReleaseAnswerRoom();
 
         // Stops a link that is still opening; the connect then throws ObjectDisposedException.
         if (connectCanceledByDispose is not null)

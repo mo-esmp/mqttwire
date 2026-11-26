@@ -219,7 +219,16 @@ public sealed partial class MqttWireClient
             link = _link;
         }
 
-        link?.Abort();
+        try
+        {
+            link?.Abort();
+        }
+        finally
+        {
+            // No answer is owed before the CONNACK, so the read loop cannot wait at the cap; released all the same, as
+            // by every recorder of the end.
+            ReleaseAnswerRoom();
+        }
     }
 
     /// <summary>

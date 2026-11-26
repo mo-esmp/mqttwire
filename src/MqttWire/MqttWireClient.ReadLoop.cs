@@ -56,7 +56,9 @@ public sealed partial class MqttWireClient
     /// The read loop: waits for data holding no buffer, reads, handles every whole packet, until the link ends.
     /// Then it finishes the connection. When the wait does not complete at once, the answers waiting are handed to
     /// the send path first, so that no answer waits in the loop while the loop does; the wait is awaited once,
-    /// whatever that write does.
+    /// whatever that write does. The loop never waits for a write, but for one case: a hand-over that leaves more
+    /// than <see cref="ClientLimits.MaxWaitingAnswers"/> answers waiting in the send path makes it wait, before it
+    /// waits for the link, until they are written or the connection ends.
     /// </summary>
     /// <param name="link">
     /// The link.
@@ -78,9 +80,10 @@ public sealed partial class MqttWireClient
                     ValueTask waiting = link.WaitForDataAsync(CancellationToken.None);
                     if (!waiting.IsCompleted && _answers.Count > 0)
                     {
-                        // The loop is about to wait: what it owes is handed over first, and not waited for. A failed
-                        // write ends the connection, and the wait already started is still awaited, just below.
-                        await WriteAnswersAsync().ConfigureAwait(false);
+                        // The loop is about to wait: what it owes is handed over first, and not waited for unless past
+                        // the cap. A failed write ends the connection, and the wait already started is still awaited,
+                        // just below.
+                        await HandOverAnswersAsync().ConfigureAwait(false);
                     }
 
                     await waiting.ConfigureAwait(false);
@@ -119,9 +122,11 @@ public sealed partial class MqttWireClient
     /// <summary>
     /// Reads once into the receive buffer and handles every whole packet in it, recording the answer a packet asks
     /// for behind the ones waiting. The answers are handed to the send path when the read does not complete at once,
-    /// before the loop waits for it, and before the sixteenth packet after the oldest of them is handled. Once the
-    /// end has begun, what is read is dropped unhandled, until the server ends the link or the close deadline aborts
-    /// it. It uses the pooling builder, so a call that suspends allocates nothing in steady state.
+    /// before the loop waits for it, and before the sixteenth packet after the oldest of them is handled; it does not
+    /// wait for their write, unless the hand-over leaves more than <see cref="ClientLimits.MaxWaitingAnswers"/>
+    /// answers waiting, and then waits before it handles the next packet or awaits the read. Once the end has begun,
+    /// what is read is dropped unhandled, until the server ends the link or the close deadline aborts it. It uses the
+    /// pooling builder, so a call that suspends allocates nothing in steady state.
     /// </summary>
     /// <param name="link">
     /// The link.
@@ -141,7 +146,7 @@ public sealed partial class MqttWireClient
             // A wait that completed does not mean the read will: the start of a message can come without the rest.
             // The hand-over does not throw, and the read already started is still awaited, just below, so the memory
             // it was given stays the read's until it has ended.
-            await WriteAnswersAsync().ConfigureAwait(false);
+            await HandOverAnswersAsync().ConfigureAwait(false);
         }
 
         int read = await reading.ConfigureAwait(false);
@@ -170,8 +175,9 @@ public sealed partial class MqttWireClient
             if (step == EndStep.WriteAnswers)
             {
                 // Handed over before the next packet is handled, so the answers go out in the order the packets came
-                // (MQTT 4.6). A failed write ends the connection, which a later turn sees.
-                await WriteAnswersAsync().ConfigureAwait(false);
+                // (MQTT 4.6); past the cap, the next packet waits for them. A failed write ends the connection, which
+                // a later turn sees.
+                await HandOverAnswersAsync().ConfigureAwait(false);
                 continue;
             }
 
@@ -398,16 +404,21 @@ public sealed partial class MqttWireClient
 
     /// <summary>
     /// Hands every answer waiting to the send path, to be written as one WebSocket message, and does not wait for
-    /// the write. The buffer goes to <see cref="SendAnswers"/>, which returns it to the pool whatever the outcome, so
-    /// afterwards no answer waits in the read loop. Once the end has begun nothing but a DISCONNECT is written, so the
-    /// answers are dropped and their buffer returned here. Called by the read loop only, and only while an answer
-    /// waits.
+    /// the write, unless more than <see cref="ClientLimits.MaxWaitingAnswers"/> answers then wait in the send path
+    /// (the client's send-path design, section 5, "How many answers may wait"). The buffer goes to
+    /// <see cref="SendAnswers"/>, which returns it to the pool whatever the outcome, so afterwards no answer waits in
+    /// the read loop. Once the end has begun nothing but a DISCONNECT is written, so the answers are dropped and their
+    /// buffer returned here. Called by the read loop only, and only while an answer waits.
     /// </summary>
     /// <returns>
-    /// A task that has completed: the answers are with the send path, or were dropped. A write that fails later ends
-    /// the connection with <see cref="MqttClientCloseReason.WriteFailed"/>, aborting the link. It does not throw.
+    /// A task that has completed, without a state machine, when the answers are with the send path and the count is
+    /// at or below the cap, or when they were dropped. Past the cap, the read loop's wait
+    /// (<see cref="_answerRoom"/>): it completes once enough answers have been written, or dropped, to bring the count
+    /// back to the cap, or once the connection's end is recorded, which the read loop then sees on its next turn; it
+    /// may allocate, which no server within its window makes happen. A write that fails ends the connection with
+    /// <see cref="MqttClientCloseReason.WriteFailed"/>, aborting the link. It does not throw.
     /// </returns>
-    private ValueTask WriteAnswersAsync()
+    private ValueTask HandOverAnswersAsync()
     {
         if (_phase >= Phase.Closing)
         {
@@ -417,8 +428,8 @@ public sealed partial class MqttWireClient
 
         int answers = _answers.Count;
         byte[] buffer = _answers.Take(out int length);
-        SendAnswers(buffer, length, answers);
-        return ValueTask.CompletedTask;
+        TaskCompletionSource? room = SendAnswers(buffer, length, answers);
+        return room is null ? ValueTask.CompletedTask : new ValueTask(room.Task);
     }
 
     /// <summary>

@@ -62,6 +62,9 @@ public sealed partial class MqttWireClient
 
     /// <summary>
     /// Records the end of the connection unless one is already recorded, and aborts the link if the mode says so.
+    /// Whether it recorded the end or found another recorded, it then ends the read loop's wait at the cap of
+    /// waiting answers, if the read loop waits (<see cref="ReleaseAnswerRoom"/>), so that no way out, a fault of the
+    /// send path included, leaves it waiting.
     /// </summary>
     /// <param name="info">
     /// Why the connection ends.
@@ -71,27 +74,33 @@ public sealed partial class MqttWireClient
     /// </param>
     /// <returns>
     /// <see langword="true"/> when this call recorded the end; <see langword="false"/> when another reason was
-    /// recorded first, or the connect never started, and nothing changed.
+    /// recorded first, or the connect never started, and nothing changed but the end of a wait at the cap.
     /// </returns>
     private bool TryBeginEnd(in MqttClientCloseInfo info, EndMode mode)
     {
         IMqttLink? link;
+        bool recorded;
         lock (_gate)
         {
-            if (!TryRecordEndLocked(info: info, mode: mode))
-            {
-                return false;
-            }
-
+            recorded = TryRecordEndLocked(info: info, mode: mode);
             link = _link;
         }
 
-        if (mode == EndMode.Abort)
+        try
         {
-            link?.Abort();
+            if (recorded && mode == EndMode.Abort)
+            {
+                link?.Abort();
+            }
+        }
+        finally
+        {
+            // After the hold of the client's lock, so that the send path's next hold sees the end and creates no new
+            // wait, and after the abort, so that the read loop finds the link aborted when it carries on.
+            ReleaseAnswerRoom();
         }
 
-        return true;
+        return recorded;
     }
 
     /// <summary>
