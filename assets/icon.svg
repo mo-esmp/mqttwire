@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- MqttWire: an M drawn as two circuit traces and a centre trace, each ending in a node. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B1E45"/>
+      <stop offset="1" stop-color="#0A3270"/>
+    </linearGradient>
+    <linearGradient id="trace" gradientUnits="userSpaceOnUse" x1="18" y1="18" x2="110" y2="110">
+      <stop offset="0" stop-color="#19F2A6"/>
+      <stop offset="0.5" stop-color="#17C2D6"/>
+      <stop offset="1" stop-color="#3D7BFF"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="24" fill="url(#tile)"/>
+  <g fill="none" stroke="url(#trace)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M22 106 V38 L44 24 L64 34 L84 24 L106 38 V106"/>
+    <path d="M40 95 V52 L64 66 L88 52 V95"/>
+    <path d="M64 66 V84"/>
+  </g>
+  <g fill="#0A2556" stroke="url(#trace)" stroke-width="4.5">
+    <circle cx="22" cy="106" r="5.5"/>
+    <circle cx="106" cy="106" r="5.5"/>
+    <circle cx="40" cy="95" r="5.5"/>
+    <circle cx="88" cy="95" r="5.5"/>
+    <circle cx="64" cy="84" r="5.5"/>
+  </g>
+</svg>

@@ -6,6 +6,11 @@ the public API may change between previews, and such a change is listed here as 
 
 ## Unreleased
 
+### MqttWire and MqttWire.Server
+
+- **The packages have an icon** (#32) on nuget.org and in package managers, drawn from
+  `assets/icon.svg`.
+
 ## 0.1.0-preview.2 (2026-11-26)
 
 ### MqttWire
