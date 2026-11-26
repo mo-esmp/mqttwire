@@ -113,7 +113,7 @@ internal struct PendingAnswers
         Debug.Assert(_buffer is not null, "There must be an answer waiting to take.");
 
         // An answer waits, so the buffer is held; a take with none waiting is a client bug.
-        byte[] buffer = _buffer!;
+        byte[] buffer = _buffer;
         length = _length;
         _buffer = null;
         _length = 0;
