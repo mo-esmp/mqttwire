@@ -202,7 +202,8 @@ review of the branch.)
 The same holds for a write refused when it is handed over, because the end had begun or the path
 was faulted: its caller does not hold the path, and the end that refused it has begun already, so
 the caller gives it back and swallows what the pool throws, and a `PublishAsync` racing the end
-or a keep-alive tick sees nothing. (Added on 2026-11-26, after the branch was merged.)
+or a keep-alive tick sees nothing. (Added on 2026-11-26 in mo-esmp/mqttwire#20, a follow-up to
+mo-esmp/mqttwire#13 once that issue's branch was merged.)
 
 ### Writes made on someone else's thread
 
