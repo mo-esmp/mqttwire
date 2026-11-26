@@ -317,7 +317,7 @@ A client that falls further behind than the two outgoing limits allow is disconn
 | Receive Maximum announced | 1,024 |
 | Publishes in flight at QoS 1 and 2 | the server's Receive Maximum, at most 1,024 |
 | Publish bytes waiting for a slow link | 1 MiB; a publish beyond it fails with `SendQueueFull`, except that one is always taken when nothing waits |
-| Answers waiting to be written (PUBACK, PUBREC, PUBREL, PUBCOMP) | at most 4,096 answers wait to be written; past that the client stops reading until enough of them are written to bring the count back to 4,096 or fewer |
+| Answers waiting to be written (PUBACK, PUBREC, PUBREL, PUBCOMP) | 4,096, checked after each batch of up to 16 is handed over, so at most 4,112 wait; once the count passes 4,096 the client stops reading until enough of them are written to bring it back to 4,096 or fewer |
 
 ## 7. Deadlines
 

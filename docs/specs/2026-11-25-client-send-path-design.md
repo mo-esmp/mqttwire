@@ -141,7 +141,10 @@ today: it clears a CONNECT's bytes, gives back a PUBLISH's queued bytes or clear
 flag, records the time of the last send after a write that succeeded, and returns the buffer to
 the client's pool. A PINGREQ's deadline starts when its write starts, as today. A write that
 failed, or a link that threw when the write was started, ends the connection with
-`MqttClientCloseReason.WriteFailed` and aborts the link, as today.
+`MqttClientCloseReason.WriteFailed` and aborts the link, as today. When another end was recorded
+first, a close begun by `DisposeAsync` for instance, the failed write still aborts the link
+(amended on 2026-11-26, after the pull request's review): today it aborted nothing then, and the
+DISCONNECT and the close behind it waited on a broken link until the close deadline.
 
 **Taking the next write once the end has begun:** a waiting write that is not a DISCONNECT is
 dropped as it is taken, and its buffer is given back as above. Today such a write finds the end
@@ -247,6 +250,9 @@ they are dropped.
   them over and before it handles the next packet or waits for the link, until the count is
   back at or below the cap. That is today's brake, and it applies only to a server that has
   broken its window, or that floods the client with unknown PUBRELs or PUBRECs.
+- **The cap is checked after a whole batch is handed over,** not per answer, so up to one
+  batch of sixteen can pass it: at most 4,112 answers wait. Splitting a batch to stop at
+  exactly 4,096 would cost a second write for nothing a well-behaved server ever reaches.
 - **The wait ends** when enough answers have been written, or when the connection ends: answers
   dropped at the end count down too, and a connection that ends releases the wait. The read loop
   then sees the end on its next turn.

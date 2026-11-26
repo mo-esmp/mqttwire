@@ -61,7 +61,9 @@ internal static class ClientLimits
     public const int InlineWrites = 16;
 
     /// <summary>
-    /// The most answers that may wait to be written, across the answer writes queued and not yet ended.
+    /// The cap on the answers waiting to be written, across the answer writes queued and not yet ended. It is
+    /// checked after a whole batch is handed over, so up to one batch of <see cref="AnswerPacketBound"/> can pass it;
+    /// past it, the read loop waits until the count is back at or below it.
     /// </summary>
     public const int MaxWaitingAnswers = 4_096;
 

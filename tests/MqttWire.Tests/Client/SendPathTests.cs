@@ -189,6 +189,41 @@ public sealed class SendPathTests
     }
 
     /// <summary>
+    /// Proves a write that fails after a dispose has recorded its close aborts the link at once, although the close
+    /// was recorded first: the DISCONNECT waiting behind it is not written, no close is sent, and the dispose
+    /// completes without the close deadline, with every buffer back exactly once.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task DisposeAsync_HeldWriteFailsDuringClose_AbortsLinkAtOnce()
+    {
+        // Arrange
+        CountingPool pool = new();
+        ClientHarness harness = await ConnectAsync(pool);
+        MemoryLink link = harness.Link;
+        link.TakeWritten();
+        link.HoldWrites();
+        _ = harness.Client.PublishAsync("a/b", new[] { (byte)'1' }, MqttQoS.AtMostOnce);
+        Task dispose = harness.Client.DisposeAsync().AsTask();
+
+        // Act
+        link.CompleteHeldWrites(new IOException("The transport failed."));
+
+        // The clock is never advanced, so only the abort can end the link before the close deadline.
+        await dispose.Within("the dispose");
+
+        // Assert
+        link.IsAborted.ShouldBeTrue();
+        link.TakeWritten().ShouldBeEmpty();
+        link.ClosedWith.ShouldBeNull();
+        link.OverlappingWrites.ShouldBe(0);
+        pool.Outstanding.ShouldBe(0);
+        pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves a dispose after an end that aborted the link does not complete while a write is still held, and
     /// completes once that write has ended, with every buffer back.
     /// </summary>

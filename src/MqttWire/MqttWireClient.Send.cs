@@ -541,7 +541,8 @@ public sealed partial class MqttWireClient
     /// <summary>
     /// Does the work of a write that has ended: a failed write ends the connection with
     /// <see cref="MqttClientCloseReason.WriteFailed"/> and aborts the link, before anything waiting is taken, so that
-    /// the holder drops what waits; then the write's end does its work (<see cref="EndWrite"/>).
+    /// the holder drops what waits; when another end was recorded first, a close included, the link is aborted all
+    /// the same, so that nothing waits on a broken link. Then the write's end does its work (<see cref="EndWrite"/>).
     /// </summary>
     /// <param name="write">
     /// The write that has ended.
@@ -557,12 +558,15 @@ public sealed partial class MqttWireClient
     {
         try
         {
-            if (failure is not null)
-            {
-                // Whatever the link threw, the write did not happen: the connection cannot go on.
-                TryBeginEnd(
+            if (failure is not null
+                && !TryBeginEnd(
                     new MqttClientCloseInfo(MqttClientCloseReason.WriteFailed, MqttReasonCode.Success, null, failure),
-                    EndMode.Abort);
+                    EndMode.Abort))
+            {
+                // Whatever the link threw, the write did not happen and the link cannot carry another. Another end was
+                // recorded first, a close perhaps, which aborts nothing: abort here, or the DISCONNECT and the close
+                // behind this write would wait on a broken link for the close deadline.
+                AbortLink();
             }
         }
         finally
