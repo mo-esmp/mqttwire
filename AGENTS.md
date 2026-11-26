@@ -95,7 +95,7 @@ Follow `.editorconfig`; these supplement it:
 ## Build, CI & Docs
 
 * Before every commit: `dotnet build -c Release` with 0 warnings, and `dotnet test` green.
-* CI runs on Linux (`.github/workflows/ci.yml`): the build, both test projects, both packs and the MQTT.js interop. A green run on Windows is not enough, since socket timing differs; check CI after every push.
+* CI runs on Linux (`.github/workflows/ci.yml`): the build, both test projects, both packs and the MQTT.js interop, and on a `v*` tag the publish to nuget.org. A green run on Windows is not enough, since socket timing differs; check CI after every push.
 * `docs/specs` is the authority. Code that has to diverge from a spec updates the spec in the same pull request. A change to an approved design is written as a dated amendment design that names the section it amends.
 * Keep these in step with the code in the same pull request:
   * `CHANGELOG.md`: an entry under `## Unreleased`, by package, for every change a user can see.
@@ -109,4 +109,4 @@ Follow `.editorconfig`; these supplement it:
 * Commit only the files of the change; leave unrelated local files untracked.
 * Pull request title: `#<IssueNumber> - <IssueTitle>.` The squash commit on `main` takes it, with the PR number appended. The description links the issue with `Closes #<IssueNumber>`.
 * Answer each review comment in its thread. Resolve the thread when the change is pushed; leave it open when the answer is a disagreement or a deferral to another issue.
-* Tags, GitHub releases and publishing to nuget.org are the owner's call. Ask first.
+* Tags, GitHub releases and publishing to nuget.org are the owner's call. Ask first. Pushing a `v*` tag publishes both packages to nuget.org: CI's `publish` job pushes them through Trusted Publishing once the build and the interop pass, and only when the tag matches `<Version>` in `Directory.Build.props`.

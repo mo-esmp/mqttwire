@@ -68,7 +68,7 @@ public sealed partial class MqttWireConnection
     /// buffer the holder rented and has not handed to the link goes back; the path is given up through the Closing
     /// step, which drops what waits, the exchange records and the control buffer, clears the counts and tells whoever
     /// waits for the path to be idle (the last write is taken as failed, so no WebSocket close is attempted); and the
-    /// fault is logged, last (<see cref="LogFault"/>). Called only by a holder, from its catch; it costs nothing on the
+    /// fault is logged, last (<see cref="LogFault"/>). Called only by a holder, from its catch; it allocates nothing on the
     /// paths that do not throw.
     /// </summary>
     /// <remarks>

@@ -444,6 +444,63 @@ public sealed class SendPathTests
     }
 
     /// <summary>
+    /// Proves a publish that the send path refuses, because the end began between its check against the connection
+    /// and its hand-over, neither throws nor faults for its caller when the pool throws as its buffer goes back: the
+    /// connection ends as the dispose ended it, and the buffer whose return threw is never returned again.
+    /// </summary>
+    /// <returns>
+    /// A task that completes when the test has run.
+    /// </returns>
+    [Fact]
+    public async Task PublishAsync_RefusedAsTheEndBeginsAndPoolReturnThrows_ThrowsNothing()
+    {
+        // Arrange
+        CountingPool pool = new();
+        ClientHarness harness = await ConnectAsync(pool);
+        MqttWireClient client = harness.Client;
+        int testThread = Environment.CurrentManagedThreadId;
+        ValueTask dispose = default;
+        int armed = 0;
+
+        // The publish rents its buffer after its check against the connection: a dispose that begins then makes the
+        // send path refuse it. The DISCONNECT's write ends inside the dispose's first part, before the pool is armed.
+        pool.Renting = _ =>
+        {
+            pool.Renting = null;
+            dispose = client.DisposeAsync();
+            Volatile.Write(ref armed, 1);
+        };
+
+        // Only the refused publish's give-back, on this thread: the read loop returns its buffer on its own.
+        pool.Returning = _ =>
+        {
+            if (Environment.CurrentManagedThreadId == testThread && Interlocked.Exchange(ref armed, 0) == 1)
+            {
+                throw new InvalidOperationException("return refused");
+            }
+        };
+
+        // Act
+        // Awaited, not discarded: the pool's exception could reach the caller thrown at the call or as a faulted
+        // publish, and this sees both.
+        MqttRequestResult result = default;
+        Exception? thrown = await Record.ExceptionAsync(async () =>
+            result = await client.PublishAsync("a/b", s_hi, MqttQoS.AtMostOnce).AsTask().Within("the publish"));
+        harness.Link.EndFromPeer();
+        await dispose.AsTask().Within("the dispose");
+
+        // Assert
+        thrown.ShouldBeNull();
+
+        // A QoS 0 publish ends when it is handed over, refused or not.
+        result.Status.ShouldBe(MqttRequestStatus.Completed);
+        Volatile.Read(ref armed).ShouldBe(0);
+        harness.Closed.Select(static info => info.Reason).ShouldBe([MqttClientCloseReason.Disposed]);
+        pool.Outstanding.ShouldBe(1);
+        pool.FaultyReturns.ShouldBe(0);
+    }
+
+    /// <summary>
     /// Proves an end the read loop records itself, for a PUBLISH with a Topic Alias, while writes wait behind a held
     /// one, writes once that write ends only the DISCONNECT 0x94 after it: the waiting publishes are dropped, the link
     /// is closed with 1000 after the DISCONNECT, and every buffer comes back exactly once.
