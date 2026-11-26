@@ -52,27 +52,40 @@ public sealed class DrainDiagnosticTests(ITestOutputHelper output)
             while (true)
             {
                 receive = client.ReceiveAsync();
-                Task done = await Task.WhenAny(receive, Task.Delay(TimeSpan.FromSeconds(10)));
-                if (done != receive)
+                Dictionary<string, long> netBefore = ReadTcpExt();
+                int waited = 0;
+                while (await Task.WhenAny(receive, Task.Delay(TimeSpan.FromSeconds(2))) != receive)
                 {
-                    stalled = true;
-                    long at = watch.ElapsedMilliseconds;
-                    StringBuilder report = new();
-                    report.AppendLine($"DIAG STALL run={run} at={at}ms frames={frames} bytes={bytes} stateAtText=[{atText}] stateNow=[{State(connection!)}]");
-                    report.AppendLine("DIAG timeline: " + string.Join(" ", timeline.TakeLast(12)));
-                    report.AppendLine("DIAG ss:\n" + Ss(host.WebSocketUri.Port));
-                    foreach (LogRecorder.LogEntry entry in host.Logs.Entries)
+                    waited += 2;
+                    if (waited == 4)
                     {
-                        report.AppendLine($"DIAG log {entry.Level} {entry.EventId.Id} {entry.Message} {entry.Exception?.GetType().Name}: {entry.Exception?.Message}");
+                        stalled = true;
+                        Emit($"DIAG STALL run={run} at={watch.ElapsedMilliseconds}ms frames={frames} bytes={bytes} available={Available(client)} stateAtText=[{atText}] stateNow=[{State(connection!)}]");
+                        Emit("DIAG timeline: " + string.Join(" ", timeline.TakeLast(12)));
                     }
 
-                    Emit(report.ToString());
-                    done = await Task.WhenAny(receive, Task.Delay(TimeSpan.FromSeconds(60)));
-                    if (done != receive)
+                    if (stalled)
                     {
-                        end = $"still nothing after {watch.ElapsedMilliseconds}ms; ss:\n{Ss(host.WebSocketUri.Port)}\nstate=[{State(connection!)}]";
+                        Emit($"DIAG ss at={watch.ElapsedMilliseconds}ms available={Available(client)} state=[{State(connection!)}]\n" + Ss(host.WebSocketUri.Port));
+                        Emit("DIAG tcpext since receive: " + Delta(netBefore, ReadTcpExt()));
+                    }
+
+                    if (waited >= 70)
+                    {
                         break;
                     }
+                }
+
+                if (!receive.IsCompleted)
+                {
+                    end = "still nothing after 70 s";
+                    break;
+                }
+
+                if (stalled && end == "?")
+                {
+                    end = "";
+                    Emit($"DIAG stall ended at={watch.ElapsedMilliseconds}ms");
                 }
 
                 RawWebSocket.Frame frame = await receive;
@@ -92,6 +105,14 @@ public sealed class DrainDiagnosticTests(ITestOutputHelper output)
         }
 
         Emit($"DIAG {(stalled ? "STALLED" : "ok")} run={run} frames={frames} total={watch.ElapsedMilliseconds}ms end={end} stateEnd=[{State(connection!)}]");
+        if (stalled)
+        {
+            Emit("DIAG timeline: " + string.Join(" ", timeline.TakeLast(12)));
+            foreach (LogRecorder.LogEntry entry in host.Logs.Entries)
+            {
+                Emit($"DIAG log {entry.Level} {entry.EventId.Id} {entry.Message} {entry.Exception?.GetType().Name}: {entry.Exception?.Message}");
+            }
+        }
     }
 
     private void Emit(string text)
@@ -123,6 +144,48 @@ public sealed class DrainDiagnosticTests(ITestOutputHelper output)
         return text.ToString();
     }
 
+    private static int Available(RawWebSocket client) =>
+        ((System.Net.Sockets.Socket)typeof(RawWebSocket).GetField("_socket", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(client)!).Available;
+
+    private static string Delta(Dictionary<string, long> before, Dictionary<string, long> after)
+    {
+        StringBuilder deltas = new();
+        foreach ((string key, long value) in after)
+        {
+            if (before.TryGetValue(key, out long old) && value != old && key.StartsWith("TcpExt", StringComparison.Ordinal))
+            {
+                deltas.Append(key[6..]).Append('=').Append(value - old).Append(' ');
+            }
+        }
+
+        return deltas.ToString();
+    }
+
+    private static Dictionary<string, long> ReadTcpExt()
+    {
+        Dictionary<string, long> values = [];
+        if (!File.Exists("/proc/net/netstat"))
+        {
+            return values;
+        }
+
+        string[] lines = File.ReadAllLines("/proc/net/netstat");
+        for (int i = 0; i + 1 < lines.Length; i += 2)
+        {
+            string[] names = lines[i].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            string[] numbers = lines[i + 1].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            for (int j = 1; j < names.Length && j < numbers.Length; j++)
+            {
+                if (long.TryParse(numbers[j], out long n))
+                {
+                    values[names[0][..^1] + names[j]] = n;
+                }
+            }
+        }
+
+        return values;
+    }
+
     private static string Ss(int port)
     {
         try
@@ -135,7 +198,7 @@ public sealed class DrainDiagnosticTests(ITestOutputHelper output)
             using Process process = Process.Start(start)!;
             string text = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
             process.WaitForExit(5000);
-            return text;
+            return string.Join("\n", text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => "DIAG   " + line.Trim()));
         }
         catch (Exception exception)
         {
