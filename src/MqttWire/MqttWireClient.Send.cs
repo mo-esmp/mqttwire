@@ -5,86 +5,545 @@ using MqttWire.Link;
 namespace MqttWire;
 
 /// <content>
-/// The send path: one write at a time through the send lock, in the order the writers asked.
+/// The send path (the client's send-path design, section 5, modelled on the server's): every write to the link goes
+/// through it, one at a time, in the order the packets were handed over. One flag, <see cref="_writing"/>, says
+/// whether someone holds the path: whoever hands a packet over and finds it free takes it and writes on its own
+/// thread; everyone else adds the packet to <see cref="_sendQueue"/> and returns. Whoever holds the path, when a
+/// write has ended, either takes the next waiting write or clears the flag, in one hold of <see cref="_sendGate"/>.
+/// A write that does not complete at once is handed to <see cref="_continuation"/>, and its completion carries the
+/// path on. The lock is never held across a write, a completion, a return to the pool or a call into the
+/// application, and nothing is rented or encoded under it.
 /// </content>
 public sealed partial class MqttWireClient
 {
     /// <summary>
-    /// Writes one packet through the send lock: one write at a time, in the order the writers asked.
+    /// Guards <see cref="_writing"/>, <see cref="_sendQueue"/> and <see cref="_writesEnded"/>; never held across a
+    /// write, a completion or a return to the pool.
+    /// </summary>
+    private readonly Lock _sendGate = new();
+
+    /// <summary>
+    /// The writes that wait for their turn, oldest first; under <see cref="_sendGate"/>. A mutable struct, kept inline
+    /// so that a client that never meets a busy path allocates nothing for it: not <see langword="readonly"/>, so its
+    /// members change this field and not a copy, and never passed or returned by value. It holds no write and no ring
+    /// until the first write has to wait, so its initializer allocates nothing.
+    /// </summary>
+    private SendQueue _sendQueue = new();
+
+    /// <summary>
+    /// Whether someone holds the send path: a caller writing on its own thread, a write's continuation, or the thread
+    /// pool after a hand-over. Set and cleared under <see cref="_sendGate"/>, and cleared only in the hold that found
+    /// nothing waiting, so that a write is never left in the queue with nobody to take it.
+    /// </summary>
+    private bool _writing;
+
+    /// <summary>
+    /// What carries the send path on after a write that did not complete at once, and from the thread pool after a
+    /// hand-over; created on first need and kept. Used by whoever holds the send path, and replaced only when a write
+    /// refused the registration of its continuation, which then stays armed for that write.
+    /// </summary>
+    private SendPathContinuation? _continuation;
+
+    /// <summary>
+    /// Completes with whether the link took the DISCONNECT, once its write has ended or it was dropped; set by
+    /// <see cref="SendDisconnectAsync"/> before the DISCONNECT is handed over. A client sends at most one.
+    /// </summary>
+    private TaskCompletionSource<bool>? _disconnectWritten;
+
+    /// <summary>
+    /// Completes once every write handed over before the marker of <see cref="WhenWritesEndedAsync"/> has ended; set
+    /// once, under <see cref="_sendGate"/>, when that marker is handed over. From then on nothing more is taken.
+    /// </summary>
+    private TaskCompletionSource? _writesEnded;
+
+    /// <summary>
+    /// Hands a packet to the send path and returns at once: written now on this thread when the path is free, added
+    /// to the queue behind the writes in progress otherwise. Once the end has begun, anything but a DISCONNECT is
+    /// refused, and once <see cref="WhenWritesEndedAsync"/> has handed its marker over, everything is: the packet is
+    /// given back as a write that ended would give it back (<see cref="GiveBack"/>), and nothing is written.
     /// </summary>
     /// <param name="packet">
-    /// The encoded packet in a buffer rented from the client's pool. This call owns it from now on and returns it
-    /// once the write has ended, whatever the outcome.
+    /// The encoded packet in a buffer rented from the client's pool. The send path owns it from now on and returns it
+    /// once its write has ended, or at once when it is refused or dropped.
     /// </param>
     /// <param name="length">
     /// The packet's length.
     /// </param>
     /// <param name="kind">
-    /// What the packet is: a DISCONNECT is the only packet written after the end began; a PINGREQ starts its
-    /// PINGRESP deadline when its write begins; a PUBLISH gives back its reserved queued bytes, and a CONNECT has its
-    /// credentials cleared, when the write ends, whatever the outcome.
+    /// What the packet is: a DISCONNECT is the only packet written after the end began; a PINGREQ starts its PINGRESP
+    /// deadline when its write begins; a PUBLISH gives back its reserved queued bytes, and a CONNECT has its
+    /// credentials cleared, when its write ends or it is dropped.
+    /// </param>
+    /// <remarks>
+    /// It never throws, but for a bug of the client. A failed write is nobody's error here: it ends the connection
+    /// with <see cref="MqttClientCloseReason.WriteFailed"/> and aborts the link. It allocates nothing in the steady
+    /// state, also when the packet has to wait or its write does not complete at once; what allocates is the first
+    /// use of the queue and of <see cref="SendPathContinuation"/>, which the client keeps, and the growth of the queue.
+    /// </remarks>
+    private void Send(byte[] packet, int length, SendKind kind) =>
+        HandOver(new QueuedWrite(packet, length, kind, answers: 0));
+
+    /// <summary>
+    /// Hands the read loop's answers to the send path, as <see cref="Send"/> does, and returns at once; the read loop
+    /// does not wait for their write. It never throws, but for a bug of the client.
+    /// </summary>
+    /// <param name="packet">
+    /// The encoded answers in one rented buffer, which the send path owns from now on.
+    /// </param>
+    /// <param name="length">
+    /// The answers' length in bytes.
+    /// </param>
+    /// <param name="answers">
+    /// The number of answers in the buffer.
+    /// </param>
+    private void SendAnswers(byte[] packet, int length, int answers) =>
+        HandOver(new QueuedWrite(packet, length, SendKind.Answers, answers));
+
+    /// <summary>
+    /// Hands the DISCONNECT to the send path, behind every write handed over before it. Called once in a client's
+    /// life, by whoever recorded the end with <see cref="EndMode.Close"/>; it allocates its completion.
+    /// </summary>
+    /// <param name="packet">
+    /// The encoded DISCONNECT in a rented buffer, which the send path owns from now on.
+    /// </param>
+    /// <param name="length">
+    /// The packet's length.
     /// </param>
     /// <returns>
-    /// <see langword="true"/> when the link took the packet. A link whose own close has started takes it without
-    /// sending it (<see cref="IMqttLink.WriteAsync"/>), so <see langword="true"/> does not promise that the packet was
-    /// sent. <see langword="false"/> when it was not written
-    /// because the end had begun, or the write failed; a failed write ends the connection with
-    /// <see cref="MqttClientCloseReason.WriteFailed"/> and aborts the link.
+    /// A task that completes once the DISCONNECT's write has ended, with <see langword="true"/> when the link took
+    /// it. A link whose own close has started takes it without sending it (<see cref="IMqttLink.WriteAsync"/>), so
+    /// <see langword="true"/> does not promise that it was sent. <see langword="false"/> when it was not written,
+    /// because <see cref="WhenWritesEndedAsync"/> had already handed its marker over or the link refused the
+    /// registration of the write's continuation, or when the write failed, which ended the connection with
+    /// <see cref="MqttClientCloseReason.WriteFailed"/> and aborted the link. It never fails, and its continuations
+    /// run asynchronously.
     /// </returns>
-    /// <remarks>
-    /// Allocation-free when the send lock is uncontended and the write completes synchronously; a write that
-    /// completes asynchronously (always in the browser) allocates its state machine, as does a wait for a contended
-    /// send lock. Most callers discard the returned task, so a pooling builder would not help here.
-    /// </remarks>
-    internal async ValueTask<bool> SendAsync(byte[] packet, int length, SendKind kind)
+    private Task<bool> SendDisconnectAsync(byte[] packet, int length)
     {
-        await _sendLock.WaitAsync().ConfigureAwait(false);
+        TaskCompletionSource<bool> written = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // In place before the DISCONNECT is handed over: the hold of the send path's lock publishes it to whoever
+        // ends the DISCONNECT's write.
+        Volatile.Write(ref _disconnectWritten, written);
+        Send(packet, length, SendKind.Disconnect);
+        return written.Task;
+    }
+
+    /// <summary>
+    /// Hands the send path a marker behind every write handed over so far, and from then on refuses every write. The
+    /// marker is completed by whoever holds the path when it takes it, or at once when nobody holds it. A second call
+    /// hands nothing over and returns the first call's task.
+    /// </summary>
+    /// <returns>
+    /// A task that completes once every write handed over before the marker has ended and returned its buffer. A write
+    /// whose link refused the registration of its continuation is not waited for: the link may never end it. The task
+    /// never fails, and its continuations run asynchronously.
+    /// </returns>
+    private Task WhenWritesEndedAsync()
+    {
+        TaskCompletionSource marker;
+        lock (_sendGate)
+        {
+            if (_writesEnded is { } handedOver)
+            {
+                return handedOver.Task;
+            }
+
+            marker = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _writesEnded = marker;
+            if (_writing)
+            {
+                _sendQueue.Enqueue(new QueuedWrite(buffer: null, length: 0, SendKind.WritesEnded, answers: 0));
+                return marker.Task;
+            }
+        }
+
+        // Nobody holds the path, so every write handed over before the marker has ended.
+        marker.TrySetResult();
+        return marker.Task;
+    }
+
+    /// <summary>
+    /// The one hold of the lock in which a write handed over is refused, added to the queue, or taken with the send
+    /// path by this caller, who then writes it, and whatever waits behind it, on this thread
+    /// (<see cref="RunSendPath"/>). A refused write is given back outside the lock (<see cref="GiveBack"/>).
+    /// </summary>
+    /// <param name="write">
+    /// The write handed over; its buffer belongs to the send path from now on.
+    /// </param>
+    private void HandOver(in QueuedWrite write)
+    {
+        bool refused = false;
+        lock (_sendGate)
+        {
+            if (_writesEnded is not null || IsDropped(write.Kind))
+            {
+                refused = true;
+            }
+            else if (_writing)
+            {
+                _sendQueue.Enqueue(write);
+                return;
+            }
+            else
+            {
+                _writing = true;
+            }
+        }
+
+        if (refused)
+        {
+            GiveBack(write);
+            return;
+        }
+
+        RunSendPath(write, ClientLimits.InlineWrites);
+    }
+
+    /// <summary>
+    /// Writes a write and whatever waits behind it, for as long as the writes complete at once; called by whoever
+    /// holds the send path, outside the lock. It is a loop, not a recursion: each write that has ended does its end's
+    /// work, then the next is taken in one hold of the lock (<see cref="TryTakeNext"/>). Once the end has begun, every
+    /// write it takes that is not a DISCONNECT is dropped (<see cref="GiveBack"/>), and counts as one more write. A
+    /// write that does not complete at once is handed to <see cref="_continuation"/>, and this returns with the path
+    /// held by that write. After <paramref name="inlineWrites"/> writes, with more waiting, the path, still held, is
+    /// handed to the thread pool. It never throws, but for a bug of the client.
+    /// </summary>
+    /// <param name="write">
+    /// The first write, which the caller took with the path.
+    /// </param>
+    /// <param name="inlineWrites">
+    /// How many writes this thread makes, dropped ones included, before it hands the path to the thread pool;
+    /// <see cref="int.MaxValue"/> for a thread that is nobody's call: a write's completion that runs later, or the
+    /// thread pool itself.
+    /// </param>
+    private void RunSendPath(QueuedWrite write, int inlineWrites)
+    {
+        while (true)
+        {
+            if (!TryWrite(write, inlineWrites))
+            {
+                // Pending: the path is the write's now, and its completion carries it on.
+                return;
+            }
+
+            inlineWrites--;
+            if (!TryTakeNext(inlineWrites, out write))
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Carries the send path on after a write that did not complete at once has ended; called by
+    /// <see cref="SendPathContinuation"/>, once per such write, on the thread that completed it. It does the work of
+    /// the write's end (<see cref="FinishWrite"/>), then takes the next waiting write and writes on, or gives the path
+    /// up. It never throws, but for a bug of the client.
+    /// </summary>
+    /// <param name="ended">
+    /// The write that has ended.
+    /// </param>
+    /// <param name="failure">
+    /// What the write failed with, or <see langword="null"/> when the link took it.
+    /// </param>
+    /// <param name="insideTheRegistration">
+    /// Whether the write completed while its continuation was being registered and the continuation runs inside that
+    /// registration, on the stack of the caller that started the write: it then counts as one more of that caller's
+    /// writes, so that such calls cannot nest deeper than <see cref="ClientLimits.InlineWrites"/>.
+    /// </param>
+    /// <param name="inlineWrites">
+    /// How many writes the caller that started the write still made on its thread; used only with
+    /// <paramref name="insideTheRegistration"/>.
+    /// </param>
+    internal void ContinueSendPath(in QueuedWrite ended, Exception? failure, bool insideTheRegistration,
+        int inlineWrites)
+    {
+        int writes = insideTheRegistration
+            ? Math.Min(inlineWrites, ClientLimits.InlineWrites) - 1
+            : int.MaxValue;
+        FinishWrite(ended, failure);
+        if (TryTakeNext(writes, out QueuedWrite next))
+        {
+            RunSendPath(next, writes);
+        }
+    }
+
+    /// <summary>
+    /// Carries the send path on from the thread pool, after a holder handed it over, still held, with writes waiting;
+    /// called by <see cref="SendPathContinuation"/> as a work item. It never throws, but for a bug of the client.
+    /// </summary>
+    internal void RunHandedOverSendPath()
+    {
+        if (TryTakeNext(int.MaxValue, out QueuedWrite next))
+        {
+            RunSendPath(next, int.MaxValue);
+        }
+    }
+
+    /// <summary>
+    /// Ends a write whose link refused the registration of its continuation, when the link ends it after all; called
+    /// by that write's <see cref="SendPathContinuation"/>. The send path is no longer this write's, so it is not
+    /// carried on: the write only does its end's work and returns its buffer, which nobody could return before, since
+    /// the write might still have been using it (design 6.8, rule 4).
+    /// </summary>
+    /// <param name="ended">
+    /// The write that has ended.
+    /// </param>
+    /// <param name="failure">
+    /// What the write failed with, or <see langword="null"/> when the link took it.
+    /// </param>
+    internal void EndRefusedWrite(in QueuedWrite ended, Exception? failure) =>
+        EndWrite(ended, succeeded: failure is null);
+
+    /// <summary>
+    /// Writes one write the holder of the send path has taken, or drops it, or completes the marker; called by the
+    /// holder, outside the lock. A write whose link refuses the registration of its continuation ends the connection
+    /// as a failed write does, and is from then on left to its own completion, which returns its buffer; the holder
+    /// keeps the path and goes on, dropping what waits.
+    /// </summary>
+    /// <param name="write">
+    /// The write taken.
+    /// </param>
+    /// <param name="inlineWrites">
+    /// How many writes this thread still makes, for the continuation of a write that does not complete at once.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the write has ended, was dropped, or was refused the registration, and the caller
+    /// still holds the path; <see langword="false"/> when the write is pending and its completion holds the path now.
+    /// </returns>
+    private bool TryWrite(in QueuedWrite write, int inlineWrites)
+    {
+        IMqttLink? link = _link;
+        if (write.Kind == SendKind.WritesEnded || link is null || IsDropped(write.Kind))
+        {
+            GiveBack(write);
+            return true;
+        }
+
+        if (write.Kind == SendKind.PingRequest)
+        {
+            // The deadline counts from here, not from the tick that queued it: a write stalled ahead of it in the send
+            // path is not the server failing to answer. Set before the write, so a PINGRESP that comes at once finds
+            // it.
+            Volatile.Write(ref _pingRequestTimestamp, _time.GetTimestamp());
+        }
+
+        ValueTask writing = StartWrite(link, write);
+        if (writing.IsCompleted)
+        {
+            FinishWrite(write, TakeFailure(writing));
+            return true;
+        }
+
+        SendPathContinuation continuation = _continuation ??= new SendPathContinuation(this);
         try
         {
-            IMqttLink? link = _link;
-            if (link is null || (kind != SendKind.Disconnect && _phase >= Phase.Closing))
+            continuation.Await(writing, write, inlineWrites);
+            return false;
+        }
+        catch (Exception exception)
+        {
+            // A fault of the link. The write may still be using its buffer (design 6.8, rule 4), so it is not
+            // returned: the continuation stays armed and returns it if the write ever ends. This holder keeps the path,
+            // and the end recorded here drops what waits, but for a DISCONNECT, which is told it was not written.
+            _continuation = null;
+            TryBeginEnd(
+                new MqttClientCloseInfo(MqttClientCloseReason.WriteFailed, MqttReasonCode.Success, null, exception),
+                EndMode.Abort);
+            if (write.Kind == SendKind.Disconnect)
             {
+                Volatile.Read(ref _disconnectWritten)?.TrySetResult(result: false);
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The one hold of the lock in which the holder of the send path, its write having ended, takes the next waiting
+    /// write or gives the path up. A holder that has made its writes on its thread and finds more waiting takes
+    /// nothing: it hands the path, still held, to the thread pool, which takes the next write itself.
+    /// </summary>
+    /// <param name="inlineWrites">
+    /// How many writes this thread still makes; at 0 or below, it hands over instead of taking.
+    /// </param>
+    /// <param name="next">
+    /// The write taken when the result is <see langword="true"/>; otherwise the default value.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the caller still holds the path and is to write <paramref name="next"/>;
+    /// <see langword="false"/> when it no longer does: the path was given up in the hold, or handed to the thread
+    /// pool.
+    /// </returns>
+    private bool TryTakeNext(int inlineWrites, out QueuedWrite next)
+    {
+        lock (_sendGate)
+        {
+            if (_sendQueue.Count == 0)
+            {
+                _writing = false;
+                next = default;
                 return false;
             }
 
-            if (kind == SendKind.PingRequest)
+            if (inlineWrites > 0)
             {
-                // The deadline counts from here, not from the tick that queued it: a write stalled ahead of it in
-                // the send lock is not the server failing to answer. Set before the write, so a PINGRESP that comes
-                // at once finds it.
-                Volatile.Write(ref _pingRequestTimestamp, _time.GetTimestamp());
+                return _sendQueue.TryDequeue(out next);
             }
+        }
 
-            await link.WriteAsync(packet.AsMemory(0, length), CancellationToken.None).ConfigureAwait(false);
+        // Still held across the hand-over, so nobody else writes and nothing is lost: whatever is added meanwhile
+        // waits for the thread pool's hold, which takes the next write itself.
+        next = default;
+        SendPathContinuation workItem = _continuation ??= new SendPathContinuation(this);
+        ThreadPool.UnsafeQueueUserWorkItem(workItem, preferLocal: false);
+        return false;
+    }
+
+    /// <summary>
+    /// Does the work of a write that has ended: a failed write ends the connection with
+    /// <see cref="MqttClientCloseReason.WriteFailed"/> and aborts the link, before anything waiting is taken, so that
+    /// the holder drops what waits; then the write's end does its work (<see cref="EndWrite"/>).
+    /// </summary>
+    /// <param name="write">
+    /// The write that has ended.
+    /// </param>
+    /// <param name="failure">
+    /// What the write failed with, or <see langword="null"/> when the link took it.
+    /// </param>
+    private void FinishWrite(in QueuedWrite write, Exception? failure)
+    {
+        if (failure is not null)
+        {
+            // Whatever the link threw, the write did not happen: the connection cannot go on.
+            TryBeginEnd(
+                new MqttClientCloseInfo(MqttClientCloseReason.WriteFailed, MqttReasonCode.Success, null, failure),
+                EndMode.Abort);
+        }
+
+        EndWrite(write, succeeded: failure is null);
+    }
+
+    /// <summary>
+    /// Gives back a write that is not written: refused when handed over, or dropped by the holder once the end has
+    /// begun. It does what the end of a write does (<see cref="EndWrite"/>), as for a write that did not succeed; the
+    /// marker of <see cref="WhenWritesEndedAsync"/> is completed.
+    /// </summary>
+    /// <param name="write">
+    /// The write.
+    /// </param>
+    private void GiveBack(in QueuedWrite write) => EndWrite(write, succeeded: false);
+
+    /// <summary>
+    /// The work of a write's end, whatever the outcome, outside the lock: records the time of the last send after a
+    /// write that succeeded, clears a CONNECT's bytes, gives back a PUBLISH's queued bytes or the PINGREQ's flag, and
+    /// returns the buffer to the client's pool, once; then tells whoever waits for a DISCONNECT whether it was
+    /// written. The marker of <see cref="WhenWritesEndedAsync"/> has no buffer: its end completes it.
+    /// </summary>
+    /// <param name="write">
+    /// The write that has ended, or was refused or dropped.
+    /// </param>
+    /// <param name="succeeded">
+    /// Whether the link took it.
+    /// </param>
+    private void EndWrite(in QueuedWrite write, bool succeeded)
+    {
+        if (write.Kind == SendKind.WritesEnded)
+        {
+            // Handed over under the lock, which published it to the holder that took the marker.
+            Volatile.Read(ref _writesEnded)?.TrySetResult();
+            return;
+        }
+
+        if (succeeded)
+        {
             Volatile.Write(ref _lastSendTimestamp, _time.GetTimestamp());
-            return true;
         }
-        catch (Exception ex)
-        {
-            // Whatever the link throws, the write did not happen: the connection cannot go on.
-            TryBeginEnd(new MqttClientCloseInfo(MqttClientCloseReason.WriteFailed, MqttReasonCode.Success, null, ex), EndMode.Abort);
-            return false;
-        }
-        finally
-        {
-            switch (kind)
-            {
-                case SendKind.Connect:
-                    // The shared pool hands this array to the next renter as it is, credentials included.
-                    packet.AsSpan(0, length).Clear();
-                    break;
-                case SendKind.Publish:
-                    Interlocked.Add(ref _pendingPublishBytes, -length);
-                    break;
-                case SendKind.PingRequest:
-                    Volatile.Write(ref _pingQueued, 0);
-                    break;
-            }
 
-            // The write has ended, so the buffer is no longer in use (6.8).
-            _pool.Return(packet);
-            _sendLock.Release();
+        switch (write.Kind)
+        {
+            case SendKind.Connect:
+                // The shared pool hands this array to the next renter as it is, credentials included.
+                write.Buffer.AsSpan(0, write.Length).Clear();
+                break;
+            case SendKind.Publish:
+                Interlocked.Add(ref _pendingPublishBytes, -write.Length);
+                break;
+            case SendKind.PingRequest:
+                Volatile.Write(ref _pingQueued, 0);
+                break;
         }
+
+        // The write has ended, so the buffer is no longer in use (6.8).
+        if (write.Buffer is { } buffer)
+        {
+            _pool.Return(buffer);
+        }
+
+        if (write.Kind == SendKind.Disconnect)
+        {
+            Volatile.Read(ref _disconnectWritten)?.TrySetResult(succeeded);
+        }
+    }
+
+    /// <summary>
+    /// Whether a write of this kind is not written once the end has begun: everything but a DISCONNECT.
+    /// </summary>
+    /// <param name="kind">
+    /// The write's kind.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when the end has begun and the write is not a DISCONNECT; it is then dropped.
+    /// </returns>
+    private bool IsDropped(SendKind kind) => kind != SendKind.Disconnect && _phase >= Phase.Closing;
+
+    /// <summary>
+    /// Hands a write's bytes to the link. A link that throws instead of returning a failed task is treated the same
+    /// way.
+    /// </summary>
+    /// <param name="link">
+    /// The link.
+    /// </param>
+    /// <param name="write">
+    /// The write, which has a buffer.
+    /// </param>
+    /// <returns>
+    /// The write; it may have completed, with success or with an error.
+    /// </returns>
+    private static ValueTask StartWrite(IMqttLink link, in QueuedWrite write)
+    {
+        try
+        {
+            return link.WriteAsync(write.Buffer.AsMemory(0, write.Length), CancellationToken.None);
+        }
+        catch (Exception exception)
+        {
+            return ValueTask.FromException(exception);
+        }
+    }
+
+    /// <summary>
+    /// Takes the outcome of a write that has completed, which also lets the link reuse what backs its task.
+    /// </summary>
+    /// <param name="completed">
+    /// The write, which has completed.
+    /// </param>
+    /// <returns>
+    /// <see langword="null"/> when it succeeded; what it failed with, or was cancelled with, otherwise.
+    /// </returns>
+    private static Exception? TakeFailure(ValueTask completed)
+    {
+        if (completed.IsCompletedSuccessfully)
+        {
+            completed.GetAwaiter().GetResult();
+            return null;
+        }
+
+        // Takes the failure out of the write, so that it is observed here and reported nowhere else; a cancelled
+        // write has no exception of its own and is reported as the cancellation an await would have thrown.
+        Task failed = completed.AsTask();
+        return failed.Exception?.InnerException ?? new TaskCanceledException(failed);
     }
 
     /// <summary>
@@ -120,7 +579,7 @@ public sealed partial class MqttWireClient
     /// The packet's length.
     /// </param>
     /// <returns>
-    /// The rented buffer, which the caller hands to <see cref="SendAsync"/>.
+    /// The rented buffer, which the caller hands to <see cref="SendDisconnectAsync"/>.
     /// </returns>
     private byte[] RentDisconnect(MqttReasonCode reasonCode, out int length)
     {

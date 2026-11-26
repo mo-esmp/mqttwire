@@ -16,7 +16,7 @@ internal static class ClientLimits
     public const int MaxPublishesInFlight = 1024;
 
     /// <summary>
-    /// The most PUBLISH bytes queued for the send lock and not yet written, 1 MiB. A publish that would go over it
+    /// The most PUBLISH bytes waiting in the send path and not yet written, 1 MiB. A publish that would go over it
     /// fails with <c>SendQueueFull</c>, except that one publish is always taken when nothing is queued, so a packet
     /// larger than this can still be sent.
     /// </summary>
@@ -55,7 +55,8 @@ internal static class ClientLimits
     public const int AnswerBufferBytes = AnswerPacketBound * MaxAnswerBytes;
 
     /// <summary>
-    /// The most writes the send path keeps inline, besides the queue of the writes waiting for their turn.
+    /// The most writes, its own included, that a caller holding the send path makes on its own thread while the
+    /// writes complete at once; with more waiting, it then hands the path to the thread pool.
     /// </summary>
     public const int InlineWrites = 16;
 

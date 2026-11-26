@@ -1,7 +1,7 @@
 namespace MqttWire.Client;
 
 /// <summary>
-/// What a packet handed to the send lock is, for the work its write does besides writing: a DISCONNECT is still
+/// What a packet handed to the send path is, for the work its write does besides writing: a DISCONNECT is still
 /// written while the client closes, a PINGREQ starts its PINGRESP deadline when its write begins, a PUBLISH gives
 /// back its share of the queued bytes, and a CONNECT has its credentials cleared before its buffer goes back.
 /// </summary>

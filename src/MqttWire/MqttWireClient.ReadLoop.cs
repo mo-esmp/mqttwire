@@ -54,8 +54,9 @@ public sealed partial class MqttWireClient
 
     /// <summary>
     /// The read loop: waits for data holding no buffer, reads, handles every whole packet, until the link ends.
-    /// Then it finishes the connection. When the wait does not complete at once, the answers waiting are written
-    /// first, so that no answer waits while the loop does; the wait is awaited once, whatever that write did.
+    /// Then it finishes the connection. When the wait does not complete at once, the answers waiting are handed to
+    /// the send path first, so that no answer waits in the loop while the loop does; the wait is awaited once,
+    /// whatever that write does.
     /// </summary>
     /// <param name="link">
     /// The link.
@@ -77,8 +78,8 @@ public sealed partial class MqttWireClient
                     ValueTask waiting = link.WaitForDataAsync(CancellationToken.None);
                     if (!waiting.IsCompleted && _answers.Count > 0)
                     {
-                        // The loop is about to wait: what it owes goes out first. The write does not throw; a failed
-                        // one ends the connection, and the wait already started is still awaited, just below.
+                        // The loop is about to wait: what it owes is handed over first, and not waited for. A failed
+                        // write ends the connection, and the wait already started is still awaited, just below.
                         await WriteAnswersAsync().ConfigureAwait(false);
                     }
 
@@ -117,10 +118,10 @@ public sealed partial class MqttWireClient
 
     /// <summary>
     /// Reads once into the receive buffer and handles every whole packet in it, recording the answer a packet asks
-    /// for behind the ones waiting. The answers are written when the read does not complete at once, before the loop
-    /// waits for it, and before the sixteenth packet after the oldest of them is handled. Once the end has begun,
-    /// what is read is dropped unhandled, until the server ends the link or the close deadline aborts it. It uses
-    /// the pooling builder, so a call that suspends allocates nothing in steady state.
+    /// for behind the ones waiting. The answers are handed to the send path when the read does not complete at once,
+    /// before the loop waits for it, and before the sixteenth packet after the oldest of them is handled. Once the
+    /// end has begun, what is read is dropped unhandled, until the server ends the link or the close deadline aborts
+    /// it. It uses the pooling builder, so a call that suspends allocates nothing in steady state.
     /// </summary>
     /// <param name="link">
     /// The link.
@@ -138,8 +139,8 @@ public sealed partial class MqttWireClient
         if (!reading.IsCompleted && _answers.Count > 0)
         {
             // A wait that completed does not mean the read will: the start of a message can come without the rest.
-            // The write does not throw, and the read already started is still awaited, just below, so the memory it
-            // was given stays the read's until it has ended.
+            // The hand-over does not throw, and the read already started is still awaited, just below, so the memory
+            // it was given stays the read's until it has ended.
             await WriteAnswersAsync().ConfigureAwait(false);
         }
 
@@ -168,8 +169,8 @@ public sealed partial class MqttWireClient
             EndStep step = HandleBuffered(out MqttReasonCode disconnect);
             if (step == EndStep.WriteAnswers)
             {
-                // Awaited before the next packet is handled, so the answers go out in the order the packets came
-                // (MQTT 4.6). A failed write ends the connection, which the next turn sees.
+                // Handed over before the next packet is handled, so the answers go out in the order the packets came
+                // (MQTT 4.6). A failed write ends the connection, which a later turn sees.
                 await WriteAnswersAsync().ConfigureAwait(false);
                 continue;
             }
@@ -396,26 +397,28 @@ public sealed partial class MqttWireClient
     }
 
     /// <summary>
-    /// Writes every answer waiting as one WebSocket message through the send lock. The buffer is handed to
-    /// <see cref="SendAsync"/>, which returns it to the pool whatever the outcome, so afterwards no answer waits.
-    /// Once the end has begun nothing but a DISCONNECT is written, so the answers are dropped and their buffer
-    /// returned without taking the send lock. Called by the read loop only, and only while an answer waits.
+    /// Hands every answer waiting to the send path, to be written as one WebSocket message, and does not wait for
+    /// the write. The buffer goes to <see cref="SendAnswers"/>, which returns it to the pool whatever the outcome, so
+    /// afterwards no answer waits in the read loop. Once the end has begun nothing but a DISCONNECT is written, so the
+    /// answers are dropped and their buffer returned here. Called by the read loop only, and only while an answer
+    /// waits.
     /// </summary>
     /// <returns>
-    /// <see langword="true"/> when the link took them. <see langword="false"/> when they were dropped because the
-    /// end had begun, or the write failed and ended the connection with
-    /// <see cref="MqttClientCloseReason.WriteFailed"/>, aborting the link. It does not throw.
+    /// A task that has completed: the answers are with the send path, or were dropped. A write that fails later ends
+    /// the connection with <see cref="MqttClientCloseReason.WriteFailed"/>, aborting the link. It does not throw.
     /// </returns>
-    private ValueTask<bool> WriteAnswersAsync()
+    private ValueTask WriteAnswersAsync()
     {
         if (_phase >= Phase.Closing)
         {
             _answers.Release(_pool);
-            return new ValueTask<bool>(false);
+            return ValueTask.CompletedTask;
         }
 
-        byte[] answers = _answers.Take(out int length);
-        return SendAsync(answers, length, SendKind.Other);
+        int answers = _answers.Count;
+        byte[] buffer = _answers.Take(out int length);
+        SendAnswers(buffer, length, answers);
+        return ValueTask.CompletedTask;
     }
 
     /// <summary>

@@ -42,7 +42,7 @@ public sealed partial class MqttWireClient
     private long _pingRequestTimestamp;
 
     /// <summary>
-    /// 1 while a PINGREQ is queued for the send lock or being written, 0 otherwise. A tick queues no second
+    /// 1 while a PINGREQ waits in the send path or is being written, 0 otherwise. A tick queues no second
     /// PINGREQ while one is queued, so a stalled write ahead of it does not pile pings up behind it.
     /// </summary>
     private int _pingQueued;
@@ -108,7 +108,7 @@ public sealed partial class MqttWireClient
     /// <see cref="MqttClientCloseReason.AcknowledgementTimedOut"/> when the oldest request has waited twice the
     /// interval for its next acknowledgement; otherwise sends PINGREQ when nothing was sent for half the interval,
     /// unless a PINGREQ is already queued or awaits its PINGRESP. The PINGRESP deadline counts from when the
-    /// PINGREQ's write begins, so a write stalled ahead of it in the send lock does not end the connection as
+    /// PINGREQ's write begins, so a write stalled ahead of it in the send path does not end the connection as
     /// <see cref="MqttClientCloseReason.KeepAliveTimedOut"/>.
     /// With keep-alive turned off by the server only the acknowledgement deadline is checked, against the client's
     /// own interval. Does nothing unless connected, so a tick that comes after the end, as a timer's late callback
@@ -116,9 +116,9 @@ public sealed partial class MqttWireClient
     /// </summary>
     /// <remarks>
     /// Runs on the timer's thread: it never blocks and holds the lock only to read the records. The PINGREQ goes
-    /// through the send lock in turn with every other packet, in a buffer rented from the pool; in steady state the
-    /// tick allocates nothing when the send lock is uncontended and the write completes synchronously. A write that
-    /// completes asynchronously (always in the browser) allocates its state machine.
+    /// through the send path in turn with every other packet, in a buffer rented from the pool; in steady state the
+    /// tick allocates nothing, also when the PINGREQ waits behind another write or its write does not complete at
+    /// once.
     /// </remarks>
     private void OnKeepAliveTick()
     {
@@ -163,14 +163,14 @@ public sealed partial class MqttWireClient
 
         if (Interlocked.CompareExchange(ref _pingQueued, 1, 0) != 0)
         {
-            // One is already waiting for the send lock; the send path clears this once its write has ended.
+            // One is already waiting in the send path, which clears this once its write has ended or it is dropped.
             return;
         }
 
         byte[] packet = _pool.Rent(pingReq.Length);
         pingReq.CopyTo(packet);
 
-        // Not awaited: the send lock writes it in turn and returns the buffer. A failed write ends the connection.
-        _ = SendAsync(packet, pingReq.Length, SendKind.PingRequest);
+        // The send path writes it in turn and returns the buffer. A failed write ends the connection.
+        Send(packet, pingReq.Length, SendKind.PingRequest);
     }
 }

@@ -64,8 +64,8 @@ public sealed partial class MqttWireClient
     /// <paramref name="qos"/> is above 2. Nothing is sent and no packet identifier is used.
     /// </exception>
     /// <remarks>
-    /// A QoS 0 publish is allocation-free when the send lock is uncontended and the write completes synchronously;
-    /// a write that completes asynchronously (always in the browser) allocates its state machine.
+    /// A QoS 0 publish allocates nothing in the steady state, also when it waits behind another write or its write
+    /// does not complete at once (always in the browser).
     /// </remarks>
     public ValueTask<MqttRequestResult> PublishAsync(string topic, ReadOnlyMemory<byte> payload, MqttQoS qos)
     {
@@ -198,7 +198,7 @@ public sealed partial class MqttWireClient
 
     /// <summary>
     /// Checks a publish against the connection, puts its record in place, encodes it and hands it to the send
-    /// lock, in one call so that its place in the send order is the order of the calls.
+    /// path, in one call so that its place in the send order is the order of the calls.
     /// </summary>
     /// <param name="topic">
     /// The topic as UTF-8, already checked.
@@ -231,7 +231,7 @@ public sealed partial class MqttWireClient
                 OutgoingRecords records = _records!;
 
                 // The record is in place, under the lock and while connected, before the packet reaches the send
-                // lock (6.9): an acknowledgement finds it, and the end of the connection completes it.
+                // path (6.9): an acknowledgement finds it, and the end of the connection completes it.
                 completion = records.RentCompletion();
                 RecordKind kind = qos == MqttQoS.AtLeastOnce
                     ? RecordKind.PublishQoS1
@@ -257,9 +257,9 @@ public sealed partial class MqttWireClient
         int length = PublishCodec.Write(packet, fields, payload);
         Debug.Assert(length == size, "The publish was measured differently from how it was written.");
 
-        // Not awaited: the send lock queues the write now, in call order, and returns the buffer once the write
-        // has ended. A failed write ends the connection, which completes the record with ConnectionLost.
-        _ = SendAsync(packet, length, SendKind.Publish);
+        // The send path writes it now or queues it, in call order, and returns the buffer once the write has ended.
+        // A failed write ends the connection, which completes the record with ConnectionLost.
+        Send(packet, length, SendKind.Publish);
         if (completion is null)
         {
             // QoS 0 ends when the message is handed over.

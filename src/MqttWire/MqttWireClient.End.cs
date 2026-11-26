@@ -147,10 +147,13 @@ public sealed partial class MqttWireClient
             && FitsServerMaximumPacketSize(DisconnectCodec.GetSize(reasonCode, null)))
         {
             byte[] packet = RentDisconnect(reasonCode: reasonCode, length: out int length);
-            if (!await SendAsync(packet: packet, length: length, kind: SendKind.Disconnect)
+
+            // Written behind every write handed over before it, so the close follows them all.
+            if (!await SendDisconnectAsync(packet: packet, length: length)
                     .ConfigureAwait(continueOnCapturedContext: false))
             {
-                // The write failed and aborted the link; there is nothing left to close.
+                // Not written: the write failed and aborted the link, or the send path takes nothing any more; there
+                // is nothing left to close.
                 return;
             }
         }

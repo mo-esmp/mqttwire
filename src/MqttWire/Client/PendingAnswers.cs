@@ -99,7 +99,7 @@ internal struct PendingAnswers
 
     /// <summary>
     /// Hands over the buffer with the encoded answers. The caller owns it and returns it to the pool, through
-    /// <c>SendAsync</c>; this type holds nothing afterwards, and the next <see cref="Add"/> rents a fresh buffer.
+    /// the send path; this type holds nothing afterwards, and the next <see cref="Add"/> rents a fresh buffer.
     /// Taking with no answer waiting is a client bug: it is asserted in debug builds and has no other path.
     /// </summary>
     /// <param name="length">

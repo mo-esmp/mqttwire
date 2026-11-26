@@ -126,7 +126,7 @@ public sealed class SendQueueTests
 
         afterWrap.AddRange(Drain(ref queue));
 
-        // The ring is empty with its head at index 6 of 8: nine writes wrap around the end and then force growth.
+        // The ring is empty with its head at index 4 of 8: nine writes wrap around the end and then force growth.
         for (int i = 100; i < 109; i++)
         {
             queue.Enqueue(WriteOf(i));

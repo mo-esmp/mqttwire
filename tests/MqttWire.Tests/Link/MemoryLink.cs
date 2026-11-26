@@ -89,6 +89,23 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     private ReadOnlyMemory<byte> _pendingWriteBuffer;
 
     /// <summary>
+    /// Whether the next write pends on a source that refuses the registration of its continuation
+    /// (<see cref="RefuseWriteRegistration"/>).
+    /// </summary>
+    private bool _refuseNextWrite;
+
+    /// <summary>
+    /// The source of the write that refused the registration of its continuation and has not been ended, or
+    /// <see langword="null"/>.
+    /// </summary>
+    private RefusingWrite? _refusedWrite;
+
+    /// <summary>
+    /// The packet of the write that pends on <see cref="_refusedWrite"/>.
+    /// </summary>
+    private ReadOnlyMemory<byte> _refusedWriteBuffer;
+
+    /// <summary>
     /// Whether <see cref="Abort"/> leaves a pending wait or read pending, until <see cref="Deliver"/>,
     /// <see cref="EndFromPeer"/> or <see cref="FailReads"/> ends it.
     /// </summary>
@@ -474,8 +491,8 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
     }
 
     /// <summary>
-    /// Waits until the link has taken a number of writes in all, for writes that a send lock hands to the thread
-    /// pool. One waiter at a time.
+    /// Waits until the link has taken a number of writes in all, for writes that the client's send path hands to the
+    /// thread pool. One waiter at a time.
     /// </summary>
     /// <param name="count">
     /// The value <see cref="WriteCount"/> must reach.
@@ -569,6 +586,48 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
             write.Fail(exception);
         }
 
+        return true;
+    }
+
+    /// <summary>
+    /// Makes the next write, and only that one, stay pending on a source that keeps the continuation it is given and
+    /// then throws <see cref="InvalidOperationException"/> out of the registration, as a broken link may; the write
+    /// is ended by <see cref="CompleteRefusedWrite"/>, which then runs the continuation that was kept.
+    /// </summary>
+    public void RefuseWriteRegistration()
+    {
+        lock (_gate)
+        {
+            _refuseNextWrite = true;
+        }
+    }
+
+    /// <summary>
+    /// Ends, successfully, the write that refused the registration of its continuation
+    /// (<see cref="RefuseWriteRegistration"/>), and runs the continuation it kept on the calling thread before this
+    /// returns. The write counts towards <see cref="WriteCount"/> and <see cref="TakeWritten"/>.
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> when such a write was pending and has been ended; <see langword="false"/> when none
+    /// was, and nothing changed.
+    /// </returns>
+    public bool CompleteRefusedWrite()
+    {
+        RefusingWrite write;
+        lock (_gate)
+        {
+            if (_refusedWrite is null)
+            {
+                return false;
+            }
+
+            write = _refusedWrite;
+            _refusedWrite = null;
+            AppendWritten(_refusedWriteBuffer.Span);
+            _refusedWriteBuffer = default;
+        }
+
+        write.Complete();
         return true;
     }
 
@@ -754,6 +813,14 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
                     return ValueTask.FromException(new OperationCanceledException());
                 }
 
+                if (_refuseNextWrite)
+                {
+                    _refuseNextWrite = false;
+                    _refusedWrite = new RefusingWrite();
+                    _refusedWriteBuffer = packet;
+                    return new ValueTask(_refusedWrite, 0);
+                }
+
                 if (_pendWrites && _reusableWrite is { } reusable)
                 {
                     if (_writePending)
@@ -832,7 +899,7 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
         bool overlapping = Interlocked.Increment(ref _beginning) > 1;
         lock (_gate)
         {
-            if (overlapping || _held.Count > 0 || _writePending)
+            if (overlapping || _held.Count > 0 || _writePending || _refusedWrite is not null)
             {
                 OverlappingWrites++;
                 Checks?.NoteOverlappingWrite();
@@ -1159,6 +1226,86 @@ internal sealed class MemoryLink : IMqttLink, IValueTaskSource, IValueTaskSource
             {
                 _core.Reset();
             }
+        }
+    }
+
+    /// <summary>
+    /// The source of a write that stays pending, keeps the continuation it is given and then throws out of the
+    /// registration, as a broken link may; <see cref="CompleteRefusedWrite"/> ends it later.
+    /// </summary>
+    private sealed class RefusingWrite : IValueTaskSource
+    {
+        /// <summary>
+        /// What awaits the write, kept although the registration threw.
+        /// </summary>
+        private Action<object?>? _continuation;
+
+        /// <summary>
+        /// The state of <see cref="_continuation"/>.
+        /// </summary>
+        private object? _state;
+
+        /// <summary>
+        /// Whether the write has been ended; 1 once it has.
+        /// </summary>
+        private int _completed;
+
+        /// <summary>
+        /// Ends the write successfully and runs what was registered, on the calling thread.
+        /// </summary>
+        public void Complete()
+        {
+            Volatile.Write(ref _completed, 1);
+            _continuation?.Invoke(_state);
+        }
+
+        /// <summary>
+        /// Tells the status: pending until the write is ended, then succeeded.
+        /// </summary>
+        /// <param name="token">
+        /// Unused: the source carries one write.
+        /// </param>
+        /// <returns>
+        /// The status.
+        /// </returns>
+        public ValueTaskSourceStatus GetStatus(short token) =>
+            Volatile.Read(ref _completed) == 1 ? ValueTaskSourceStatus.Succeeded : ValueTaskSourceStatus.Pending;
+
+        /// <summary>
+        /// Takes the result: nothing, the write succeeded.
+        /// </summary>
+        /// <param name="token">
+        /// Unused: the source carries one write.
+        /// </param>
+        public void GetResult(short token)
+        {
+            // The write succeeded and has no result.
+        }
+
+        /// <summary>
+        /// Keeps the continuation, then throws.
+        /// </summary>
+        /// <param name="continuation">
+        /// What awaits the write.
+        /// </param>
+        /// <param name="state">
+        /// Its state.
+        /// </param>
+        /// <param name="token">
+        /// Unused: the source carries one write.
+        /// </param>
+        /// <param name="flags">
+        /// Unused.
+        /// </param>
+        /// <exception cref="InvalidOperationException">
+        /// Always: the registration is refused.
+        /// </exception>
+        public void OnCompleted(Action<object?> continuation, object? state, short token,
+            ValueTaskSourceOnCompletedFlags flags)
+        {
+            _continuation = continuation;
+            _state = state;
+            throw new InvalidOperationException("The write takes no continuation.");
         }
     }
 
