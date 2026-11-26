@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/mo-esmp/mqttwire/security/policy
+    about: Do not open a public issue for a vulnerability. Follow the security policy to report it privately.
+  - name: What MqttWire implements of MQTT 5
+    url: https://github.com/mo-esmp/mqttwire/blob/main/docs/mqtt-support.md
+    about: Every packet, property, limit and deadline, and what is not implemented.
