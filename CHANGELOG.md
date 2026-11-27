@@ -33,7 +33,8 @@ the public API may change between previews, and such a change is listed here as 
 
 ## 0.1.0-preview.1 (2026-11-23)
 
-The first release. .NET 10 only.
+The first release, tagged but not published on nuget.org; its contents first shipped there in
+0.1.0-preview.2. .NET 10 only.
 
 ### MqttWire.Server
 

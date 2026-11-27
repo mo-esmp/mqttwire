@@ -165,7 +165,9 @@ come before the endpoint.
 | `MaxOutgoingMessages` | 1,000 | How many messages may wait for one client. A client that falls further behind is disconnected. |
 | `MaxOutgoingBytes` | 1,048,576 | How many bytes may wait for one client, at least 65,536: the topic and the payload of every message taken and not yet written, and the acknowledgements that wait. A client that falls further behind is disconnected. |
 
-An invalid option throws `OptionsValidationException` at start-up, and the host does not start.
+An invalid option throws `OptionsValidationException` when the server is first resolved (in a
+`WebApplication`, at `MapMqttWire`), or at the latest when the host starts, which then does not
+start.
 The deadlines and the other bounds are fixed.
 
 ### Sample: a group chat
@@ -230,6 +232,9 @@ ValueTask<MqttRequestResult> done = client.PublishAsync("some/topic", payload, M
 - An `MqttPublish` is valid only while `OnMessage` runs. Copy what must outlive the call. If
   `OnMessage` throws, the client ends the connection.
 - `MaxIncomingPacketBytes` (default 1 MiB) is the largest packet the client accepts.
+- The client may write several acknowledgements in one WebSocket message, so the server must
+  read the messages as one byte stream, as MQTT over WebSockets requires. Any MQTT 5 broker
+  does.
 
 ### Reconnecting client
 
@@ -263,11 +268,12 @@ dotnet test -c Release
 
 To try a change as a package, pack both projects into a folder and add the folder as a package
 source. `MqttWire.Server` depends on exactly its own version of `MqttWire`, because it uses the
-codec inside it, so pack the two together and give each pack a new version:
+codec inside it, so pack the two together and give each pack a new version, above the latest
+on nuget.org so that the local one wins:
 
 ```
-dotnet pack src/MqttWire -c Release -o artifacts/packages -p:Version=0.1.0-dev.1
-dotnet pack src/MqttWire.Server -c Release -o artifacts/packages -p:Version=0.1.0-dev.1
+dotnet pack src/MqttWire -c Release -o artifacts/packages -p:Version=0.1.0-preview.3.dev.1
+dotnet pack src/MqttWire.Server -c Release -o artifacts/packages -p:Version=0.1.0-preview.3.dev.1
 ```
 
 `artifacts/` is not committed.

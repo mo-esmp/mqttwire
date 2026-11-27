@@ -1,13 +1,17 @@
 # The part of MQTT 5 that MqttWire implements
 
-This is the stated scope of MqttWire `0.1.0-preview.1`: what its server and its client do with
+This is the stated scope of MqttWire `0.1.0-preview.2`: what its server and its client do with
 every packet and property of MQTT 5, the limits and deadlines they hold, and what is not
 implemented. A difference between this document and what MqttWire does on the wire is a bug in
 one of the two; please report it.
 
 MqttWire speaks **MQTT 5.0 over WebSockets only**: binary messages, WebSocket sub-protocol
 `mqtt`. A request to the server's endpoint that does not ask for that sub-protocol is answered
-with HTTP 400, and a text message closes the WebSocket with status 1003.
+with HTTP 400, and a text message closes the WebSocket with status 1003. The client does the
+same from its side: a server that does not answer with the sub-protocol `mqtt` is closed with
+status 1002 and the connect fails, and a text message closes the WebSocket with status 1003. A
+write that begins after that close has started is dropped; a write that had already begun may
+still complete, and then follows the close frame.
 
 **MQTT packets and WebSocket messages are not the same thing.** Both sides read the incoming
 messages as one stream of bytes: a packet may span messages, and a message may hold several
@@ -16,10 +20,11 @@ packets. What each side writes:
 - **The server** writes acknowledgements that wait together as one message, and a PUBLISH whose
   packet is over 16,384 bytes as several messages: its header, then its payload in pieces of at
   most 65,536 bytes. A client must not assume one packet per message.
-- **The client** writes one packet per message in `0.1.0-preview.1`. From the next release it
-  writes the answers it owes (PUBACK, PUBREC, PUBREL, PUBCOMP) that wait together as one
-  message, and every other packet in a message of its own. A server must not assume one packet
-  per message either.
+- **The client** writes the answers it owes (PUBACK, PUBREC, PUBREL, PUBCOMP) that wait
+  together as one message: when it has read all that has arrived, and at the latest before it
+  handles the sixteenth packet after the oldest of them. Every other packet goes in a message
+  of its own. `0.1.0-preview.1` wrote one packet per message. A server must not assume one
+  packet per message either.
 
 After a refusing CONNACK or a DISCONNECT, the WebSocket is closed with status 1000.
 
@@ -175,7 +180,8 @@ both.
   evicted first. It is not a delivery receipt.
 
 The client (`MqttWireClient`) follows the same rules from its side: it announces a Receive
-Maximum of 1,024, honours the server's, never has more than 1,024 publishes in flight, and
+Maximum of 1,024, honours the server's (a publish past it fails at once with
+`ReceiveMaximumReached` and is not sent), never has more than 1,024 publishes in flight, and
 treats the connection as lost when an acknowledgement is outstanding for longer than twice the
 keep-alive interval.
 
@@ -259,13 +265,15 @@ DISCONNECT carry a reason code and, for a refusal, a Reason String of at most 25
 |---|---|
 | Session Present | Must be 0; otherwise the client ends the connection with DISCONNECT `0x82`. |
 | Reason String, User Property | Given to the caller in the connect result. |
-| Server Keep Alive, Receive Maximum, Maximum Packet Size | Honoured. Maximum Packet Size limits every packet sent after the CONNACK. |
+| Server Keep Alive, Receive Maximum, Maximum Packet Size | Honoured. Maximum Packet Size limits every packet sent after the CONNACK: a publish, subscribe or unsubscribe over it fails with `PacketTooLarge` and is not sent. |
 | Maximum QoS | Honoured: a publish above it fails at once and is not sent. |
 | Everything else | Ignored. |
 
 **What else the client does with what it reads.** A PUBLISH with a Topic Alias ends the
 connection with DISCONNECT `0x94`; a packet over `MaxIncomingPacketBytes` with `0x95`, before
-it is buffered; too many unanswered QoS 2 publishes from the server with `0x93`. The client's
+it is buffered; a QoS 1 or 2 publish while 1,024 QoS 2 publishes from the server wait for
+their PUBREL with `0x93`. A repeat of a QoS 2 publish that waits for its PUBREL is answered with
+PUBREC and not handed to the application again. The client's
 own publishes, subscriptions and unsubscriptions carry no properties; a publish never sets the
 retain flag, and a SUBSCRIBE asks for one filter with a QoS and no other option.
 
@@ -277,6 +285,7 @@ retain flag, and a SUBSCRIBE asks for one filter with a QoS and no other option.
 | The application's `OnMessage` throws | DISCONNECT `0x83`. |
 | The application disposes the client | DISCONNECT `0x00`. |
 | A timeout, or a failed read or write | Nothing: the link is aborted. |
+| An acknowledgement or a PINGREQ it owes is over the server's Maximum Packet Size | Nothing: the link is aborted (reason `0x95`). |
 
 ## 6. Limits
 
@@ -315,7 +324,8 @@ A client that falls further behind than the two outgoing limits allow is disconn
 |---|---|
 | Largest packet accepted (`MaxIncomingPacketBytes`) | 1 MiB by default; 4,096 to 268,435,460 |
 | Receive Maximum announced | 1,024 |
-| Publishes in flight at QoS 1 and 2 | the server's Receive Maximum, at most 1,024 |
+| Publishes in flight at QoS 1 and 2 | the server's Receive Maximum, at most 1,024; one more fails at once with `ReceiveMaximumReached` and is not sent |
+| QoS 2 publishes from the server waiting for PUBREL | 1,024; a new QoS 1 or 2 publish beyond them ends the connection with `0x93` |
 | Publish bytes waiting for a slow link | 1 MiB; a publish beyond it fails with `SendQueueFull`, except that one is always taken when nothing waits |
 | Answers waiting to be written (PUBACK, PUBREC, PUBREL, PUBCOMP) | 4,096, checked after each batch of up to 16 is handed over, so at most 4,112 wait; once the count passes 4,096 the client stops reading until enough of them are written to bring it back to 4,096 or fewer |
 
