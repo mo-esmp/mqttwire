@@ -1,10 +1,26 @@
 name: CI
 
+# A change that touches only documentation runs nothing: no file in the list is built, tested or read by a test (the
+# README is packed, but a change to it cannot break the build). A change with any other file runs everything. GitHub
+# does not apply path filters to tag pushes, so a v* tag always runs the build and the publish. No branch protection
+# requires these checks; if one ever does, a skipped run leaves them pending, and the filter has to move into the jobs.
 on:
   push:
     branches: [main]
     tags: ['v*']
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/dependabot.yml'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/dependabot.yml'
 
 permissions:
   contents: read
