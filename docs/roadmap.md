@@ -28,9 +28,11 @@ MqttWire lives in this repository; its design moved here from GrainWire on 2026-
 | **After Unity 7** | A .NET Standard 2.1 build of the client (#42). |
 | **1.0** | The public API is frozen. Not before GrainWire has run on MqttWire and the memory target is met. |
 
-Not planned: a raw TCP endpoint, MQTT 3.x, stored sessions, Will messages, topic aliases, shared
-subscriptions, subscription identifiers, enhanced authentication, Native AOT and trimming
-annotations (the owner, 2026-11-27; #29).
+Not planned: a raw TCP endpoint, MQTT 3.x, Will messages, topic aliases, Native AOT and trimming
+annotations (the owner, 2026-11-27; #29). Also not planned, but each with an issue that holds
+the case for it, should the owner change that decision: stored sessions (#43), shared
+subscriptions as a server feature (#44), subscription identifiers (#45) and enhanced
+authentication (#46).
 
 ## GrainWire
 
