@@ -47,6 +47,9 @@
     it ("0.2" is "0.2.0", and build metadata after "+" is dropped). For the same reason the dependency is compared
     with the version the manifest itself states, not with $(PackageVersion); the manifest keeps build metadata in
     its own version and a dependency never has any, so the metadata is left out of the comparison.
+
+    The package has a dependency group for each target framework, and the dependency is pinned in each of them: a
+    group without it, or with another version, fails the pack as well.
   -->
   <Target Name="CheckMqttWireIsPinned" AfterTargets="GenerateNuspec">
     <ItemGroup>
@@ -58,14 +61,19 @@
     <XmlPeek XmlInputPath="@(_PackedManifest)" Query="//*[local-name()='metadata']/*[local-name()='version']/text()">
       <Output TaskParameter="Result" PropertyName="_PackedVersion" />
     </XmlPeek>
+    <XmlPeek XmlInputPath="@(_PackedManifest)" Query="//*[local-name()='dependencies']/*[local-name()='group']/@targetFramework">
+      <Output TaskParameter="Result" ItemName="_PackedDependencyGroup" />
+    </XmlPeek>
     <XmlPeek XmlInputPath="@(_PackedManifest)" Query="//*[local-name()='dependency'][@id='MqttWire']/@version">
       <Output TaskParameter="Result" ItemName="_PackedMqttWireVersion" />
     </XmlPeek>
     <PropertyGroup>
       <_PackedVersionWithoutMetadata>$(_PackedVersion.Split('+')[0])</_PackedVersionWithoutMetadata>
     </PropertyGroup>
-    <Error Condition="'$(_PackedVersionWithoutMetadata)' == '' Or '@(_PackedMqttWireVersion)' != '[$(_PackedVersionWithoutMetadata)]'"
-           Text="MqttWire.Server must depend on exactly its own version of MqttWire, '[$(_PackedVersionWithoutMetadata)]', but its packed manifest says '@(_PackedMqttWireVersion)'. See the target PinMqttWireToThisVersion." />
+    <Error Condition="'$(_PackedVersionWithoutMetadata)' == '' Or '@(_PackedMqttWireVersion->Count())' == '0' Or '@(_PackedMqttWireVersion->Count())' != '@(_PackedDependencyGroup->Count())'"
+           Text="MqttWire.Server must depend on exactly its own version of MqttWire, '[$(_PackedVersionWithoutMetadata)]', for every target, but its packed manifest has the dependency groups '@(_PackedDependencyGroup)' and the MqttWire dependencies '@(_PackedMqttWireVersion)'. See the target PinMqttWireToThisVersion." />
+    <Error Condition="'%(_PackedMqttWireVersion.Identity)' != '[$(_PackedVersionWithoutMetadata)]'"
+           Text="MqttWire.Server must depend on exactly its own version of MqttWire, '[$(_PackedVersionWithoutMetadata)]', but its packed manifest says '%(_PackedMqttWireVersion.Identity)'. See the target PinMqttWireToThisVersion." />
   </Target>
 
   <ItemGroup>

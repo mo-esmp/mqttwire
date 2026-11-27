@@ -12,8 +12,11 @@ sample's own.
 ## Running it
 
 ```
-dotnet run --project samples/GroupChat/GroupChat.Server
+dotnet run --project samples/GroupChat/GroupChat.Server -f net11.0
 ```
+
+The sample builds for .NET 10 and .NET 11, like the packages, and `-f` chooses which one runs:
+`-f net10.0` for .NET 10. The Blazor WebAssembly client is the build of the same target.
 
 Open <http://localhost:5210> in two browser tabs, give each a name, join the same group in both
 and send a message from each.

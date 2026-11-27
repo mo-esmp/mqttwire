@@ -38,6 +38,7 @@ handler. Where this document says "the host", that handler decides.
 |---|---|
 | Protocol | MQTT 5.0. A CONNECT for another version is refused with `0x84`. |
 | Transport | WebSockets, on ASP.NET Core (server) and `ClientWebSocket` (client). No raw TCP. |
+| Frameworks | .NET 10 and .NET 11. Each package carries a build for each, from the same source: everything in this document holds on both. `0.1.0-preview.2` and earlier were built for .NET 10 only. |
 | QoS | 0, 1 and 2, in both directions, as complete exchanges inside one connection. |
 | Sessions | None. The server does not look at the Clean Start flag: every connection starts with nothing, and the CONNACK says Session Present 0. Session Expiry Interval is answered with 0. Nothing is kept for a client that is away, and nothing is sent a second time. |
 | Subscriptions | Passed to the host, filter by filter. MqttWire keeps no subscription table and matches no wildcard. |

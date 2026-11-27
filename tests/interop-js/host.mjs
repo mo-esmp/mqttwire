@@ -1,5 +1,5 @@
 // Starts tests/MqttWire.TestHost as a process of its own and stops it again. The host must have been
-// built first: `dotnet build tests/MqttWire.TestHost -c Release`.
+// built first: `dotnet build tests/MqttWire.TestHost -c Release`, which builds it for every target.
 
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -8,6 +8,13 @@ import { fileURLToPath } from "node:url";
 
 /** The test host's project folder. */
 const project = fileURLToPath(new URL("../MqttWire.TestHost", import.meta.url));
+
+/**
+ * The target framework of the host's build to run, and so the runtime the server under test runs on:
+ * `MQTTWIRE_TEST_FRAMEWORK`, `net10.0` or `net11.0`, or the newest when it is not set. The host is
+ * built for both, and `dotnet run` does not choose between them by itself.
+ */
+const framework = process.env.MQTTWIRE_TEST_FRAMEWORK || "net11.0";
 
 /** How long the host may take to print its LISTENING line, in milliseconds. */
 const startTimeout = 60_000;
@@ -29,7 +36,7 @@ export async function startHost(hostArguments = []) {
   const child = spawn(
     "dotnet",
     [
-      "run", "--project", project, "-c", "Release", "--no-build", "--no-launch-profile",
+      "run", "--project", project, "-c", "Release", "-f", framework, "--no-build", "--no-launch-profile",
       "--", "--urls", "http://127.0.0.1:0", ...hostArguments,
     ],
     { stdio: ["pipe", "pipe", "inherit"], detached: process.platform !== "win32" },
@@ -72,13 +79,13 @@ async function readPort(child, exited) {
       }
     }
 
-    throw new Error("The test host ended before it listened. Was it built? (dotnet build tests/MqttWire.TestHost -c Release)");
+    throw new Error(`The test host ended before it listened. Was it built for ${framework}? (dotnet build tests/MqttWire.TestHost -c Release)`);
   })();
   const timedOut = once(timer, "abort").then(() => {
     throw new Error(`The test host did not listen within ${startTimeout} ms.`);
   });
   const ended = exited.then(() => {
-    throw new Error("The test host ended before it listened. Was it built? (dotnet build tests/MqttWire.TestHost -c Release)");
+    throw new Error(`The test host ended before it listened. Was it built for ${framework}? (dotnet build tests/MqttWire.TestHost -c Release)`);
   });
 
   // The losers are still pending or reject later; neither may end the process as an unhandled rejection.

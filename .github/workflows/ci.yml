@@ -25,21 +25,27 @@ on:
 permissions:
   contents: read
 
+# Everything is built for net10.0 and net11.0. The .NET 11 SDK builds both (global.json); the 10.0.x that is installed
+# beside it is there for its runtime and its ASP.NET Core, which the net10.0 tests and test host run on.
 jobs:
   dotnet:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       CI: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            10.0.x
+            11.0.x
       - run: dotnet restore
       - run: dotnet build --no-restore -c Release
+      # Both test projects, each on both targets: the allocation tests must hold on each runtime.
       - run: dotnet test --no-build -c Release --logger "trx;LogFileName=test-results.trx"
-      # Packs both packages, which also checks that MqttWire.Server depends on exactly its own version of MqttWire.
+      # Packs both packages, each with a build for each target, which also checks that MqttWire.Server depends on
+      # exactly its own version of MqttWire for every target.
       - run: dotnet pack src/MqttWire --no-build -c Release -o artifacts/packages
       - run: dotnet pack src/MqttWire.Server --no-build -c Release -o artifacts/packages
       # The same check where the manifest is somewhere else and NuGet normalizes the version ("0.2" is "0.2.0").
@@ -52,22 +58,30 @@ jobs:
           path: artifacts/packages
           if-no-files-found: error
 
+  # MQTT.js against the test host, once on each runtime: host.mjs runs the build MQTTWIRE_TEST_FRAMEWORK names.
   interop-js:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [net10.0, net11.0]
     env:
       CI: true
+      MQTTWIRE_TEST_FRAMEWORK: ${{ matrix.framework }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            10.0.x
+            11.0.x
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: tests/interop-js/package-lock.json
-      - run: dotnet build tests/MqttWire.TestHost -c Release
+      - run: dotnet build tests/MqttWire.TestHost -c Release -f ${{ matrix.framework }}
       - run: npm ci
         working-directory: tests/interop-js
       - run: npm test
@@ -78,7 +92,7 @@ jobs:
   # policy on nuget.org names the repository and this file; renaming either needs the policy updated.
   #
   # The job is separate so that only it may request the token: the other jobs run the code of pull requests. It runs
-  # only once both of them pass.
+  # only once both of them pass, the interop on both runtimes.
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [dotnet, interop-js]
@@ -94,7 +108,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 11.0.x
 
       # A tag whose version is not the packages' would publish nothing new (--skip-duplicate) or the wrong version:
       # both packages must carry the tag's version, v0.1.0-preview.2 for 0.1.0-preview.2.

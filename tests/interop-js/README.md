@@ -12,7 +12,8 @@ stopping (`0x8B`).
 
 ## Running them
 
-Node 24 or later and the .NET 10 SDK are needed. From the repository's root:
+Node 24 or later and the .NET 11 SDK are needed, and the .NET 10 runtime with ASP.NET Core to run
+the host on .NET 10. From the repository's root:
 
 ```
 dotnet build tests/MqttWire.TestHost -c Release
@@ -21,7 +22,9 @@ npm ci
 npm test
 ```
 
-The host must be built first: `host.mjs` runs it with `--no-build`. CI runs the same steps in the
+The host must be built first: `host.mjs` runs it with `--no-build`. The build is for both targets,
+and the tests run against one of them: the `net11.0` host unless the environment variable
+`MQTTWIRE_TEST_FRAMEWORK` says `net10.0`. CI runs the same steps once for each target, in the
 `interop-js` job of `.github/workflows/ci.yml`.
 
 ## The pinned version

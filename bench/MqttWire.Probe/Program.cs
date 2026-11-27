@@ -24,10 +24,22 @@ namespace MqttWire.Probe;
 /// <code>
 /// git worktree add ../mqttwire-before &lt;commit&gt;
 /// dotnet build -c Release ../mqttwire-before/src/MqttWire/MqttWire.csproj -p:AssemblyName=MqttWire.Before -o ../mqttwire-before-bin
-/// dotnet build -c Release bench/MqttWire.Probe/MqttWire.Probe.csproj -p:BeforeAssembly=../../../mqttwire-before-bin/MqttWire.Before.dll
-/// dotnet bench/MqttWire.Probe/bin/Release/net10.0/MqttWire.Probe.dll
+/// dotnet build -c Release --no-incremental bench/MqttWire.Probe/MqttWire.Probe.csproj -p:BeforeAssembly=../../../mqttwire-before-bin/MqttWire.Before.dll
+/// dotnet bench/MqttWire.Probe/bin/Release/net11.0/MqttWire.Probe.dll
 /// git worktree remove ../mqttwire-before
 /// </code>
+/// <para>
+/// The probe is built for <c>net10.0</c> and <c>net11.0</c>, and the folder in the fourth command chooses the runtime
+/// it measures on. An older client from before the two targets (mo-esmp/mqttwire#47) builds for <c>net10.0</c> only,
+/// and runs on either; one from after it needs <c>-f net10.0</c> or <c>-f net11.0</c> in the second command, since
+/// <c>-o</c> takes one target's output. To compare the two runtimes, run the two builds of the probe in turns.
+/// </para>
+/// <para>
+/// <c>--no-incremental</c> in the third command matters when the probe was built without <c>before</c> earlier: an
+/// incremental build then keeps the old <c>MqttWire.Probe.deps.json</c>, which does not list the older assembly, and
+/// the probe ends with a <see cref="FileNotFoundException"/> for <c>MqttWire.Before</c>. The same holds for
+/// building it without <c>before</c> again.
+/// </para>
 /// <para>
 /// <c>BeforeAssembly</c> is resolved from the probe's project folder, so an absolute path is the safer choice. The
 /// probe built with it references the older assembly under the extern alias <c>before</c> and compiles the

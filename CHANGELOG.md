@@ -8,6 +8,14 @@ the public API may change between previews, and such a change is listed here as 
 
 ### MqttWire and MqttWire.Server
 
+- **Both packages are built for .NET 11 as well as .NET 10** (#47): each carries a `net10.0` and
+  a `net11.0` assembly, and NuGet gives an application the one for its framework. The two come
+  from the same source, so the protocol, the public API, the limits and the deadlines are the
+  same on both. Every test, the allocation tests included, and the MQTTnet and MQTT.js interop
+  now run on both runtimes. MqttWire allocates the same on both and adds the same 600 to 700
+  bytes to an idle connection; ASP.NET Core 11 itself holds about 2,000 bytes more for an idle
+  WebSocket connection than ASP.NET Core 10. The measurements are in
+  [docs/bench/2026-11-net11.md](docs/bench/2026-11-net11.md).
 - **The packages have an icon** (#32) on nuget.org and in package managers, drawn from
   `assets/icon.svg`.
 
