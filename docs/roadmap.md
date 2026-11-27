@@ -23,13 +23,14 @@ MqttWire lives in this repository; its design moved here from GrainWire on 2026-
 |---|---|
 | **0.1.0-preview.1** (tagged `v0.1.0-preview.1` on 2026-11-25; never published on nuget.org; [what changed](../CHANGELOG.md#010-preview1-2026-11-23)) | The codec (internal). The client: one connection per instance, any QoS. The opt-in reconnecting client. The connection server, driven by the host through a six-method handler and a state slot per connection. QoS 0, 1 and 2 inside a connection, in both directions. The two outgoing limits, the deadlines, and a bounded shutdown. Shared topics through the host, with the `GroupChat` sample. Interop tests with MQTTnet and MQTT.js. The benchmark, and the document that lists the part of MQTT 5 that is implemented. .NET 10 only. |
 | **0.1.0-preview.2** (published on nuget.org on 2026-11-26, by CI from the tag `v0.1.0-preview.2` through Trusted Publishing; [what changed](../CHANGELOG.md#010-preview2-2026-11-26)) | The first release on nuget.org: everything in 0.1.0-preview.1, and a client that writes the acknowledgements it owes together in one WebSocket message (#12) and whose sends no longer hold up its reading or allocate while they wait for another write (#13). |
-| **Later, each needing its own design** | A routing helper: a topic table and fan-out on top of the handler. Retained messages, through the host or that helper. Metrics. Limits across connections. |
-| **Only if a measurement asks for it** | Own WebSocket framing, if what Kestrel and .NET's WebSocket cost per connection turns out to be most of the total. |
-| **After Unity 7** | A .NET Standard 2.1 build of the client. |
+| **Later, each needing its own design** | A routing helper: a topic table and fan-out on top of the handler (#36). Retained messages, through the host or that helper (#37). The properties of a PUBLISH, passed to the host and the client (#38). Metrics (#39). Limits across connections (#40). |
+| **Only if a measurement asks for it** | Own WebSocket framing, if what Kestrel and .NET's WebSocket cost per connection turns out to be most of the total (#41). |
+| **After Unity 7** | A .NET Standard 2.1 build of the client (#42). |
 | **1.0** | The public API is frozen. Not before GrainWire has run on MqttWire and the memory target is met. |
 
 Not planned: a raw TCP endpoint, MQTT 3.x, stored sessions, Will messages, topic aliases, shared
-subscriptions, subscription identifiers, enhanced authentication.
+subscriptions, subscription identifiers, enhanced authentication, Native AOT and trimming
+annotations (the owner, 2026-11-27; #29).
 
 ## GrainWire
 
