@@ -5,6 +5,9 @@ Status: final design (v6), approved by the owner on 2026-11-19
 Updated on 2026-11-22 to the server as built in step 3 (mo-esmp/mqttwire#6).
 Updated on 2026-11-23 to the rest of step 3: MQTT.js, the sample and the benchmark.
 Updated on 2026-11-23 to step 4, the preview package (mo-esmp/mqttwire#7).
+Amended by [the client writes its answers when it runs out of input](2026-11-24-client-acknowledgement-batching-design.md)
+(6.9) and [the client's send path](2026-11-25-client-send-path-design.md) (6.5, 6.9).
+Updated on 2026-11-27 to the client's public API as built and to the release of `0.1.0-preview.2`.
 Moved to the `mqttwire` repository on 2026-11-20.
 Companion: [GrainWire on MqttWire](2026-11-19-grainwire-on-mqttwire-design.md), the first host.
 History: this design is v5 of ["GrainWire: its own minimal MQTT 5 implementation"](2026-11-19-minimal-mqtt-design.md),
@@ -284,7 +287,7 @@ await using MqttWireClient client = new(new MqttWireClientOptions
     MaxIncomingPacketBytes = 1_048_576,                       // the largest packet the client accepts
     ConfigureWebSocket = ws => ws.SetRequestHeader("X-Thing", "…"),
     OnMessage = (in MqttPublish message) => { /* payload valid during the call */ },
-    OnClosed = reason => { },
+    OnClosed = info => { /* info.Reason, the server's info.ReasonCode and info.ReasonString, info.Exception */ },
 });
 
 MqttConnectAck ack = await client.ConnectAsync(cancellationToken);   // reason code, reason string, user properties
@@ -296,10 +299,11 @@ ValueTask<MqttRequestResult> done = client.PublishAsync("some/topic", payload, M
 - **`ConnectAsync` reports every outcome in the `MqttConnectAck` it returns.** Connected;
   refused by the server (its CONNACK reason code, reason string and user properties); or no
   valid CONNACK (unreachable, timed out, malformed, a protocol error). When the client is not
-  connected, `Failure` says why. It throws only for a caller bug (invalid options, a second call
-  to `ConnectAsync`), for the caller's own cancellation, for an exception from
-  `ConfigureWebSocket`, and with `ObjectDisposedException` when the client is disposed during
-  the connect. `OnClosed` is called only for a connection that `ConnectAsync` reported as
+  connected, `Failure` says why. The whole connect, link and CONNACK together, is bounded by 10
+  seconds; past it `Failure` is `ConnectTimedOut`. It throws only for a caller bug (a second
+  call to `ConnectAsync` throws `InvalidOperationException`), for the caller's own
+  cancellation, for an exception from `ConfigureWebSocket`, and with `ObjectDisposedException`
+  when the client is disposed before or during the connect. `OnClosed` is called only for a connection that `ConnectAsync` reported as
   connected.
 - **`PublishAsync`, `SubscribeAsync` and `UnsubscribeAsync` return
   `ValueTask<MqttRequestResult>`.** The result holds a status and the server's reason code.
@@ -321,18 +325,30 @@ ValueTask<MqttRequestResult> done = client.PublishAsync("some/topic", payload, M
   maximum packet size, fails at once and is not sent. So does a publish while 1 MiB of earlier
   publishes waits to be written, because the link is slower than the caller: it fails with
   `SendQueueFull`. One publish is always taken when nothing waits, so a larger message can
-  still be sent.
+  still be sent ([the client's send path](2026-11-25-client-send-path-design.md)).
 - `MaxIncomingPacketBytes` is the largest packet the client accepts (default 1 MiB, from 4,096
   to 268,435,460). The client announces it in CONNECT (6.9).
 - `OnMessage` and `OnClosed` are called one at a time, in order. `OnClosed` is called once.
   An `OnMessage` that throws ends the connection (6.9); an exception from `OnClosed` is
   swallowed.
-- Options are checked when the client is created: `KeepAlive` is between 1 second and 65,535
-  seconds and is rounded up to whole seconds. `ConfigureWebSocket` runs before the client adds
+- Options are checked when the client is created, and a bad one throws: `Uri` is an absolute
+  `ws` or `wss` URI; `ClientId` is not empty; `ClientId`, `UserName` and `Password` hold no
+  U+0000 and no unpaired surrogate, and are at most 65,535 UTF-8 bytes; `KeepAlive` is between
+  1 second and 65,535 seconds and is rounded up to whole seconds. `ConfigureWebSocket` runs before the client adds
   the `mqtt` sub-protocol, so it cannot remove it; an exception it throws fails that
   `ConnectAsync`. In Blazor WebAssembly the browser supports only part of
   `ClientWebSocketOptions` (no request headers, no TLS or proxy settings); the documentation
   says so. For the same reason the client does not set `KeepAliveInterval` there (6.5).
+
+**The client's types.** Beside the options, the client and the result types above:
+
+| Type | Contract |
+|---|---|
+| `MqttConnectAck` | `IsConnected`; `Failure` (an `MqttClientCloseReason`, null when connected); the CONNACK's `ReasonCode`, `ReasonString` and `UserProperties` (`MqttWireUserProperty`: `Name`, `Value`); and `Exception`, the network error behind `Unreachable`. |
+| `MqttClientCloseInfo` | Why a connection ended: `Reason`; the `ReasonCode` of the DISCONNECT received or sent; the server's `ReasonString`; and the `Exception` behind the end, if any. Passed to `OnClosed`, and to the reconnecting client's `OnDisconnected`. |
+| `MqttClientCloseReason` | `None`, `Disposed`, `ServerDisconnected`, `ConnectionLost`, `WriteFailed`, `Unreachable`, `ConnectTimedOut`, `ConnectRefused`, `ProtocolError`, `KeepAliveTimedOut`, `AcknowledgementTimedOut`, `MessageHandlerThrew`. `MqttConnectAck.Failure` uses the connect ones. |
+| `MqttPublish` | A `ref struct` view valid only during the call to `OnMessage` (`MqttMessageHandler(in MqttPublish)`): `Topic` and `Payload` as bytes, `GetTopic()` for the topic as a string, `QoS`, `Retain`. |
+| `MqttReasonCode` | Every MQTT 5 reason code, named. |
 
 #### The reconnecting client (opt-in)
 
@@ -348,7 +364,7 @@ await using MqttWireReconnectingClient client = new(new MqttWireReconnectOptions
     InitialDelay = TimeSpan.FromMilliseconds(500),
     MaxDelay = TimeSpan.FromSeconds(15),
     OnConnected = info => { /* info.IsReconnect: catch up on what was missed */ },
-    OnDisconnected = reason => { },
+    OnDisconnected = info => { /* an MqttClientCloseInfo */ },
     OnStopped = ack => { /* it gave up; see below */ },
     OnCallbackError = exception => { },                     // there is no logger; see Rules
     OnMessage = (in MqttPublish message) => { },
@@ -370,8 +386,12 @@ ValueTask<MqttRequestResult> done = client.PublishAsync("groups/42", payload, Mq
   once (two clients with the same identifier taking each other over, for example) is not retried
   every `InitialDelay` for ever.
 - **Fresh options for every attempt.** The `ClientOptions` callback is called before each one.
-  An exception from that callback, or from creating the client, counts as a failed attempt and
-  is retried.
+  The options it returns leave `OnMessage` and `OnClosed` null, since the wrapper has its own.
+  An exception from that callback, options that set either of those two, and options the
+  client refuses are reported to `OnCallbackError` and count as a failed attempt, which is
+  retried. `InitialDelay` is at least 1 ms; `MaxDelay` is at least `InitialDelay` and at most
+  4,294,967,294 ms, the longest delay a timer supports; no delay is shorter than 1 ms.
+  `OnSubscriptionRefused` gets the filter and its `MqttRequestResult`.
 - **It remembers subscriptions and makes them again.** What the application subscribed to
   through the wrapper is subscribed again on every new connection, before `OnConnected` is
   called. A subscription the server refuses this time is dropped from what is remembered and
@@ -1097,7 +1117,7 @@ The inside of `MqttWireClient`.
 
 - **Connect:** open the link, send CONNECT (protocol 5, clean start, client id, user name,
   password, keep-alive, receive maximum 1,024, maximum packet size; no Will), wait for
-  CONNACK within the connect timeout. The Maximum Packet Size comes from
+  CONNACK within the connect timeout (10 seconds for the link and the CONNACK together). The Maximum Packet Size comes from
   `MaxIncomingPacketBytes` (default 1 MiB, 4,096 to 268,435,460). A packet over it is refused as
   soon as its header is read, before it is buffered, with DISCONNECT `0x95`.
 - **Packet identifiers.** PUBLISH, SUBSCRIBE and UNSUBSCRIBE draw from one space (1 to 65535).
@@ -1451,8 +1471,9 @@ sat there would be closed during the run.
 - **`docs/mqtt-support.md`:** the part of MQTT 5 that is implemented: the packets of 6.4, the
   property tables of 6.7, the limits and deadlines of 6.6. A report can be checked against a
   stated scope.
-- **Versions:** semantic versioning; the two packages always carry the same version. The first
-  release is a preview (`0.1.0-preview.1`), and the public API may still change until 1.0.
+- **Versions:** semantic versioning; the two packages always carry the same version. Releases
+  are previews (`0.1.0-preview.N`) until 1.0, and the public API may still change between them;
+  the first on nuget.org is `0.1.0-preview.2`.
   `MqttWire.Server` depends on exactly its own version of `MqttWire`, not on "that version or
   later": it uses the codec through `InternalsVisibleTo` (6.1), and internals may change
   between any two versions. `CHANGELOG.md` says what changed in each release.
@@ -1513,9 +1534,12 @@ Each step ends with every test green.
 - The memory target is judged on MqttWire's own state for a connection, not on what Kestrel's
   pool keeps after a burst (2026-11-23, on the benchmark's first seven runs; confirmed the same
   day on all ten, with the traffic floor and the corrected unit tests; 6.14).
-- The preview `0.1.0-preview.1` is published on nuget.org, with a git tag `v0.1.0-preview.1`
-  and a GitHub pre-release once the step is merged; step 4 has no plan of its own, its issue
-  is the plan (2026-11-23, the open questions of mo-esmp/mqttwire#7).
+- The preview goes to nuget.org, with a git tag and a GitHub pre-release once the step is
+  merged; step 4 has no plan of its own, its issue is the plan (2026-11-23, the open questions
+  of mo-esmp/mqttwire#7). `0.1.0-preview.1` was tagged `v0.1.0-preview.1` with a GitHub
+  pre-release and never published. `0.1.0-preview.2` (mo-esmp/mqttwire#30, 2026-11-26) is the
+  first on nuget.org: CI's `publish` job pushes both packages through Trusted Publishing on a
+  `v*` tag that matches `<Version>`, once the build and the interop pass.
 
 ## 10. Proposed by Claude (owner to check)
 
@@ -1682,7 +1706,10 @@ Decided while the preview package was made in step 4 (2026-11-23), not yet seen 
     `MqttWireClient.IsConnected`, and `MqttConnectAck.Exception`, the network error behind a
     connect that could not reach the server. Section 8 asks that the public API be what 6.2
     and 6.3 describe and nothing more; these two are small and of use to a caller, and are left
-    for the owner to keep or remove before 1.0.
+    for the owner to keep or remove before 1.0. On 2026-11-27 6.3 gained a table of the client's
+    types, which names `MqttConnectAck.Exception`, `MqttClientCloseInfo` and
+    `MqttClientCloseReason`; `IsConnected` is still named only here. Both members shipped in
+    `0.1.0-preview.2`, so removing either is a breaking change, listed in `CHANGELOG.md`.
 
 ## 11. Left to the builder
 
@@ -1741,5 +1768,6 @@ The preview package (step 4) was checked on 2026-11-23 from outside the reposito
 packages were packed into an empty folder, and a project with a package cache of its own
 restored them from that folder alone. The three code blocks of the README compiled against
 them as they are, and the `GroupChat` sample, with its project references turned into package
-references, built and ran: two browser tabs exchanged messages. Not checked: a restore from
-nuget.org itself, which exists only once the packages are published.
+references, built and ran: two browser tabs exchanged messages. `0.1.0-preview.2` is on nuget.org since
+2026-11-26; on 2026-11-27 a new web project with nuget.org as its only source and a package
+folder of its own restored both packages from it and built.

@@ -8,8 +8,8 @@ where a message goes. [The design](docs/specs/2026-11-19-mqttwire-design.md) is 
 
 | Path | What it holds |
 |---|---|
-| `src/MqttWire` | Package `MqttWire`: the client, the reconnecting client, the internal codec (`Codec/`) and the link (`Link/`). No dependencies; runs in Blazor WebAssembly. |
-| `src/MqttWire.Server` | Package `MqttWire.Server`: the connection server for ASP.NET Core. Uses `MqttWire`'s internals and depends on exactly its own version of it. |
+| `src/MqttWire` | Package `MqttWire`: the client, the reconnecting client, the client's internals (`Client/`: the send queue, the waiting answers, the limits), the internal codec (`Codec/`) and the link (`Link/`). No dependencies; runs in Blazor WebAssembly. |
+| `src/MqttWire.Server` | Package `MqttWire.Server`: the connection server for ASP.NET Core. Uses `MqttWire`'s internals and depends on exactly its own version of it. Its internals are in `Internal/`. |
 | `tests/MqttWire.Tests` | Unit tests over the in-memory link. No network. |
 | `tests/MqttWire.Interop.Tests` | Loopback tests against MQTTnet, and of the server's WebSocket endpoint. |
 | `tests/interop-js`, `tests/MqttWire.TestHost` | The MQTT.js interop and the host it runs against. |
@@ -18,6 +18,9 @@ where a message goes. [The design](docs/specs/2026-11-19-mqttwire-design.md) is 
 | `bench/MqttWire.Probe` | The interleaved before/after probe; its `Program.cs` remarks give the build commands. |
 | `samples/GroupChat` | Shared topics through the host, with a Blazor WebAssembly client. |
 | `docs/specs`, `docs/plans`, `docs/bench` | Designs and their reviews, implementation plans, measurement reports. |
+| `docs/mqtt-support.md`, `docs/roadmap.md` | The part of MQTT 5 that is implemented, with its limits and deadlines; the releases and the order of work. |
+| `assets` | The package icon (`icon.svg`, and the `icon.png` packed into both packages). |
+| `.github` | CI (`workflows/ci.yml`, with the `publish` job on `v*` tags), Dependabot and the issue templates. |
 
 Large types are partial classes split by concern: `MqttWireClient.ReadLoop.cs`,
 `MqttWireConnection.Close.cs` and so on. Put new code in the part it belongs to.
@@ -28,6 +31,8 @@ Large types are partial classes split by concern: `MqttWireClient.ReadLoop.cs`,
 dotnet build -c Release
 dotnet test -c Release
 dotnet test tests/MqttWire.Tests -c Release --filter "FullyQualifiedName~WebSocketLinkTests"
+dotnet pack src/MqttWire -c Release -o artifacts/packages
+dotnet pack src/MqttWire.Server -c Release -o artifacts/packages
 ```
 
 The build treats warnings as errors and enforces code style (`EnforceCodeStyleInBuild`), with the
