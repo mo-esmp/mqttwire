@@ -9,8 +9,9 @@ MqttWire speaks **MQTT 5.0 over WebSockets only**: binary messages, WebSocket su
 `mqtt`. A request to the server's endpoint that does not ask for that sub-protocol is answered
 with HTTP 400, and a text message closes the WebSocket with status 1003. The client does the
 same from its side: a server that does not answer with the sub-protocol `mqtt` is closed with
-status 1002 and the connect fails, and a text message closes the WebSocket with status 1003,
-after which the client writes nothing more.
+status 1002 and the connect fails, and a text message closes the WebSocket with status 1003. A
+write that begins after that close has started is dropped; a write that had already begun may
+still complete, and then follows the close frame.
 
 **MQTT packets and WebSocket messages are not the same thing.** Both sides read the incoming
 messages as one stream of bytes: a packet may span messages, and a message may hold several
