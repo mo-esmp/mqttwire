@@ -42,8 +42,10 @@ jobs:
             11.0.x
       - run: dotnet restore
       - run: dotnet build --no-restore -c Release
-      # Both test projects, each on both targets: the allocation tests must hold on each runtime.
-      - run: dotnet test --no-build -c Release --logger "trx;LogFileName=test-results.trx"
+      # Both test projects, each on both targets: the allocation tests must hold on each runtime. LogFilePrefix, not
+      # LogFileName: with one fixed name the two targets of a project write the same file, and the one that finishes
+      # last overwrites the other's results. With a prefix, each file's name carries its target framework.
+      - run: dotnet test --no-build -c Release --logger "trx;LogFilePrefix=test-results"
       # Packs both packages, each with a build for each target, which also checks that MqttWire.Server depends on
       # exactly its own version of MqttWire for every target.
       - run: dotnet pack src/MqttWire --no-build -c Release -o artifacts/packages

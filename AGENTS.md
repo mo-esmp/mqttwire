@@ -101,7 +101,7 @@ Follow `.editorconfig`; these supplement it:
 ## Benchmarks
 
 * Before and after are measured on the same machine in the same session; the probe interleaves them, and BenchmarkDotNet runs are minutes apart on a drifting VM.
-* To compare with an older client, build it from a worktree under the assembly name `MqttWire.Before` and reference it under the extern alias `before`. Put the `using` aliases inside the file-scoped namespace: outside it, `MqttWireClient` resolves to the current client in the enclosing `MqttWire` namespace. Check that the built before contestant really holds `MqttWire.Before` types.
+* To compare with an older client, build it under the assembly name `MqttWire.Before` in a worktree, with the command run from inside that worktree, and reference it under the extern alias `before`. The SDK is chosen by the `global.json` above the folder the command runs in: built from here, the older client gets this repository's SDK and compiler, not its own. Record `dotnet --version` for each build. Put the `using` aliases inside the file-scoped namespace: outside it, `MqttWireClient` resolves to the current client in the enclosing `MqttWire` namespace. Check that the built before contestant really holds `MqttWire.Before` types.
 * A report in `docs/bench/YYYY-MM-topic.md` names the commits measured, the machine, the method and the run counts, and keeps every number it relies on.
 
 ## Build, CI & Docs

@@ -110,7 +110,9 @@ so and ends. This goes when a BenchmarkDotNet that knows `net11.0` is taken.
   an idle WebSocket connection, beneath MqttWire.
 - The .NET 11 SDK's compiler now builds the `net10.0` assemblies too, and emits slightly
   different IL for 12 methods of `MqttWire` and 4 of `MqttWire.Server`. The report measures the
-  `net10.0` build before and after: nothing is slower, and nothing allocates more.
+  `net10.0` build before and after: nothing allocates more, no microbenchmark is slower, and
+  end to end the round trips are unchanged; the bursts are not resolved more finely than about
+  8%.
 
 ## 7. Not in this change
 

@@ -48,8 +48,10 @@
     with the version the manifest itself states, not with $(PackageVersion); the manifest keeps build metadata in
     its own version and a dependency never has any, so the metadata is left out of the comparison.
 
-    The package has a dependency group for each target framework, and the dependency is pinned in each of them: a
-    group without it, or with another version, fails the pack as well.
+    The package has a dependency group for each target framework, and the dependency must be pinned in each. What
+    is expected comes from the project, not from the manifest: the groups must be exactly the project's target
+    frameworks, so that a manifest that has lost a whole group fails the pack, and CheckMqttWireIsPinnedInEachGroup
+    then looks into the group of each target framework for exactly one MqttWire dependency, at the exact version.
   -->
   <Target Name="CheckMqttWireIsPinned" AfterTargets="GenerateNuspec">
     <ItemGroup>
@@ -64,16 +66,40 @@
     <XmlPeek XmlInputPath="@(_PackedManifest)" Query="//*[local-name()='dependencies']/*[local-name()='group']/@targetFramework">
       <Output TaskParameter="Result" ItemName="_PackedDependencyGroup" />
     </XmlPeek>
-    <XmlPeek XmlInputPath="@(_PackedManifest)" Query="//*[local-name()='dependency'][@id='MqttWire']/@version">
-      <Output TaskParameter="Result" ItemName="_PackedMqttWireVersion" />
-    </XmlPeek>
     <PropertyGroup>
       <_PackedVersionWithoutMetadata>$(_PackedVersion.Split('+')[0])</_PackedVersionWithoutMetadata>
     </PropertyGroup>
-    <Error Condition="'$(_PackedVersionWithoutMetadata)' == '' Or '@(_PackedMqttWireVersion->Count())' == '0' Or '@(_PackedMqttWireVersion->Count())' != '@(_PackedDependencyGroup->Count())'"
-           Text="MqttWire.Server must depend on exactly its own version of MqttWire, '[$(_PackedVersionWithoutMetadata)]', for every target, but its packed manifest has the dependency groups '@(_PackedDependencyGroup)' and the MqttWire dependencies '@(_PackedMqttWireVersion)'. See the target PinMqttWireToThisVersion." />
-    <Error Condition="'%(_PackedMqttWireVersion.Identity)' != '[$(_PackedVersionWithoutMetadata)]'"
-           Text="MqttWire.Server must depend on exactly its own version of MqttWire, '[$(_PackedVersionWithoutMetadata)]', but its packed manifest says '%(_PackedMqttWireVersion.Identity)'. See the target PinMqttWireToThisVersion." />
+    <ItemGroup>
+      <_ExpectedDependencyGroup Include="$(TargetFrameworks)" />
+      <_ExpectedDependencyGroup Include="$(TargetFramework)" Condition="'$(TargetFrameworks)' == ''" />
+      <_MissingDependencyGroup Include="@(_ExpectedDependencyGroup)" Exclude="@(_PackedDependencyGroup)" />
+      <_UnexpectedDependencyGroup Include="@(_PackedDependencyGroup)" Exclude="@(_ExpectedDependencyGroup)" />
+    </ItemGroup>
+    <Error Condition="'$(_PackedVersionWithoutMetadata)' == ''"
+           Text="The check that MqttWire.Server depends on exactly its own version of MqttWire found no version in the packed manifest '@(_PackedManifest)'. See the target CheckMqttWireIsPinned." />
+    <Error Condition="'@(_ExpectedDependencyGroup)' == '' Or '@(_MissingDependencyGroup)' != '' Or '@(_UnexpectedDependencyGroup)' != ''"
+           Text="MqttWire.Server must have one dependency group for each of its target frameworks, '@(_ExpectedDependencyGroup)', but its packed manifest has the groups '@(_PackedDependencyGroup)': missing '@(_MissingDependencyGroup)', not expected '@(_UnexpectedDependencyGroup)'. See the target CheckMqttWireIsPinned." />
+  </Target>
+
+  <!-- Runs once for each target framework, after the check above has found the manifest and its version. -->
+  <Target Name="CheckMqttWireIsPinnedInEachGroup" AfterTargets="CheckMqttWireIsPinned" Outputs="%(_ExpectedDependencyGroup.Identity)">
+    <PropertyGroup>
+      <_CheckedDependencyGroup>%(_ExpectedDependencyGroup.Identity)</_CheckedDependencyGroup>
+    </PropertyGroup>
+    <ItemGroup>
+      <_PackedGroupOfTarget Remove="@(_PackedGroupOfTarget)" />
+      <_PackedMqttWireVersion Remove="@(_PackedMqttWireVersion)" />
+    </ItemGroup>
+    <XmlPeek XmlInputPath="@(_PackedManifest)" Query="//*[local-name()='dependencies']/*[local-name()='group'][@targetFramework='$(_CheckedDependencyGroup)']/@targetFramework">
+      <Output TaskParameter="Result" ItemName="_PackedGroupOfTarget" />
+    </XmlPeek>
+    <XmlPeek XmlInputPath="@(_PackedManifest)" Query="//*[local-name()='dependencies']/*[local-name()='group'][@targetFramework='$(_CheckedDependencyGroup)']/*[local-name()='dependency'][@id='MqttWire']/@version">
+      <Output TaskParameter="Result" ItemName="_PackedMqttWireVersion" />
+    </XmlPeek>
+    <Error Condition="'@(_PackedGroupOfTarget->Count())' != '1'"
+           Text="MqttWire.Server must have exactly one dependency group for '$(_CheckedDependencyGroup)', but its packed manifest has @(_PackedGroupOfTarget->Count()). See the target CheckMqttWireIsPinned." />
+    <Error Condition="'@(_PackedMqttWireVersion->Count())' != '1' Or '@(_PackedMqttWireVersion)' != '[$(_PackedVersionWithoutMetadata)]'"
+           Text="MqttWire.Server must depend on exactly its own version of MqttWire, '[$(_PackedVersionWithoutMetadata)]', once in the dependency group of '$(_CheckedDependencyGroup)', but its packed manifest says '@(_PackedMqttWireVersion)' there. See the target PinMqttWireToThisVersion." />
   </Target>
 
   <ItemGroup>
