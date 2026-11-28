@@ -1,7 +1,7 @@
 # Agent Guidelines
 
-MqttWire is a lean MQTT 5 connection server and client for .NET 10 (C# 14), over WebSockets. It is
-a connection server, not a broker: the host decides who connects, what a subscription means and
+MqttWire is a lean MQTT 5 connection server and client for .NET 10 and .NET 11 (C# 14), over
+WebSockets. It is a connection server, not a broker: the host decides who connects, what a subscription means and
 where a message goes. [The design](docs/specs/2026-11-19-mqttwire-design.md) is the authority.
 
 ## Map
@@ -30,14 +30,19 @@ Large types are partial classes split by concern: `MqttWireClient.ReadLoop.cs`,
 ```
 dotnet build -c Release
 dotnet test -c Release
-dotnet test tests/MqttWire.Tests -c Release --filter "FullyQualifiedName~WebSocketLinkTests"
+dotnet test tests/MqttWire.Tests -c Release -f net11.0 --filter "FullyQualifiedName~WebSocketLinkTests"
 dotnet pack src/MqttWire -c Release -o artifacts/packages
 dotnet pack src/MqttWire.Server -c Release -o artifacts/packages
 ```
 
+Every project builds for `net10.0` and `net11.0` with the .NET 11 SDK (`global.json`), and
+`dotnet test` runs each test project on both runtimes; `-f` narrows a build or a test run to
+one. `dotnet run` needs `-f`, since it does not choose between two targets.
+
 The build treats warnings as errors and enforces code style (`EnforceCodeStyleInBuild`), with the
 Meziantou, Sonar, Roslynator and xUnit analyzers, so a style slip fails the build. For the MQTT.js
-interop, build `tests/MqttWire.TestHost`, then run `npm ci` and `npm test` in `tests/interop-js`.
+interop, build `tests/MqttWire.TestHost`, then run `npm ci` and `npm test` in `tests/interop-js`;
+`MQTTWIRE_TEST_FRAMEWORK=net10.0` runs it against the host on .NET 10 instead of .NET 11.
 
 ## Design
 
@@ -48,6 +53,7 @@ interop, build `tests/MqttWire.TestHost`, then run `npm ci` and `npm test` in `t
 * No new package dependency in `MqttWire` or `MqttWire.Server` without the owner's approval; versions are pinned centrally in `Directory.Packages.props`.
 * **The client and the server share `src/MqttWire/Link` and `src/MqttWire/Codec`.** A change made for one side changes the other: say in the design which side it is for, keep the other side's behaviour unless the design changes it, and run the interop tests.
 * An internal change can break `MqttWire.Server`, so both packages always ship together at one version.
+* **Both packages build for `net10.0` and `net11.0` from one source, in C# 14.** A code path for one target only (`#if NET11_0_OR_GREATER`) is a design decision: say so in the design, measure it before and after on both runtimes, and keep both paths tested. Runtime-async stays off: it does not work in Blazor WebAssembly ([the design](docs/specs/2026-11-27-net11-target-design.md)).
 
 ## Hot Paths
 
@@ -56,7 +62,8 @@ The codec, framing, the link and the read/write loops:
 * Allocate nothing: no LINQ, closures, boxing, string concatenation, `params` arrays or `ToArray()`.
 * `Span<T>`/`ReadOnlySpan<T>`, `stackalloc` for small fixed buffers, `ArrayPool<byte>` for large ones. Allocation tests (`*AllocationTests`) enforce this.
 * An async method that often suspends uses `PoolingAsyncValueTaskMethodBuilder`, and one that usually completes at once returns the inner `ValueTask` without a state machine.
-* A performance claim needs a BenchmarkDotNet run with `[MemoryDiagnoser]`, before and after.
+* A performance claim needs a BenchmarkDotNet run with `[MemoryDiagnoser]`, before and after. `--both-runtimes` runs the chosen benchmarks on .NET 10 and .NET 11 in one run (`dotnet run -c Release -f net10.0 --project bench/MqttWire.Microbench -- --both-runtimes --filter ...`); BenchmarkDotNet 0.15.8 cannot be started on .NET 11 itself.
+* A difference of a few nanoseconds between two runtimes, two builds or two sets of benchmarks in one run can be the layout of the benchmark process: repeat it with another `--filter` before believing it ([an example](docs/bench/2026-11-net11.md)).
 
 ## Errors
 
@@ -94,13 +101,13 @@ Follow `.editorconfig`; these supplement it:
 ## Benchmarks
 
 * Before and after are measured on the same machine in the same session; the probe interleaves them, and BenchmarkDotNet runs are minutes apart on a drifting VM.
-* To compare with an older client, build it from a worktree under the assembly name `MqttWire.Before` and reference it under the extern alias `before`. Put the `using` aliases inside the file-scoped namespace: outside it, `MqttWireClient` resolves to the current client in the enclosing `MqttWire` namespace. Check that the built before contestant really holds `MqttWire.Before` types.
+* To compare with an older client, build it under the assembly name `MqttWire.Before` in a worktree, with the command run from inside that worktree, and reference it under the extern alias `before`. The SDK is chosen by the `global.json` above the folder the command runs in: built from here, the older client gets this repository's SDK and compiler, not its own. Record `dotnet --version` for each build. Put the `using` aliases inside the file-scoped namespace: outside it, `MqttWireClient` resolves to the current client in the enclosing `MqttWire` namespace. Check that the built before contestant really holds `MqttWire.Before` types.
 * A report in `docs/bench/YYYY-MM-topic.md` names the commits measured, the machine, the method and the run counts, and keeps every number it relies on.
 
 ## Build, CI & Docs
 
 * Before every commit: `dotnet build -c Release` with 0 warnings, and `dotnet test` green.
-* CI runs on Linux (`.github/workflows/ci.yml`): the build, both test projects, both packs and the MQTT.js interop, and on a `v*` tag the publish to nuget.org. A green run on Windows is not enough, since socket timing differs; check CI after every push.
+* CI runs on Linux (`.github/workflows/ci.yml`): the build, both test projects, both packs and the MQTT.js interop, each for `net10.0` and `net11.0`, and on a `v*` tag the publish to nuget.org. A green run on Windows is not enough, since socket timing differs; check CI after every push.
 * `docs/specs` is the authority. Code that has to diverge from a spec updates the spec in the same pull request. A change to an approved design is written as a dated amendment design that names the section it amends.
 * Keep these in step with the code in the same pull request:
   * `CHANGELOG.md`: an entry under `## Unreleased`, by package, for every change a user can see.

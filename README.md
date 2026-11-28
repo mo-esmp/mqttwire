@@ -25,8 +25,9 @@ dotnet add package MqttWire --prerelease
 
 `MqttWire.Server` needs ASP.NET Core, so it cannot be added to a Blazor WebAssembly project.
 
-Both need .NET 10. Keep the two on the same version: `MqttWire.Server` works only with the
-`MqttWire` of its own version, and says so in its dependency. This is a preview: the public API may still change until 1.0.
+Both need .NET 10 or .NET 11, and each package carries a build for each. Keep the two on the
+same version: `MqttWire.Server` works only with the `MqttWire` of its own version, and says so
+in its dependency. This is a preview: the public API may still change until 1.0.
 [What changed](https://github.com/mo-esmp/mqttwire/blob/main/CHANGELOG.md) is in the changelog, and
 [the part of MQTT 5 that is implemented](https://github.com/mo-esmp/mqttwire/blob/main/docs/mqtt-support.md) is written down
 packet by packet and property by property.
@@ -179,10 +180,11 @@ topic: one copy of a payload goes to every member, each at no higher QoS than it
 and a member that stops reading is disconnected without delaying the others.
 
 ```
-dotnet run --project samples/GroupChat/GroupChat.Server
+dotnet run --project samples/GroupChat/GroupChat.Server -f net11.0
 ```
 
-Then open <http://localhost:5210> in two browser tabs. The sample is in the repository, not in
+Then open <http://localhost:5210> in two browser tabs. The sample builds for .NET 10 as well
+(`-f net10.0`). The sample is in the repository, not in
 the packages.
 
 ## Client

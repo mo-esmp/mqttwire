@@ -18,7 +18,8 @@ updates:
       # its pull request (design 6.15).
       mqttnet:
         patterns: ["MQTTnet*"]
-    # The repository builds for .NET 10 only; moving to a new major of these is moving to a new .NET.
+    # The repository builds for .NET 10 and .NET 11, and these have a version for each in Directory.Packages.props.
+    # Each stays on its own major: a new major is a new .NET, which is a target to add, not an update.
     ignore:
       - dependency-name: Microsoft.AspNetCore.*
         update-types: ["version-update:semver-major"]

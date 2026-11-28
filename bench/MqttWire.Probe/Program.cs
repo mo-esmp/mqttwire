@@ -18,20 +18,47 @@ namespace MqttWire.Probe;
 /// <remarks>
 /// <para>
 /// Without an older build the probe compares the branch's client with MQTTnet only, and the solution builds it with
-/// nothing extra. To add <c>before</c>, build the older client under another assembly name from a worktree, and build
-/// the probe with the path to it, from the repository root (PowerShell or a POSIX shell):
+/// nothing extra. To add <c>before</c>, build the older client under another assembly name in a worktree of its own,
+/// and build the probe with the path to it. From the repository root (PowerShell or a POSIX shell), with an absolute
+/// path for <c>&lt;out&gt;</c>, a folder outside both checkouts:
 /// </para>
 /// <code>
 /// git worktree add ../mqttwire-before &lt;commit&gt;
-/// dotnet build -c Release ../mqttwire-before/src/MqttWire/MqttWire.csproj -p:AssemblyName=MqttWire.Before -o ../mqttwire-before-bin
-/// dotnet build -c Release bench/MqttWire.Probe/MqttWire.Probe.csproj -p:BeforeAssembly=../../../mqttwire-before-bin/MqttWire.Before.dll
-/// dotnet bench/MqttWire.Probe/bin/Release/net10.0/MqttWire.Probe.dll
+/// cd ../mqttwire-before
+/// dotnet --version
+/// dotnet build -c Release src/MqttWire/MqttWire.csproj -p:AssemblyName=MqttWire.Before -o &lt;out&gt;
+/// cd ../mqttwire
+/// dotnet --version
+/// dotnet build -c Release --no-incremental bench/MqttWire.Probe/MqttWire.Probe.csproj -p:BeforeAssembly=&lt;out&gt;/MqttWire.Before.dll
+/// dotnet bench/MqttWire.Probe/bin/Release/net11.0/MqttWire.Probe.dll
 /// git worktree remove ../mqttwire-before
 /// </code>
 /// <para>
-/// <c>BeforeAssembly</c> is resolved from the probe's project folder, so an absolute path is the safer choice. The
-/// probe built with it references the older assembly under the extern alias <c>before</c> and compiles the
-/// <c>before</c> contestant (the <c>BEFORE</c> constant). Building the probe again
+/// <b>The older client is built from inside its worktree, not from here.</b> The .NET SDK is chosen by the
+/// <c>global.json</c> above the folder a command runs in, not by the one beside the project: <c>dotnet build
+/// ../mqttwire-before/src/...</c> from this repository builds the older client with this repository's SDK, and so with
+/// its compiler. Since mo-esmp/mqttwire#47 that is the .NET 11 SDK, while a commit from before it asks for the .NET 10
+/// SDK, and the two compilers do not emit the same IL for every method (<c>docs/bench/2026-11-net11.md</c>, section
+/// 6). Built from inside its worktree, the older client is the assembly its own commit made. The two
+/// <c>dotnet --version</c> lines print the SDK each build takes; keep them with the results. The output path is
+/// absolute because the two builds run in different folders, and <c>BeforeAssembly</c> is otherwise resolved from the
+/// probe's project folder.
+/// </para>
+/// <para>
+/// The probe is built for <c>net10.0</c> and <c>net11.0</c>, and the folder in the command that runs it chooses the
+/// runtime it measures on. An older client from before the two targets builds for <c>net10.0</c> only, and runs on
+/// either; one from after them needs <c>-f net10.0</c> or <c>-f net11.0</c> in its build, since <c>-o</c> takes one
+/// target's output. To compare the two runtimes, run the two builds of the probe in turns.
+/// </para>
+/// <para>
+/// <c>--no-incremental</c> in the probe's build matters when the probe was built without <c>before</c> earlier: an
+/// incremental build then keeps the old <c>MqttWire.Probe.deps.json</c>, which does not list the older assembly, and
+/// the probe ends with a <see cref="FileNotFoundException"/> for <c>MqttWire.Before</c>. The same holds for
+/// building it without <c>before</c> again.
+/// </para>
+/// <para>
+/// The probe built with <c>BeforeAssembly</c> references the older assembly under the extern alias <c>before</c> and
+/// compiles the <c>before</c> contestant (the <c>BEFORE</c> constant). Building the probe again
 /// without the property drops <c>before</c> again. Commit 9aea873 is the client before the answer batching, the
 /// "before" of <c>docs/bench/2026-11-qos1-latency.md</c>; commit de7af74 is the "before" of the measurements of the
 /// send lock (issue 13).

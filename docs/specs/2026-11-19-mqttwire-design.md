@@ -6,7 +6,8 @@ Updated on 2026-11-22 to the server as built in step 3 (mo-esmp/mqttwire#6).
 Updated on 2026-11-23 to the rest of step 3: MQTT.js, the sample and the benchmark.
 Updated on 2026-11-23 to step 4, the preview package (mo-esmp/mqttwire#7).
 Amended by [the client writes its answers when it runs out of input](2026-11-24-client-acknowledgement-batching-design.md)
-(6.9) and [the client's send path](2026-11-25-client-send-path-design.md) (6.5, 6.9).
+(6.9), [the client's send path](2026-11-25-client-send-path-design.md) (6.5, 6.9) and
+[two target frameworks](2026-11-27-net11-target-design.md) (4; 10, item 12).
 Updated on 2026-11-27 to the client's public API as built and to the release of `0.1.0-preview.2`.
 Moved to the `mqttwire` repository on 2026-11-20.
 Companion: [GrainWire on MqttWire](2026-11-19-grainwire-on-mqttwire-design.md), the first host.
@@ -86,7 +87,9 @@ Anti-goals (failures even if it technically works):
 
 ## 4. Constraints
 
-- .NET 10, C# 14, warnings are errors, MIT licence: the same conventions as GrainWire.
+- .NET 10, C# 14, warnings are errors, MIT licence: the same conventions as GrainWire. Since
+  mo-esmp/mqttwire#47, .NET 11 as well, still in C# 14
+  ([two target frameworks](2026-11-27-net11-target-design.md)).
 - The server sits on **ASP.NET Core's WebSocket** (`HttpContext.WebSockets`). No use of the
   ASP.NET Core "Connections" layer.
 - The client sits on `System.Net.WebSockets.ClientWebSocket` and **must work in Blazor
@@ -1564,7 +1567,8 @@ Each step ends with every test green.
 9. A handler that throws closes the connection with `0x83`.
 10. On unsubscribe, deliveries MqttWire has already taken are still delivered (6.6).
 11. The target "floor + 1 KB" for MqttWire alone (6.14); kept by the owner on 2026-11-20.
-12. Target framework `net10.0` only, for now.
+12. Target framework `net10.0` only, for now. Amended on 2026-11-27: `net10.0` and `net11.0`
+    ([two target frameworks](2026-11-27-net11-target-design.md)).
 13. The repository layout of 6.1, with a `GroupChat` sample.
 14. For the reconnecting client (6.3): it lives in the `MqttWire` package beside the client; it
     remembers subscriptions and makes them again; it has no offline queue and repeats no

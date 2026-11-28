@@ -228,11 +228,15 @@ idle against 11,339), so little can be missing.
 ## 7. Running it
 
 ```
-dotnet run -c Release --project bench/MqttWire.Bench -- run
-dotnet run -c Release --project bench/MqttWire.Bench -- run --tls
-dotnet run -c Release --project bench/MqttWire.Bench -- run --small 300 --large 1200
-dotnet run -c Release --project bench/MqttWire.Bench -- run --dumps <an absolute folder>
+dotnet run -c Release -f net10.0 --project bench/MqttWire.Bench -- run
+dotnet run -c Release -f net10.0 --project bench/MqttWire.Bench -- run --tls
+dotnet run -c Release -f net10.0 --project bench/MqttWire.Bench -- run --small 300 --large 1200
+dotnet run -c Release -f net10.0 --project bench/MqttWire.Bench -- run --dumps <an absolute folder>
 ```
+
+Since mo-esmp/mqttwire#47 the benchmark builds for .NET 10 and .NET 11, and `-f` chooses the
+runtime of both of its processes. The numbers of this report are from .NET 10; the same run on
+.NET 11 is in [.NET 11 against .NET 10](2026-11-net11.md).
 
 A full run takes about two minutes and prints its table as Markdown. Run it with nothing else
 at work on the machine. Counts below about 1,024 say little about states 2 and 3: the server's
